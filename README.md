@@ -11,7 +11,7 @@
 | **Dépôt** | https://github.com/mike37510/WharfMaster |
 
 <p align="center">
-  <img src="public/img/wharfmaster-logo.png" alt="WharfMaster" width="420">
+  <img src="public/img/wharfmaster-logo.jpg" alt="WharfMaster" width="420">
 </p>
 
 ## Captures d’écran
