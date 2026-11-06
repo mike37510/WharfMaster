@@ -1,30 +1,21 @@
-Copyright (c) 2026 mike37510 (WharfMaster)
+MIT License
 
-Tous droits réservés / All rights reserved.
+Copyright (c) 2026 mike37510
 
-PROPRIETARY SOFTWARE — LICENCE D’USAGE RESTREINTE
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Ce logiciel (« WharfMaster ») et l’ensemble de son code source, de sa
-documentation et de ses assets associés sont la propriété exclusive de
-l’auteur.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-AUCUNE LICENCE D’USAGE N’EST ACCORDÉE AU PUBLIC.
-
-Sans autorisation écrite préalable et explicite de l’auteur, il est
-interdit de :
-
-  - utiliser ce logiciel, en tout ou en partie ;
-  - le copier, le modifier, le fusionner, le publier ou le redistribuer ;
-  - le déployer, l’héberger ou le faire fonctionner pour quelque usage
-    que ce soit (personnel, commercial, éducatif ou autre) ;
-  - en créer des œuvres dérivées ;
-  - le sous-licencier ou le vendre.
-
-La simple présence de ce dépôt sur GitHub ne constitue pas une
-autorisation d’utilisation.
-
-Pour toute demande d’autorisation, contactez l’auteur via GitHub :
-https://github.com/mike37510
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
-LE LOGICIEL EST FOURNI « EN L’ÉTAT », SANS AUCUNE GARANTIE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

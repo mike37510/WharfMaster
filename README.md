@@ -231,8 +231,4 @@ Le dossier `data/` (runtime) est **ignoré par git** (secrets, base, compose dé
 
 ## Licence
 
-**Tous droits réservés.** Voir [`LICENSE`](LICENSE).
-
-WharfMaster est un logiciel **propriétaire**. La publication du code sur GitHub
-**n’autorise personne** à l’utiliser, le copier, le modifier ou le redistribuer
-sans **autorisation écrite** de l’auteur ([mike37510](https://github.com/mike37510)).
+**MIT** — libre d’utilisation, modification et redistribution. Voir [`LICENSE`](LICENSE).
