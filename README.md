@@ -10,6 +10,32 @@
 | **API** | `/api` |
 | **Dépôt** | https://github.com/mike37510/WharfMaster |
 
+<p align="center">
+  <img src="public/img/wharfmaster-logo.png" alt="WharfMaster" width="420">
+</p>
+
+## Captures d’écran
+
+### Tableau de bord
+
+![Tableau de bord WharfMaster](public/site/shots/dashboard.png)
+
+### Conteneurs
+
+![Liste des conteneurs](public/site/shots/containers.png)
+
+### Explorateur de volumes
+
+![Explorateur de volumes](public/site/shots/volume-browse.png)
+
+### Images
+
+![Images Docker](public/site/shots/images.png)
+
+### Connexion
+
+![Écran de connexion](public/site/shots/login.png)
+
 ---
 
 ## Fonctionnalités
