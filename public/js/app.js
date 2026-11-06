@@ -3752,7 +3752,8 @@ CMD ["sh"]
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
           <p class="muted">Socket : <code>unix:///var/run/docker.so</code></p>
-          <p class="muted" style="margin-bottom:0"><a href="/" target="_blank" rel="noopener">Site public</a> — présentation du projet et des outils.</p>
+          <p class="muted"><a href="/" target="_blank" rel="noopener">Site public</a> — présentation du projet et des outils.</p>
+          <p class="muted" style="margin-bottom:0">Licence : <strong>tous droits réservés</strong> — usage non autorisé sans accord écrit de l’auteur. Voir <code>LICENSE</code>.</p>
         </div>`, { subtitle: 'Informations sur l’application' });
       }
       else await viewDashboard();
