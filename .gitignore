@@ -1,0 +1,41 @@
+# Runtime / secrets
+/data/
+*.sqlite
+*.sqlite3
+*.db
+jwt.secret
+*.secret
+.env
+.env.*
+!.env.example
+
+# Apache / local overrides
+.devbox-db.php
+*.local.php
+
+# Logs & caches
+*.log
+/tmp/
+rate_limit/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Dependencies / tooling
+/node_modules/
+/vendor/
+/tmp/dm-shots/
+composer.lock
+
+# Captured source assets (keep public/img published logos)
+image_*.jpg
+image_*.png
+
+# PHP / coverage
+.phpunit.result.cache
+coverage/

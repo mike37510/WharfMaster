@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WharfMaster — pilotez Docker en toute clarté</title>
+  <meta name="description" content="WharfMaster : interface web pour conteneurs, stacks Compose, volumes, registres et isolation multi-utilisateurs. Compatible API Portainer CE.">
+  <link rel="icon" href="/public/img/wharfmaster-mark.png" type="image/png">
+  <link rel="stylesheet" href="/public/site/site.css">
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+
+  <header class="top">
+    <a class="logo" href="/">
+      <img class="logo-img" src="/public/img/wharfmaster-logo.png" alt="WharfMaster" width="200" height="81" decoding="async">
+    </a>
+    <nav class="top-nav" aria-label="Navigation">
+      <a href="#fonctionnalites">Fonctionnalités</a>
+      <a href="#apercu">Aperçu</a>
+      <a href="#outils">Outils</a>
+      <a href="#api">API</a>
+    </nav>
+    <a class="btn btn-ghost" href="/app">Ouvrir l’app</a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="brand-mark">
+          <img class="hero-logo" src="/public/img/wharfmaster-logo.png" alt="WharfMaster" width="420" height="170" decoding="async" fetchpriority="high">
+        </p>
+        <h1>Votre Docker,<br>sous contrôle.</h1>
+        <p class="lede">Pilotez conteneurs, stacks Compose, volumes et registres depuis une interface claire — avec isolation multi-utilisateurs.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="/app">Accéder à la console</a>
+          <a class="btn btn-ghost" href="#apercu">Voir l’interface</a>
+        </div>
+      </div>
+      <div class="hero-visual">
+        <div class="hero-glow" aria-hidden="true"></div>
+        <div class="hero-frame">
+          <img
+            src="/public/site/shots/dashboard.png"
+            width="1440"
+            height="900"
+            alt="Tableau de bord WharfMaster — stats, conteneurs et ressources hôte"
+            decoding="async"
+            fetchpriority="high"
+          >
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="fonctionnalites">
+      <div class="band-inner">
+        <h2>Ce que vous gérez</h2>
+        <p class="section-lede">Une console unique pour le quotidien Docker — sans disperser les outils.</p>
+        <ul class="feature-list">
+          <li>
+            <strong>Conteneurs</strong>
+            <span>Création, logs, console, inspect — actions en un geste.</span>
+          </li>
+          <li>
+            <strong>Images &amp; build</strong>
+            <span>Pull Hub / local, Dockerfile intégré, tags et registres.</span>
+          </li>
+          <li>
+            <strong>Stacks Compose</strong>
+            <span>Éditeur YAML, variables d’environnement, déploiement fiable.</span>
+          </li>
+          <li>
+            <strong>Volumes &amp; réseaux</strong>
+            <span>Montages à la création, explorateur de fichiers sur volume.</span>
+          </li>
+          <li>
+            <strong>Multi-utilisateurs</strong>
+            <span>Chacun voit ses ressources ; l’admin garde la vue globale.</span>
+          </li>
+          <li>
+            <strong>Maintenance</strong>
+            <span>Prune des orphelins, tableau de bord et alertes moteur.</span>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="shots" id="apercu">
+      <div class="shots-inner">
+        <h2>Aperçu de la console</h2>
+        <p class="section-lede">Captures réelles de WharfMaster — tableau de bord, conteneurs et explorateur de volumes.</p>
+        <div class="shot-grid">
+          <figure class="shot-card">
+            <img
+              src="/public/site/shots/dashboard.png"
+              width="1440"
+              height="900"
+              alt="Tableau de bord avec statistiques et ressources"
+              loading="lazy"
+              decoding="async"
+            >
+            <figcaption>Tableau de bord — vue d’ensemble et ressources hôte</figcaption>
+          </figure>
+          <div class="shot-side">
+            <figure class="shot-card">
+              <img
+                src="/public/site/shots/containers.png"
+                width="1440"
+                height="900"
+                alt="Liste des conteneurs avec statut et actions"
+                loading="lazy"
+                decoding="async"
+              >
+              <figcaption>Conteneurs — logs, console, start / stop</figcaption>
+            </figure>
+            <figure class="shot-card">
+              <img
+                src="/public/site/shots/volume-browse.png"
+                width="1440"
+                height="900"
+                alt="Explorateur de fichiers d’un volume Docker"
+                loading="lazy"
+                decoding="async"
+              >
+              <figcaption>Volumes — explorateur de fichiers</figcaption>
+            </figure>
+          </div>
+        </div>
+        <div class="shot-grid" style="margin-top:16px;grid-template-columns:1fr 1fr">
+          <figure class="shot-card">
+            <img
+              src="/public/site/shots/images.png"
+              width="1440"
+              height="900"
+              alt="Liste des images Docker"
+              loading="lazy"
+              decoding="async"
+            >
+            <figcaption>Images — inventaire local</figcaption>
+          </figure>
+          <figure class="shot-card">
+            <img
+              src="/public/site/shots/login.png"
+              width="1440"
+              height="900"
+              alt="Écran de connexion WharfMaster"
+              loading="lazy"
+              decoding="async"
+            >
+            <figcaption>Connexion à la console</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="tools" id="outils">
+      <div class="tools-inner">
+        <h2>La boîte à outils</h2>
+        <p class="section-lede">Pensé pour les ops et les équipes qui livrent sur un Docker local ou un hôte dédié.</p>
+        <div class="tool-grid">
+          <article>
+            <h3>Recherche d’images</h3>
+            <p>Local d’abord, puis Docker Hub — sélection et tags, plus de saisie aveugle.</p>
+          </article>
+          <article>
+            <h3>Explorateur de volumes</h3>
+            <p>Parcourez, prévisualisez et téléchargez les fichiers d’un volume nommé.</p>
+          </article>
+          <article>
+            <h3>Registres privés</h3>
+            <p>Ajoutez un Registry V2 ou Hub, listez les dépôts et lancez un pull.</p>
+          </article>
+          <article>
+            <h3>Isolation native</h3>
+            <p>Labels propriétaire à la création : conteneurs, volumes, réseaux, stacks.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="api" id="api">
+      <div class="api-inner">
+        <h2>API familière</h2>
+        <p class="section-lede">Les endpoints suivent le contrat de l’API Portainer CE : réutilisez scripts, clients et automatisations déjà en place.</p>
+        <div class="api-panel">
+          <code>GET /api/status</code>
+          <code>POST /api/auth</code>
+          <code>/api/endpoints/1/docker/*</code>
+          <code>/api/stacks · /api/registries</code>
+        </div>
+        <p class="api-note">Version actuelle <strong>1.0.1</strong> — durcie pour la publication.</p>
+      </div>
+    </section>
+
+    <section class="close">
+      <h2>Prêt à prendre la main&nbsp;?</h2>
+      <p>Connectez-vous à la console et déployez en quelques minutes.</p>
+      <a class="btn btn-primary" href="/app">Ouvrir WharfMaster</a>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>WharfMaster v1.0.1</span>
+    <a href="/app">Console</a>
+  </footer>
+
+  <script src="/public/site/site.js" defer></script>
+</body>
+</html>
