@@ -176,9 +176,27 @@ export DOCKER_API_VERSION=v1.45
 
 ---
 
-## API (aperçu)
+## API compatible Portainer CE
 
-Compatible endpoints type Portainer CE :
+WharfMaster expose une **API alignée sur Portainer CE** (`/api`). L’intérêt : une application qui parlait déjà à Portainer peut basculer vers WharfMaster **sans être réécrite** — même protocole en entrée, Docker Engine derrière.
+
+<p align="center">
+  <img src="docs/api-portainer-adapter.png" alt="WharfMaster remplace Portainer : même API, Docker derrière, zéro recodage" width="520">
+</p>
+
+**En résumé**
+
+| | Avant | Avec WharfMaster |
+|---|---|---|
+| Ton app | parle API Portainer | **identique** (zéro recodage) |
+| Intermédiaire | Portainer | **WharfMaster** (adaptateur) |
+| Infra | Docker | **même Docker** |
+
+- **Entrée** : protocole / endpoints type Portainer CE  
+- **Sortie** : Docker Engine (socket / API)  
+- **Gain** : conserver clients, scripts et intégrations existants
+
+### Endpoints (aperçu)
 
 ```http
 GET  /api/status
@@ -200,6 +218,7 @@ Authentification : header `Authorization: Bearer <jwt>` (obtenu via `POST /api/a
 
 ```
 ├── api/                 Front controller API PHP
+├── docs/                Schémas / visuels (ex. API Portainer)
 ├── public/
 │   ├── index.html       SPA console (/app)
 │   ├── js/ css/         Interface
