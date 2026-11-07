@@ -6,15 +6,18 @@ namespace App;
 use App\Access\DockerScope;
 use App\Access\Ownership;
 use App\Auth\Jwt;
+use App\Docker\AgentComposeClient;
 use App\Docker\Client as DockerClient;
 use App\Docker\ImageBuilder;
 use App\Docker\VolumeBrowser;
 use App\Http\Request;
 use App\Http\Response;
 use App\Registry\Client as RegistryClient;
+use App\Security\AgentTls;
 use App\Security\ComposePolicy;
 use App\Security\PasswordPolicy;
 use App\Security\RateLimiter;
+use App\Security\SecretBox;
 use App\Stack\ComposeDeployer;
 use App\Storage\Database;
 use App\Storage\Repositories;
@@ -38,7 +41,7 @@ final class App
         $this->config = $config;
         $db = new Database($config['sqlite_path']);
         $db->migrate();
-        $this->repo = new Repositories($db->pdo());
+        $this->repo = new Repositories($db->pdo(), SecretBox::fromConfig($config));
         $this->jwt = new Jwt($config['jwt_secret'], (int) $config['jwt_ttl']);
         $this->docker = new DockerClient($config['docker_socket'], $config['docker_api_version']);
         $this->compose = new ComposeDeployer(
@@ -57,6 +60,7 @@ final class App
         $this->rateLimiter = new RateLimiter($rateDir, 8, 900);
         $this->repo->ensureLocalEndpoint($config['docker_socket']);
         $this->repo->ensureDefaultHubRegistry();
+        $this->repo->migrateRegistryPasswords();
     }
 
     public function handle(Request $request): Response
@@ -99,7 +103,12 @@ final class App
                 'Platform' => 'WharfMaster',
                 'ServerVersion' => $this->config['version'],
                 'DatabaseEdition' => $this->config['edition'],
+                'AgentImage' => $this->config['agent_image'] ?? null,
             ]);
+        }
+
+        if ($path === '/api/health' && $method === 'GET') {
+            return $this->healthCheck();
         }
 
         if ($path === '/api/users/admin/check' && $method === 'GET') {
@@ -142,6 +151,10 @@ final class App
 
         if ($path === '/api/settings' && $method === 'PUT') {
             return $this->updateSettings($request, $user);
+        }
+
+        if ($path === '/api/backup' && $method === 'GET') {
+            return $this->downloadBackup($user);
         }
 
         if ($path === '/api/users' && $method === 'GET') {
@@ -224,6 +237,29 @@ final class App
             return $this->containerExec((int) $m[1], $m[2], $request, $user);
         }
 
+        // Volume explorer (scoped to endpoint / remote agent)
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/browse$#', $path, $m) && $method === 'GET') {
+            return $this->browseVolume((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/file$#', $path, $m) && $method === 'GET') {
+            return $this->readVolumeFile((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/file$#', $path, $m) && $method === 'POST') {
+            return $this->writeVolumeFile((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/mkdir$#', $path, $m) && $method === 'POST') {
+            return $this->mkdirVolumePath((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/rename$#', $path, $m) && $method === 'POST') {
+            return $this->renameVolumePath((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/entry$#', $path, $m) && $method === 'DELETE') {
+            return $this->deleteVolumeEntry((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/download$#', $path, $m) && $method === 'GET') {
+            return $this->downloadVolumeFile((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
+
         if ($path === '/api/images/search' && $method === 'GET') {
             return $this->searchImages($request);
         }
@@ -259,26 +295,27 @@ final class App
             }
         }
 
+        // Legacy volume routes → nœud local (endpointId=1) unless ?endpointId=
         if (preg_match('#^/api/volumes/([^/]+)/browse$#', $path, $m) && $method === 'GET') {
-            return $this->browseVolume(rawurldecode($m[1]), $request, $user);
+            return $this->browseVolume($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
         if (preg_match('#^/api/volumes/([^/]+)/file$#', $path, $m) && $method === 'GET') {
-            return $this->readVolumeFile(rawurldecode($m[1]), $request, $user);
+            return $this->readVolumeFile($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
         if (preg_match('#^/api/volumes/([^/]+)/file$#', $path, $m) && $method === 'POST') {
-            return $this->writeVolumeFile(rawurldecode($m[1]), $request, $user);
+            return $this->writeVolumeFile($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
         if (preg_match('#^/api/volumes/([^/]+)/mkdir$#', $path, $m) && $method === 'POST') {
-            return $this->mkdirVolumePath(rawurldecode($m[1]), $request, $user);
+            return $this->mkdirVolumePath($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
         if (preg_match('#^/api/volumes/([^/]+)/rename$#', $path, $m) && $method === 'POST') {
-            return $this->renameVolumePath(rawurldecode($m[1]), $request, $user);
+            return $this->renameVolumePath($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
         if (preg_match('#^/api/volumes/([^/]+)/entry$#', $path, $m) && $method === 'DELETE') {
-            return $this->deleteVolumeEntry(rawurldecode($m[1]), $request, $user);
+            return $this->deleteVolumeEntry($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
         if (preg_match('#^/api/volumes/([^/]+)/download$#', $path, $m) && $method === 'GET') {
-            return $this->downloadVolumeFile(rawurldecode($m[1]), $request, $user);
+            return $this->downloadVolumeFile($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
 
         if ($path === '/api/registries' && $method === 'GET') {
@@ -345,6 +382,10 @@ final class App
 
         if (preg_match('#^/api/stacks/(\d+)/file$#', $path, $m) && $method === 'GET') {
             return $this->getStackFile((int) $m[1], $user);
+        }
+
+        if (preg_match('#^/api/stacks/(\d+)/(start|stop|restart)$#', $path, $m) && $method === 'POST') {
+            return $this->controlStack((int) $m[1], (string) $m[2], $request, $user);
         }
 
         if (preg_match('#^/api/stacks/(\d+)$#', $path, $m)) {
@@ -666,10 +707,15 @@ final class App
     private function listStacks(Request $request, array $user): Response
     {
         $endpointId = $request->query('endpointId');
+        // endpointId 0 / absent = tous les nœuds (vue agrégée)
+        $filter = null;
+        if ($endpointId !== null && (int) $endpointId > 0) {
+            $filter = (int) $endpointId;
+        }
         $rows = $this->repo->listStacksForUser(
             Ownership::username($user),
             Ownership::isAdmin($user),
-            $endpointId !== null ? (int) $endpointId : null,
+            $filter,
         );
         return Response::json(array_map([$this, 'formatStack'], $rows));
     }
@@ -703,13 +749,14 @@ final class App
     private function createStack(Request $request, array $user): Response
     {
         $endpointId = (int) ($request->query('endpointId') ?? 1);
+        if ($endpointId < 1) {
+            return Response::error('Choisissez un nœud pour déployer la stack', 400);
+        }
         $ep = $this->repo->getEndpoint($endpointId);
         if (!$ep) {
             return Response::error('Environnement introuvable', 404);
         }
-        if (($ep['kind'] ?? 'local') === 'agent') {
-            return Response::error('Les stacks Compose sur un nœud agent ne sont pas encore supportées — utilisez le nœud local', 400);
-        }
+        $isAgent = ($ep['kind'] ?? 'local') === 'agent';
         $body = $request->json();
         $name = trim((string) ($body['Name'] ?? $body['name'] ?? ''));
         $content = (string) ($body['StackFileContent'] ?? $body['stackFileContent'] ?? '');
@@ -729,6 +776,7 @@ final class App
 
         $entryPoint = 'docker-compose.yml';
         $projectPath = null;
+        $deployedOnAgent = false;
         try {
             foreach ($this->repo->listStacks($endpointId) as $existing) {
                 if (strcasecmp((string) $existing['name'], $name) === 0) {
@@ -736,8 +784,17 @@ final class App
                 }
             }
             $content = Ownership::injectComposeServiceLabels($content, Ownership::labelsFor($user));
-            $projectPath = $this->compose->writeComposeFile($name, $content, $entryPoint);
-            $this->compose->up($projectPath, $name, $env);
+            // Miroir YAML local (éditeur UI) — déploiement réel sur local ou agent
+            // Préfixe ep{N}_ pour éviter collision de miroirs entre nœuds
+            $mirrorKey = $isAgent ? ('ep' . $endpointId . '_' . $name) : $name;
+            $projectPath = $this->compose->writeComposeFile($mirrorKey, $content, $entryPoint);
+            $this->compose->writeEnvFile($projectPath, $env);
+            if ($isAgent) {
+                $this->agentComposeClient($ep)->up($name, $content, $env, $entryPoint);
+                $deployedOnAgent = true;
+            } else {
+                $this->compose->up($projectPath, $name, $env);
+            }
             $row = $this->repo->createStack(
                 $name,
                 $endpointId,
@@ -747,8 +804,19 @@ final class App
                 (string) $user['username'],
             );
         } catch (\Throwable $e) {
+            if ($deployedOnAgent && is_array($ep ?? null)) {
+                try {
+                    $this->agentComposeClient($ep)->down($name, $env, $entryPoint);
+                } catch (\Throwable) {
+                }
+            }
             if (is_string($projectPath) && $projectPath !== '') {
-                $this->compose->down($projectPath, $name, $env);
+                if (!$isAgent) {
+                    try {
+                        $this->compose->down($projectPath, $name, $env);
+                    } catch (\Throwable) {
+                    }
+                }
                 $this->compose->removeProjectDir($projectPath);
             }
             return Response::error($e->getMessage(), 500);
@@ -757,6 +825,7 @@ final class App
         $this->audit($user, 'stack.create', 'Création de la stack « ' . $name . ' »', $request, [
             'stackId' => (int) ($row['id'] ?? 0),
             'name' => $name,
+            'endpointId' => $endpointId,
         ]);
         return Response::json($this->formatStack($row), 200);
     }
@@ -768,6 +837,11 @@ final class App
         if (!$stack || !$this->canAccessStack($stack, $user)) {
             return Response::error('Stack introuvable', 404);
         }
+        $ep = $this->repo->getEndpoint((int) $stack['endpoint_id']);
+        if (!$ep) {
+            return Response::error('Environnement introuvable', 404);
+        }
+        $isAgent = ($ep['kind'] ?? 'local') === 'agent';
         $body = $request->json();
         $content = (string) ($body['StackFileContent'] ?? $body['stackFileContent'] ?? '');
         $env = $body['Env'] ?? $body['env'] ?? json_decode($stack['env_json'], true);
@@ -787,9 +861,25 @@ final class App
 
         try {
             $content = Ownership::injectComposeServiceLabels($content, Ownership::labelsFor($user));
-            $this->compose->writeComposeFile($stack['name'], $content, $stack['entry_point']);
-            $this->compose->up($stack['project_path'], $stack['name'], $env);
+            $this->compose->writeComposeContent(
+                (string) $stack['project_path'],
+                $content,
+                (string) $stack['entry_point'],
+            );
+            $this->compose->writeEnvFile($stack['project_path'], $env);
+            if ($isAgent) {
+                $this->agentComposeClient($ep)->up(
+                    (string) $stack['name'],
+                    $content,
+                    $env,
+                    (string) $stack['entry_point'],
+                );
+            } else {
+                $this->compose->up($stack['project_path'], $stack['name'], $env);
+            }
             $row = $this->repo->updateStack($id, $env, (string) $user['username']);
+            $this->repo->setStackStatus($id, 1);
+            $row = $this->repo->getStack($id) ?? $row;
         } catch (\Throwable $e) {
             return Response::error($e->getMessage(), 500);
         }
@@ -808,12 +898,21 @@ final class App
         if (!$stack || !$this->canAccessStack($stack, $user)) {
             return Response::error('Stack introuvable', 404);
         }
+        $ep = $this->repo->getEndpoint((int) $stack['endpoint_id']);
         $env = json_decode($stack['env_json'], true);
         if (!is_array($env)) {
             $env = [];
         }
         try {
-            $this->compose->down($stack['project_path'], $stack['name'], $env);
+            if ($ep && ($ep['kind'] ?? 'local') === 'agent') {
+                $this->agentComposeClient($ep)->down(
+                    (string) $stack['name'],
+                    $env,
+                    (string) ($stack['entry_point'] ?? 'docker-compose.yml'),
+                );
+            } else {
+                $this->compose->down($stack['project_path'], $stack['name'], $env);
+            }
             $this->compose->removeProjectDir($stack['project_path']);
             $this->repo->deleteStack($id);
         } catch (\Throwable $e) {
@@ -826,6 +925,73 @@ final class App
         return Response::empty(204);
     }
 
+    /**
+     * @param 'start'|'stop'|'restart' $action
+     * @param array{id:int,username:string,role:int} $user
+     */
+    private function controlStack(int $id, string $action, Request $request, array $user): Response
+    {
+        $stack = $this->repo->getStack($id);
+        if (!$stack || !$this->canAccessStack($stack, $user)) {
+            return Response::error('Stack introuvable', 404);
+        }
+        if (!in_array($action, ['start', 'stop', 'restart'], true)) {
+            return Response::error('Action invalide', 400);
+        }
+        $ep = $this->repo->getEndpoint((int) $stack['endpoint_id']);
+        if (!$ep) {
+            return Response::error('Environnement introuvable', 404);
+        }
+        $env = json_decode($stack['env_json'], true);
+        if (!is_array($env)) {
+            $env = [];
+        }
+        $name = (string) $stack['name'];
+        $entry = (string) ($stack['entry_point'] ?? 'docker-compose.yml');
+        $isAgent = ($ep['kind'] ?? 'local') === 'agent';
+        try {
+            if ($isAgent) {
+                $client = $this->agentComposeClient($ep);
+                match ($action) {
+                    'start' => $client->start($name, $env, $entry),
+                    'stop' => $client->stop($name, $env, $entry),
+                    default => $client->restart($name, $env, $entry),
+                };
+            } else {
+                match ($action) {
+                    'start' => $this->compose->start($stack['project_path'], $name, $env),
+                    'stop' => $this->compose->stop($stack['project_path'], $name, $env),
+                    default => $this->compose->restart($stack['project_path'], $name, $env),
+                };
+            }
+            $status = $action === 'stop' ? 2 : 1;
+            $row = $this->repo->setStackStatus($id, $status);
+        } catch (\Throwable $e) {
+            return Response::error($e->getMessage(), 500);
+        }
+        $labels = ['start' => 'Démarrage', 'stop' => 'Arrêt', 'restart' => 'Redémarrage'];
+        $this->audit(
+            $user,
+            'stack.' . $action,
+            ($labels[$action] ?? $action) . ' de la stack « ' . $name . ' »',
+            $request,
+            ['stackId' => $id, 'name' => $name],
+        );
+        return Response::json($this->formatStack($row ?? $stack));
+    }
+
+    /** @param array<string, mixed> $ep */
+    private function agentComposeClient(array $ep): AgentComposeClient
+    {
+        $url = trim((string) ($ep['agent_url'] ?? ''));
+        $secret = trim((string) ($ep['agent_secret'] ?? ''));
+        if ($url === '' || $secret === '') {
+            throw new \RuntimeException('Agent non configuré (URL ou secret manquant)');
+        }
+        $fp = (string) ($ep['tls_fingerprint'] ?? '');
+        return new AgentComposeClient($url, $secret, $fp);
+    }
+
     /** @param array<string, mixed> $user */
     private function requireAdmin(array $user): ?Response
     {
@@ -835,15 +1001,44 @@ final class App
         return null;
     }
 
-    /** @param array{id:int,username:string,role:int} $user */
-    private function browseVolume(string $name, Request $request, array $user): Response
+    private function endpointIdFromRequest(Request $request): int
     {
-        if (!$this->dockerScope->canAccessVolume($name, $user)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        $raw = $request->query('endpointId');
+        $id = $raw !== null && $raw !== '' ? (int) $raw : 1;
+        return $id > 0 ? $id : 1;
+    }
+
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @return array{0:?VolumeBrowser,1:?Response}
+     */
+    private function volumeBrowserForEndpoint(int $endpointId, string $name, array $user): array
+    {
+        $ep = $this->repo->getEndpoint($endpointId);
+        if (!$ep) {
+            return [null, Response::error('Environnement introuvable', 404)];
+        }
+        if ($deny = $this->assertEndpointUsable($ep)) {
+            return [null, $deny];
+        }
+        $docker = $this->dockerForEndpoint($ep);
+        $scope = new DockerScope($docker, $this->repo);
+        if (!$scope->canAccessVolume($name, $user)) {
+            return [null, Response::error('Volume introuvable ou accès refusé', 404)];
+        }
+        return [new VolumeBrowser($docker), null];
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function browseVolume(int $endpointId, string $name, Request $request, array $user): Response
+    {
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
         }
         $rel = (string) ($request->query('path') ?? '/');
         try {
-            return Response::json($this->volumeBrowser->list($name, $rel));
+            return Response::json($browser->list($name, $rel));
         } catch (\InvalidArgumentException $e) {
             return Response::error($e->getMessage(), 400);
         } catch (\Throwable $e) {
@@ -853,14 +1048,15 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function readVolumeFile(string $name, Request $request, array $user): Response
+    private function readVolumeFile(int $endpointId, string $name, Request $request, array $user): Response
     {
-        if (!$this->dockerScope->canAccessVolume($name, $user)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
         }
         $rel = (string) ($request->query('path') ?? '');
         try {
-            return Response::json($this->volumeBrowser->readFile($name, $rel));
+            return Response::json($browser->readFile($name, $rel));
         } catch (\InvalidArgumentException $e) {
             return Response::error($e->getMessage(), 400);
         } catch (\Throwable $e) {
@@ -870,14 +1066,15 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function downloadVolumeFile(string $name, Request $request, array $user): Response
+    private function downloadVolumeFile(int $endpointId, string $name, Request $request, array $user): Response
     {
-        if (!$this->dockerScope->canAccessVolume($name, $user)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
         }
         $rel = (string) ($request->query('path') ?? '');
         try {
-            $file = $this->volumeBrowser->download($name, $rel);
+            $file = $browser->download($name, $rel);
             $safeName = preg_replace('/[^\w.\-]+/', '_', $file['Name']) ?: 'file';
             return new Response(
                 200,
@@ -897,15 +1094,16 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function writeVolumeFile(string $name, Request $request, array $user): Response
+    private function writeVolumeFile(int $endpointId, string $name, Request $request, array $user): Response
     {
-        if (!$this->dockerScope->canAccessVolume($name, $user)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
         }
         $body = $request->json();
         $rel = (string) ($body['Path'] ?? $body['path'] ?? '');
         try {
-            $result = $this->volumeBrowser->writeFile($name, $rel, [
+            $result = $browser->writeFile($name, $rel, [
                 'Content' => (string) ($body['Content'] ?? $body['content'] ?? ''),
                 'Encoding' => (string) ($body['Encoding'] ?? $body['encoding'] ?? 'text'),
                 'CreateOnly' => array_key_exists('CreateOnly', $body)
@@ -922,15 +1120,16 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function mkdirVolumePath(string $name, Request $request, array $user): Response
+    private function mkdirVolumePath(int $endpointId, string $name, Request $request, array $user): Response
     {
-        if (!$this->dockerScope->canAccessVolume($name, $user)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
         }
         $body = $request->json();
         $rel = (string) ($body['Path'] ?? $body['path'] ?? '');
         try {
-            return Response::json($this->volumeBrowser->mkdir($name, $rel), 201);
+            return Response::json($browser->mkdir($name, $rel), 201);
         } catch (\InvalidArgumentException $e) {
             return Response::error($e->getMessage(), 400);
         } catch (\Throwable $e) {
@@ -940,16 +1139,17 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function renameVolumePath(string $name, Request $request, array $user): Response
+    private function renameVolumePath(int $endpointId, string $name, Request $request, array $user): Response
     {
-        if (!$this->dockerScope->canAccessVolume($name, $user)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
         }
         $body = $request->json();
         $from = (string) ($body['From'] ?? $body['from'] ?? '');
         $to = (string) ($body['To'] ?? $body['to'] ?? '');
         try {
-            return Response::json($this->volumeBrowser->rename($name, $from, $to));
+            return Response::json($browser->rename($name, $from, $to));
         } catch (\InvalidArgumentException $e) {
             return Response::error($e->getMessage(), 400);
         } catch (\Throwable $e) {
@@ -959,15 +1159,16 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function deleteVolumeEntry(string $name, Request $request, array $user): Response
+    private function deleteVolumeEntry(int $endpointId, string $name, Request $request, array $user): Response
     {
-        if (!$this->dockerScope->canAccessVolume($name, $user)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
         }
         $body = $request->json();
         $rel = (string) ($body['Path'] ?? $body['path'] ?? $request->query('path') ?? '');
         try {
-            $this->volumeBrowser->delete($name, $rel);
+            $browser->delete($name, $rel);
             return Response::empty(204);
         } catch (\InvalidArgumentException $e) {
             return Response::error($e->getMessage(), 400);
@@ -1367,7 +1568,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.2.0',
+                'User-Agent: WharfMaster/1.4.1',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1558,6 +1759,10 @@ final class App
         if ($err = PasswordPolicy::validate($newPassword)) {
             return Response::error($err, 400);
         }
+        $confirm = $body['PasswordConfirm'] ?? $body['passwordConfirm'] ?? $body['ConfirmPassword'] ?? null;
+        if ($confirm !== null && !hash_equals($newPassword, (string) $confirm)) {
+            return Response::error('Les mots de passe ne correspondent pas', 400);
+        }
         // Changing own password requires current password. Admin reset of another user does not.
         if ($isSelf) {
             $current = (string) ($body['CurrentPassword'] ?? $body['currentPassword'] ?? '');
@@ -1627,10 +1832,23 @@ final class App
                 if ($status === 1) {
                     $this->repo->updateEndpointLastSeen((int) $ep['id'], 1);
                     if (($ep['kind'] ?? '') === 'agent') {
-                        $probed = $this->probeAgentTls($ep);
-                        if ($probed !== null) {
-                            $tlsExpiresAt = $probed;
-                            $this->repo->updateEndpointTlsExpires((int) $ep['id'], $probed);
+                        $meta = $this->probeAgentTlsMeta($ep);
+                        if ($meta !== null) {
+                            $tlsExpiresAt = $meta['expiresAt'] ?? $tlsExpiresAt;
+                            $observed = (string) ($meta['fingerprint'] ?? '');
+                            $prev = trim((string) ($ep['tls_fingerprint'] ?? ''));
+                            // TOFU or authenticated pin refresh after cert renewal
+                            $pinToStore = $observed !== '' && ($prev === '' || $prev !== $observed)
+                                ? $observed
+                                : ($prev !== '' ? $prev : null);
+                            $this->repo->updateEndpointTlsMeta(
+                                (int) $ep['id'],
+                                $meta['expiresAt'] ?? null,
+                                $pinToStore,
+                            );
+                            if ($observed !== '') {
+                                $ep['tls_fingerprint'] = $observed;
+                            }
                         }
                     }
                 } elseif (($ep['kind'] ?? '') === 'agent') {
@@ -1671,86 +1889,69 @@ final class App
             'TlsExpiresAt' => $tlsExpiresAt,
             'TlsDaysLeft' => $tlsDaysLeft,
             'TlsRenewBy' => $tlsExpiresAt ? date('Y-m-d', max(0, $tlsExpiresAt - 30 * 86400)) : null,
+            'TlsFingerprint' => (string) ($ep['tls_fingerprint'] ?? ''),
+            'TlsFingerprintShort' => AgentTls::short((string) ($ep['tls_fingerprint'] ?? '')),
+            'TlsPinned' => trim((string) ($ep['tls_fingerprint'] ?? '')) !== '',
         ];
     }
 
     /**
-     * Read peer certificate expiry from agent HTTPS endpoint (self-signed OK).
-     *
      * @param array<string, mixed> $ep
+     * @return array{fingerprint:string, expiresAt:?int}|null
      */
-    private function probeAgentTls(array $ep): ?int
+    private function probeAgentTlsMeta(array $ep): ?array
     {
         $url = (string) ($ep['agent_url'] ?? '');
-        $secret = (string) ($ep['agent_secret'] ?? '');
         if ($url === '' || !str_starts_with(strtolower($url), 'https://')) {
             return null;
         }
-
-        // Prefer health JSON from agent
-        try {
-            $ch = curl_init(rtrim($url, '/') . '/health');
-            if ($ch) {
-                $headers = [];
-                if ($secret !== '') {
-                    $headers[] = 'Authorization: Bearer ' . $secret;
-                }
-                curl_setopt_array($ch, [
-                    CURLOPT_RETURNTRANSFER => true,
-                    CURLOPT_TIMEOUT => 5,
-                    CURLOPT_HTTPHEADER => $headers,
-                    CURLOPT_SSL_VERIFYPEER => false,
-                    CURLOPT_SSL_VERIFYHOST => 0,
-                ]);
-                $body = curl_exec($ch);
-                curl_close($ch);
-                if (is_string($body) && $body !== '') {
-                    $json = json_decode($body, true);
-                    if (is_array($json) && !empty($json['tlsExpiresAt'])) {
-                        return (int) $json['tlsExpiresAt'];
+        $secret = (string) ($ep['agent_secret'] ?? '');
+        $pinned = trim((string) ($ep['tls_fingerprint'] ?? ''));
+        $info = AgentTls::inspect($url);
+        if ($info === null) {
+            return null;
+        }
+        if ($pinned !== '' && !hash_equals($pinned, $info['fingerprint'])) {
+            // Cert renewed (agent entrypoint) — only rotate pin if Bearer health succeeds
+            if ($secret === '' || !AgentTls::healthOk($url, $secret)) {
+                return null;
+            }
+        }
+        if (AgentTls::healthOk($url, $secret)) {
+            try {
+                $ch = curl_init(rtrim($url, '/') . '/health');
+                if ($ch) {
+                    curl_setopt_array($ch, [
+                        CURLOPT_RETURNTRANSFER => true,
+                        CURLOPT_TIMEOUT => 5,
+                        CURLOPT_HTTPHEADER => [
+                            'Authorization: Bearer ' . $secret,
+                            'Accept: application/json',
+                        ],
+                        CURLOPT_SSL_VERIFYPEER => false,
+                        CURLOPT_SSL_VERIFYHOST => 0,
+                    ]);
+                    $body = curl_exec($ch);
+                    curl_close($ch);
+                    if (is_string($body) && $body !== '') {
+                        $json = json_decode($body, true);
+                        if (is_array($json) && !empty($json['tlsExpiresAt'])) {
+                            $info['expiresAt'] = (int) $json['tlsExpiresAt'];
+                        }
                     }
                 }
+            } catch (\Throwable) {
+                // keep cert-based expiry
             }
-        } catch (\Throwable) {
-            // fall through to cert probe
         }
+        return $info;
+    }
 
-        $parts = parse_url($url);
-        $host = $parts['host'] ?? '';
-        $port = (int) ($parts['port'] ?? 443);
-        if ($host === '') {
-            return null;
-        }
-        $ctx = stream_context_create([
-            'ssl' => [
-                'capture_peer_cert' => true,
-                'verify_peer' => false,
-                'verify_peer_name' => false,
-                'allow_self_signed' => true,
-            ],
-        ]);
-        $client = @stream_socket_client(
-            'ssl://' . $host . ':' . $port,
-            $errno,
-            $errstr,
-            5,
-            STREAM_CLIENT_CONNECT,
-            $ctx,
-        );
-        if ($client === false) {
-            return null;
-        }
-        $params = stream_context_get_params($ctx);
-        fclose($client);
-        $peer = $params['options']['ssl']['peer_certificate'] ?? null;
-        if (!$peer) {
-            return null;
-        }
-        $parsed = @openssl_x509_parse($peer);
-        if (!is_array($parsed) || empty($parsed['validTo_time_t'])) {
-            return null;
-        }
-        return (int) $parsed['validTo_time_t'];
+    /** @param array<string, mixed> $ep */
+    private function probeAgentTls(array $ep): ?int
+    {
+        $meta = $this->probeAgentTlsMeta($ep);
+        return $meta['expiresAt'] ?? null;
     }
 
     /** @param array<string, mixed> $stack */
@@ -1791,6 +1992,79 @@ final class App
         return $id;
     }
 
+    private function healthCheck(): Response
+    {
+        $socket = (string) ($this->config['docker_socket'] ?? '');
+        $dataDir = dirname((string) ($this->config['sqlite_path'] ?? ''));
+        $composeDir = (string) ($this->config['compose_dir'] ?? '');
+        $dockerOk = false;
+        try {
+            $dockerOk = $this->docker->ping();
+        } catch (\Throwable) {
+            $dockerOk = false;
+        }
+        $composeBin = (string) ($this->config['compose_bin'] ?? '');
+        $dockerBin = (string) ($this->config['docker_bin'] ?? 'docker');
+        $composeOk = false;
+        $out = [];
+        $code = 1;
+        @exec(escapeshellarg($dockerBin) . ' compose version 2>/dev/null', $out, $code);
+        if ($code === 0) {
+            $composeOk = true;
+        } elseif ($composeBin !== '' && is_executable($composeBin)) {
+            $composeOk = true;
+        }
+        $dataWritable = $dataDir !== '' && is_dir($dataDir) && is_writable($dataDir);
+        $composeWritable = $composeDir !== '' && (is_dir($composeDir) || @mkdir($composeDir, 0755, true)) && is_writable($composeDir);
+        $sqliteOk = is_file((string) ($this->config['sqlite_path'] ?? '')) && is_readable((string) $this->config['sqlite_path']);
+        $checks = [
+            'docker' => $dockerOk,
+            'dockerSocket' => $socket !== '' && (file_exists($socket) || is_link($socket)),
+            'compose' => $composeOk,
+            'dataWritable' => $dataWritable,
+            'composeDirWritable' => $composeWritable,
+            'sqlite' => $sqliteOk,
+        ];
+        $ok = !in_array(false, $checks, true);
+        return Response::json([
+            'ok' => $ok,
+            'version' => $this->config['version'],
+            'checks' => $checks,
+        ], $ok ? 200 : 503);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function downloadBackup(array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $sqlite = (string) ($this->config['sqlite_path'] ?? '');
+        if ($sqlite === '' || !is_file($sqlite)) {
+            return Response::error('Base SQLite introuvable', 404);
+        }
+        // Consistent snapshot via SQLite backup API when available
+        $tmp = sys_get_temp_dir() . '/wm-backup-' . bin2hex(random_bytes(6)) . '.sqlite';
+        try {
+            $src = new \PDO('sqlite:' . $sqlite);
+            $src->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $src->exec("VACUUM INTO " . $src->quote($tmp));
+        } catch (\Throwable) {
+            if (!@copy($sqlite, $tmp)) {
+                return Response::error('Impossible de créer le backup', 500);
+            }
+        }
+        $blob = (string) file_get_contents($tmp);
+        @unlink($tmp);
+        $name = 'wharfmaster-backup-' . date('Ymd-His') . '.sqlite';
+        return new Response(200, $blob, [
+            'Content-Type' => 'application/x-sqlite3',
+            'Content-Disposition' => 'attachment; filename="' . $name . '"',
+            'Cache-Control' => 'no-store',
+            'Content-Security-Policy' => "default-src 'none'",
+        ]);
+    }
+
     /** @param array<string, mixed> $ep */
     private function dockerForEndpoint(array $ep): DockerClient
     {
@@ -1802,7 +2076,8 @@ final class App
             if ($url === '' || $secret === '') {
                 throw new \RuntimeException('Nœud agent mal configuré', 503);
             }
-            return DockerClient::httpAgent($url, $secret, $api);
+            $fp = (string) ($ep['tls_fingerprint'] ?? '');
+            return DockerClient::httpAgent($url, $secret, $api, $fp);
         }
         return $this->docker;
     }
@@ -2007,12 +2282,14 @@ final class App
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.1');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)
             . ' --token ' . escapeshellarg($token)
             . ' --advertise ' . escapeshellarg($advertise)
-            . ' --name ' . escapeshellarg($name);
+            . ' --name ' . escapeshellarg($name)
+            . ' --image ' . escapeshellarg($image);
     }
 
     private function joinNode(Request $request): Response
@@ -2060,24 +2337,26 @@ final class App
         $this->repo->incrementJoinTokenUse((int) $row['id']);
         $this->rateLimiter->clear($bucket);
 
-        $tlsExpiresAt = $this->probeAgentTls([
-            'agent_url' => $agentUrl,
-            'agent_secret' => $nodeSecret,
-        ]);
-        if ($tlsExpiresAt !== null && !empty($ep['id'])) {
-            $this->repo->updateEndpointTlsExpires((int) $ep['id'], $tlsExpiresAt);
+        // Agent may not be listening yet at join time — pin when reachable
+        $tlsMeta = AgentTls::inspect($agentUrl);
+        $tlsExpiresAt = $tlsMeta['expiresAt'] ?? null;
+        $tlsFp = $tlsMeta['fingerprint'] ?? '';
+        if (!empty($ep['id'])) {
+            $this->repo->updateEndpointTlsMeta((int) $ep['id'], $tlsExpiresAt, $tlsFp !== '' ? $tlsFp : null);
         }
 
         $this->audit(null, $rejoined ? 'node.rejoin' : 'node.join', 'Nœud « ' . $name . ' » ' . ($rejoined ? 'rejoint' : 'joint') . ' à l’infra', $request, [
             'endpointId' => (int) ($ep['id'] ?? 0),
             'agentUrl' => $agentUrl,
             'tlsExpiresAt' => $tlsExpiresAt,
+            'tlsFingerprint' => $tlsFp !== '' ? AgentTls::short($tlsFp) : null,
             'rejoined' => $rejoined,
         ]);
 
         return Response::json([
             'NodeId' => (int) ($ep['id'] ?? 0),
             'TlsExpiresAt' => $tlsExpiresAt,
+            'TlsFingerprint' => $tlsFp,
             'Name' => $name,
             'AgentURL' => $agentUrl,
             'NodeSecret' => $nodeSecret,
@@ -2154,10 +2433,20 @@ final class App
         }
         $this->repo->updateEndpointLastSeen($id, $ok ? 1 : 2);
         $tlsExpiresAt = null;
+        $tlsFp = (string) ($ep['tls_fingerprint'] ?? '');
         if ($ok && ($ep['kind'] ?? '') === 'agent') {
-            $tlsExpiresAt = $this->probeAgentTls($ep);
-            if ($tlsExpiresAt !== null) {
-                $this->repo->updateEndpointTlsExpires($id, $tlsExpiresAt);
+            $meta = $this->probeAgentTlsMeta($ep);
+            if ($meta !== null) {
+                $tlsExpiresAt = $meta['expiresAt'] ?? null;
+                $observed = (string) ($meta['fingerprint'] ?? '');
+                if ($tlsFp === '' && $observed !== '') {
+                    $tlsFp = $observed;
+                }
+                $this->repo->updateEndpointTlsMeta(
+                    $id,
+                    $tlsExpiresAt,
+                    $tlsFp !== '' ? $tlsFp : null,
+                );
             }
         }
         return Response::json([
@@ -2167,6 +2456,9 @@ final class App
             'TlsExpiresAt' => $tlsExpiresAt,
             'TlsDaysLeft' => $tlsExpiresAt ? (int) floor(($tlsExpiresAt - time()) / 86400) : null,
             'TlsRenewBy' => $tlsExpiresAt ? date('Y-m-d', max(0, $tlsExpiresAt - 30 * 86400)) : null,
+            'TlsFingerprint' => $tlsFp,
+            'TlsFingerprintShort' => AgentTls::short($tlsFp),
+            'TlsPinned' => $tlsFp !== '',
         ]);
     }
 

@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Docker;
 
+use App\Security\AgentTls;
+
 final class Client
 {
     public function __construct(
@@ -10,17 +12,22 @@ final class Client
         private readonly string $apiVersion = 'v1.45',
         private readonly string $baseUrl = '',
         private readonly string $bearerToken = '',
+        private readonly string $tlsFingerprint = '',
     ) {
     }
 
     public static function unix(string $socketPath, string $apiVersion = 'v1.45'): self
     {
-        return new self($socketPath, $apiVersion, '', '');
+        return new self($socketPath, $apiVersion, '', '', '');
     }
 
-    public static function httpAgent(string $baseUrl, string $bearerToken, string $apiVersion = 'v1.45'): self
-    {
-        return new self('', $apiVersion, rtrim($baseUrl, '/'), $bearerToken);
+    public static function httpAgent(
+        string $baseUrl,
+        string $bearerToken,
+        string $apiVersion = 'v1.45',
+        string $tlsFingerprint = '',
+    ): self {
+        return new self('', $apiVersion, rtrim($baseUrl, '/'), $bearerToken, $tlsFingerprint);
     }
 
     public function isRemote(): bool
@@ -94,6 +101,10 @@ final class Client
      */
     private function requestHttp(string $method, string $path, ?string $body, array $headerLines): array
     {
+        if ($this->tlsFingerprint !== '') {
+            AgentTls::assertPinned($this->baseUrl, $this->tlsFingerprint);
+        }
+
         // Agent exposes Docker API under /docker/* and health at /health
         $url = $this->baseUrl . '/docker' . $path;
         if ($this->bearerToken !== '' && !$this->hasHeader($headerLines, 'Authorization')) {
@@ -112,6 +123,7 @@ final class Client
             CURLOPT_TIMEOUT => 300,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_HTTPHEADER => $headerLines,
+            // Pinning is enforced via AgentTls::assertPinned above (self-signed agents)
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_SSL_VERIFYHOST => 0,
         ]);
@@ -155,6 +167,9 @@ final class Client
     {
         try {
             if ($this->baseUrl !== '') {
+                if ($this->tlsFingerprint !== '') {
+                    AgentTls::assertPinned($this->baseUrl, $this->tlsFingerprint);
+                }
                 $ch = curl_init($this->baseUrl . '/health');
                 if ($ch === false) {
                     return false;

@@ -71,15 +71,12 @@ final class DockerScope
         }
 
         // --- Volume create ---
-        if ($method === 'POST' && $dockerPath === '/volumes/create') {
+        if ($method === 'POST' && ($dockerPath === '/volumes/create' || str_starts_with($dockerPath, '/volumes/create?'))) {
             return $this->createVolume($user, $rawBody, $forwardHeaders);
         }
 
-        // --- Volume by name ---
-        if (preg_match('#^/volumes/([^/]+)$#', $dockerPath, $m) && $method !== 'GET') {
-            // GET inspect also scoped
-        }
-        if (preg_match('#^/volumes/([^/]+)$#', $dockerPath, $m)) {
+        // --- Volume by name (never treat "create" as a volume name) ---
+        if (preg_match('#^/volumes/([^/]+)$#', $dockerPath, $m) && strcasecmp($m[1], 'create') !== 0) {
             $denied = $this->assertVolumeAccess(rawurldecode($m[1]), $user, $ownedStacks);
             if ($denied) {
                 return $denied;

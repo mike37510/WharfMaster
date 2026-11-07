@@ -21,6 +21,9 @@ RewriteRule ^z/([a-f0-9]+)/?$ public/_x/$1.png [L]
 # Static assets under public/
 RewriteRule ^public/(.*)$ public/$1 [L]
 
+# Docs Markdown (alias court)
+RewriteRule ^docs/DOCUMENTATION\.md$ public/docs/DOCUMENTATION.md [L]
+
 # Public marketing site at /
 RewriteRule ^$ public/site/index.html [L]
 RewriteRule ^site/?$ public/site/index.html [L]
@@ -39,4 +42,6 @@ RewriteRule ^app(?:/.*)?$ public/index.html [L]
   Header set Permissions-Policy "camera=(), microphone=(), geolocation=()"
   Header set Cross-Origin-Resource-Policy "same-origin"
   Header always unset X-Powered-By
+  # HSTS when the request is HTTPS (incl. behind a TLS terminator that sets HTTPS=on)
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains" env=HTTPS
 </IfModule>

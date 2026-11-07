@@ -7,10 +7,12 @@ TOKEN=""
 ADVERTISE=""
 NAME=""
 PORT="9001"
-IMAGE="ghcr.io/mike37510/wharfmaster-agent:latest"
+# Prefer versioned tag (principal injects --image); latest only as last resort
+IMAGE="${WHARFMASTER_AGENT_IMAGE:-ghcr.io/mike37510/wharfmaster-agent:1.4.1}"
 CONTAINER_NAME="wharfmaster-agent"
 TLS_CN=""
 TLS_DAYS="365"
+STACKS_DIR="/var/lib/wharfmaster/stacks"
 
 usage() {
   cat <<EOF
@@ -26,6 +28,7 @@ Options:
   --port PORT        Port publié (défaut 9001)
   --tls-cn CN        CN du certificat autosigné (défaut = hostname / name)
   --tls-days N       Durée du certificat en jours (défaut 365)
+  --stacks-dir DIR   Répertoire hôte des stacks Compose (défaut $STACKS_DIR)
   --image IMAGE      Image agent (défaut $IMAGE)
   --help             Aide
 EOF
@@ -40,6 +43,7 @@ while [ $# -gt 0 ]; do
     --port) PORT="${2:-}"; shift 2 ;;
     --tls-cn) TLS_CN="${2:-}"; shift 2 ;;
     --tls-days) TLS_DAYS="${2:-}"; shift 2 ;;
+    --stacks-dir) STACKS_DIR="${2:-}"; shift 2 ;;
     --image) IMAGE="${2:-}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
@@ -134,6 +138,7 @@ echo "==> Starting HTTPS agent on port $PORT (CN=$TLS_CN, ${TLS_DAYS}d)..."
 
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker volume create wharfmaster-agent-certs >/dev/null 2>&1 || true
+mkdir -p "$STACKS_DIR"
 
 run_agent() {
   docker run -d \
@@ -145,16 +150,21 @@ run_agent() {
     -e "AGENT_TLS_CN=$TLS_CN" \
     -e "AGENT_TLS_DAYS=$TLS_DAYS" \
     -e "AGENT_CERT_DIR=/data/certs" \
+    -e "AGENT_STACKS_DIR=/data/stacks" \
     -v "$SOCK:/var/run/docker.sock" \
     -v wharfmaster-agent-certs:/data/certs \
+    -v "${STACKS_DIR}:/data/stacks" \
     -p "${PORT}:9001" \
     "$@"
 }
 
-if docker pull "$IMAGE" >/dev/null 2>&1; then
-  run_agent "$IMAGE"
-else
-  echo "Image pull failed — building local agent image from principal files"
+image_has_compose() {
+  docker run --rm --entrypoint sh "$1" -c \
+    'docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1'
+}
+
+build_local_agent() {
+  echo "==> Building local agent image from principal files (docker compose inclus)"
   BUILD=$(mktemp -d)
   fetch() {
     # Prefer static source download; fail clearly on HTML/JSON error pages
@@ -173,11 +183,12 @@ else
   fetch "$URL/public/agent/entrypoint.sh" "$BUILD/entrypoint.sh"
   curl -fsS "$URL/public/agent/Dockerfile" -o "$BUILD/Dockerfile" 2>/dev/null || cat > "$BUILD/Dockerfile" <<'DF'
 FROM php:8.3-cli-alpine
-RUN apk add --no-cache curl openssl socat
+RUN apk add --no-cache curl openssl socat docker-cli docker-cli-compose
 WORKDIR /app
 COPY agent.php router.php entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
-ENV AGENT_PORT=9001 AGENT_CERT_DIR=/data/certs AGENT_TLS_DAYS=365
+ENV AGENT_PORT=9001 AGENT_CERT_DIR=/data/certs AGENT_STACKS_DIR=/data/stacks AGENT_TLS_DAYS=365
+VOLUME ["/data/certs", "/data/stacks"]
 EXPOSE 9001
 CMD ["/app/entrypoint.sh"]
 DF
@@ -188,11 +199,29 @@ DF
     exit 1
   fi
   docker build -t wharfmaster-agent:local "$BUILD"
-  run_agent wharfmaster-agent:local
   rm -rf "$BUILD"
+}
+
+AGENT_IMAGE=""
+if docker pull "$IMAGE" >/dev/null 2>&1; then
+  if image_has_compose "$IMAGE"; then
+    AGENT_IMAGE="$IMAGE"
+  else
+    echo "==> Image tirée sans docker compose — rebuild local requis"
+    build_local_agent
+    AGENT_IMAGE="wharfmaster-agent:local"
+  fi
+else
+  echo "Image pull failed — building local agent image from principal files"
+  build_local_agent
+  AGENT_IMAGE="wharfmaster-agent:local"
 fi
+
+run_agent "$AGENT_IMAGE"
 
 sleep 2
 echo "==> Done. Agent HTTPS: $ADVERTISE"
 echo "    Certificat autosigné (renouvellement auto si < 30 jours restants)."
+echo "    Stacks Compose sur l’hôte: $STACKS_DIR"
+echo "    Image agent: $AGENT_IMAGE"
 echo "    Sur le principal: Nœuds → ping #$NODE_ID"

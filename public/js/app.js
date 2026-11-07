@@ -1057,8 +1057,8 @@ CMD ["sh"]
     return `<img class="${cls}" src="/public/img/wharfmaster-mark.png" width="40" height="40" alt="" decoding="async">`;
   }
 
-  function brandLogoImg(cls = 'brand-logo-img') {
-    return `<img class="${cls}" src="/public/img/wharfmaster-logo.png" alt="WharfMaster" decoding="async">`;
+  function brandLogoImg(cls = 'brand-logo-img', src = '/public/img/wharfmaster-logo-light.png') {
+    return `<img class="${cls}" src="${src}" alt="WharfMaster" decoding="async">`;
   }
 
   function sparkline(tone = 'blue') {
@@ -1210,6 +1210,7 @@ CMD ["sh"]
       users: '<svg viewBox="0 0 16 16"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6v-1a4 4 0 014-4h2a4 4 0 014 4v1H3zm10-7a2 2 0 100-4 2 2 0 000 4zm1 7v-1a4.9 4.9 0 00-1.5-3.5A4 4 0 0115 13v1h-1z"/></svg>',
       registries: '<svg viewBox="0 0 16 16"><path d="M2 2h12v3H2V2zm0 4.5h12V10H2V6.5zM2 11h12v3H2v-3z"/></svg>',
       about: '<svg viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7.25 5h1.5v1.5h-1.5V5zM7.25 7.5h1.5V11h-1.5V7.5z"/></svg>',
+      docs: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h6.5L13 5v8.5H4V2.5z"/><path d="M10.5 2.5V5H13"/><path d="M6 8h4M6 10.5h4M6 13h2.5"/></svg>',
       logout: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5H3.5A1.5 1.5 0 002 4v8a1.5 1.5 0 001.5 1.5H6M10.5 11.5L14 8l-3.5-3.5M14 8H6"/></svg>',
       bell: '<svg viewBox="0 0 16 16"><path d="M8 1.75a3.5 3.5 0 00-3.5 3.5v2.1L3.2 9.6A.75.75 0 003.75 11h8.5a.75.75 0 00.55-1.25L11.5 7.35V5.25A3.5 3.5 0 008 1.75zM6.6 12.5a1.4 1.4 0 002.8 0"/></svg>',
       pull: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8M5 7.5L8 10l3-2.5M3 12.5h10"/></svg>',
@@ -1821,19 +1822,17 @@ CMD ["sh"]
     return `
       <div class="shell">
         <aside class="sidebar">
-          <div class="brand">
-            <div class="brand-mark">${brandMarkImg()}</div>
-            <div>
-              <div class="brand-title">WharfMaster</div>
-              <div class="brand-ver">v1.2.0</div>
-            </div>
+          <div class="brand brand-full">
+            ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
+            <div class="brand-ver">v1.4.1</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
           </div>
           <div class="sidebar-bottom">
             <nav class="nav">
-              <a href="#about"><span class="nav-ico">${ico('about')}</span>À propos</a>
+              <a href="#docs" class="${state.route === 'docs' ? 'active' : ''}"><span class="nav-ico">${ico('docs')}</span>Documentation</a>
+              <a href="#about" class="${state.route === 'about' ? 'active' : ''}"><span class="nav-ico">${ico('about')}</span>À propos</a>
               <a href="#logout"><span class="nav-ico">${ico('logout')}</span>Déconnexion</a>
             </nav>
             <div class="engine-pill">
@@ -3482,6 +3481,189 @@ CMD ["sh"]
       });
     }
 
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const s = String(reader.result || '');
+          const i = s.indexOf(',');
+          resolve(i >= 0 ? s.slice(i + 1) : s);
+        };
+        reader.onerror = () => reject(new Error('Lecture fichier impossible'));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function readAllDirectoryEntries(reader) {
+      return new Promise((resolve, reject) => {
+        const all = [];
+        const readBatch = () => {
+          reader.readEntries((batch) => {
+            if (!batch.length) {
+              resolve(all);
+              return;
+            }
+            all.push(...batch);
+            readBatch();
+          }, reject);
+        };
+        readBatch();
+      });
+    }
+
+    async function collectDropEntries(dataTransfer, destDir) {
+      const files = [];
+      const dirs = new Set();
+      const items = dataTransfer.items ? Array.from(dataTransfer.items) : [];
+
+      async function walkEntry(entry, parentRel) {
+        if (!entry) return;
+        const rel = parentRel ? `${parentRel}/${entry.name}` : entry.name;
+        if (entry.isFile) {
+          const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+          files.push({ relPath: rel, file });
+          return;
+        }
+        if (entry.isDirectory) {
+          dirs.add(rel);
+          const reader = entry.createReader();
+          const children = await readAllDirectoryEntries(reader);
+          for (const child of children) {
+            await walkEntry(child, rel);
+          }
+        }
+      }
+
+      if (items.length && items.some((it) => typeof it.webkitGetAsEntry === 'function' && it.webkitGetAsEntry())) {
+        for (const item of items) {
+          if (item.kind !== 'file') continue;
+          const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+          if (entry) await walkEntry(entry, '');
+        }
+      } else {
+        Array.from(dataTransfer.files || []).forEach((file) => {
+          const rel = file.webkitRelativePath || file.name;
+          files.push({ relPath: rel, file });
+          const parts = String(rel).split('/');
+          if (parts.length > 1) {
+            let acc = '';
+            for (let i = 0; i < parts.length - 1; i += 1) {
+              acc = acc ? `${acc}/${parts[i]}` : parts[i];
+              dirs.add(acc);
+            }
+          }
+        });
+      }
+
+      // Ensure parent dirs of files exist even without DirectoryEntry
+      files.forEach(({ relPath }) => {
+        const parts = String(relPath).split('/');
+        let acc = '';
+        for (let i = 0; i < parts.length - 1; i += 1) {
+          acc = acc ? `${acc}/${parts[i]}` : parts[i];
+          dirs.add(acc);
+        }
+      });
+
+      const sortedDirs = Array.from(dirs).sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+      return { destDir, dirs: sortedDirs, files };
+    }
+
+    let volUploadBusy = false;
+
+    async function uploadDropped(dataTransfer) {
+      if (volUploadBusy) return;
+      volUploadBusy = true;
+      const setStatus = (msg) => {
+        const status = document.getElementById('vol-upload-status');
+        if (status) status.textContent = msg || '';
+      };
+      const errBox = document.getElementById('vol-err');
+      if (errBox) errBox.innerHTML = '';
+      try {
+        const payload = await collectDropEntries(dataTransfer, currentPath);
+        if (!payload.files.length && !payload.dirs.length) {
+          setStatus('');
+          return;
+        }
+        const maxBytes = 2 * 1000 * 1000;
+        for (const { file, relPath } of payload.files) {
+          if (file.size > maxBytes) {
+            throw new Error(`« ${relPath} » dépasse 2 Mo (limite d’upload)`);
+          }
+        }
+        let done = 0;
+        const total = payload.dirs.length + payload.files.length;
+        for (const dir of payload.dirs) {
+          done += 1;
+          setStatus(`Création dossiers… ${done}/${total}`);
+          await Api.volumeMkdir(volumeName, joinVolPath(currentPath, dir));
+        }
+        for (const { file, relPath } of payload.files) {
+          done += 1;
+          setStatus(`Envoi… ${done}/${total} — ${relPath}`);
+          const b64 = await fileToBase64(file);
+          await Api.volumeWriteFile(volumeName, joinVolPath(currentPath, relPath), {
+            Content: b64,
+            Encoding: 'base64',
+            CreateOnly: false,
+          });
+        }
+        const summary = `${payload.files.length} fichier(s), ${payload.dirs.length} dossier(s) — terminé`;
+        await render(currentPath);
+        setStatus(summary);
+        setTimeout(() => {
+          const s = document.getElementById('vol-upload-status');
+          if (s && s.textContent === summary) s.textContent = '';
+        }, 2500);
+      } catch (err) {
+        setStatus('');
+        const box = document.getElementById('vol-err');
+        if (box) box.innerHTML = `<div class="error-box">${esc(err.message || String(err))}</div>`;
+        else alert(err.message || String(err));
+      } finally {
+        volUploadBusy = false;
+      }
+    }
+
+    function hasFilesType(dt) {
+      try {
+        return Array.from(dt.types || []).includes('Files');
+      } catch {
+        return false;
+      }
+    }
+
+    function bindVolumeDrop(explorer) {
+      let dragDepth = 0;
+      const onDragEnter = (ev) => {
+        if (!hasFilesType(ev.dataTransfer)) return;
+        ev.preventDefault();
+        dragDepth += 1;
+        explorer.classList.add('is-dragover');
+      };
+      const onDragOver = (ev) => {
+        if (!hasFilesType(ev.dataTransfer)) return;
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = volUploadBusy ? 'none' : 'copy';
+      };
+      const onDragLeave = () => {
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) explorer.classList.remove('is-dragover');
+      };
+      const onDrop = async (ev) => {
+        if (!hasFilesType(ev.dataTransfer)) return;
+        ev.preventDefault();
+        dragDepth = 0;
+        explorer.classList.remove('is-dragover');
+        await uploadDropped(ev.dataTransfer);
+      };
+      explorer.addEventListener('dragenter', onDragEnter);
+      explorer.addEventListener('dragover', onDragOver);
+      explorer.addEventListener('dragleave', onDragLeave);
+      explorer.addEventListener('drop', onDrop);
+    }
+
     async function render(path) {
       hideVolContextMenu();
       root.innerHTML = shell(`Volume · ${volumeName}`, `
@@ -3491,12 +3673,14 @@ CMD ["sh"]
           <button type="button" class="btn btn-sm" id="vol-new-file">Nouveau fichier</button>
           <button type="button" class="btn btn-sm" id="vol-new-dir">Nouveau dossier</button>
           <div class="spacer"></div>
-          <span class="muted">Clic droit pour plus d’actions</span>
+          <span class="muted">Glisser-déposer fichiers/dossiers · clic droit</span>
           <span class="muted mono">${esc(volumeName)}</span>
         </div>
         <div id="vol-err"></div>
+        <div class="muted vol-upload-status" id="vol-upload-status"></div>
         ${volumeBreadcrumbs(volumeName, path)}
         <div class="table-wrap vol-explorer" id="vol-explorer">
+          <div class="vol-drop-hint">Déposez fichiers ou dossiers ici</div>
           <table class="data">
             <thead><tr><th>Nom</th><th>Taille</th><th>Modifié</th><th></th></tr></thead>
             <tbody id="vol-rows"><tr><td colspan="4" class="muted">Chargement…</td></tr></tbody>
@@ -3509,6 +3693,7 @@ CMD ["sh"]
       const explorer = document.getElementById('vol-explorer');
       const tbody = document.getElementById('vol-rows');
       const errBox = document.getElementById('vol-err');
+      bindVolumeDrop(explorer);
       explorer.addEventListener('contextmenu', (ev) => {
         if (ev.target.closest('.vol-row[data-entry]')) return;
         openCtx(ev, null);
@@ -3637,54 +3822,79 @@ CMD ["sh"]
     }
   }
 
+  function endpointLabel(endpointId) {
+    const ep = (state.endpoints || []).find((e) => Number(e.Id) === Number(endpointId));
+    if (!ep) return String(endpointId || '—');
+    return ep.NodeName || ep.Name || String(ep.Id);
+  }
+
   async function viewStacks() {
-    if (isAllNodes()) {
-      root.innerHTML = shell('Stacks', `
-        ${pageHeader('Stacks')}
-        ${pickNodeGuardHtml()}
-        <div class="info-box">Les stacks Compose restent sur un nœud précis (local).</div>
-      `, { subtitle: 'Projets Compose' });
-      return;
-    }
+    const all = isAllNodes();
     if (state.route === 'stacks/new') {
+      if (all) {
+        root.innerHTML = shell('Stacks', `
+          ${pageHeader('Créer une stack')}
+          ${pickNodeGuardHtml()}
+        `, { subtitle: 'Projets Compose' });
+        return;
+      }
       showStackEditor();
       return;
     }
     const stacks = await Api.stacks();
     const list = stacks || [];
+    const stackStatusLabel = (st) => (Number(st) === 1 ? 'running' : 'exited');
     const rows = list.map((s) => {
-      const search = `${s.Id} ${s.Name} ${s.CreatedBy || ''} ${s.Status === 1 ? 'actif' : s.Status}`.toLowerCase();
-      return `<tr data-search="${esc(search)}">
-      <td>${esc(s.Id)}</td>
-      <td><a href="#stacks/${s.Id}">${esc(s.Name)}</a></td>
-      <td>${badge(s.Status === 1 ? 'actif' : String(s.Status))}</td>
-      <td>${esc(s.CreatedBy || '')}</td>
-      <td class="actions"><div class="quick-actions">
+      const node = endpointLabel(s.EndpointId);
+      const stLabel = stackStatusLabel(s.Status);
+      const search = `${s.Id} ${s.Name} ${node} ${s.CreatedBy || ''} ${stLabel}`.toLowerCase();
+      // Actions toujours disponibles (API liée à l’id stack / son nœud)
+      const actions = `<div class="quick-actions">
         ${iconBtn({ tag: 'a', href: `#stacks/${s.Id}`, title: 'Ouvrir', icon: 'edit' })}
-        ${iconBtn({ del: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}
-      </div></td>
+        ${iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: true })}
+        ${iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop' })}
+        ${iconBtn({ act: 'restart', id: s.Id, title: 'Redémarrer', icon: 'restart' })}
+        ${iconBtn({ act: 'remove', id: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+      </div>`;
+      return `<tr data-search="${esc(search)}">
+      ${all ? `<td class="muted">${esc(node)}</td>` : ''}
+      <td class="name-cell">
+        <strong><a href="#stacks/${s.Id}">${esc(s.Name)}</a></strong>
+        <span class="id">#${esc(s.Id)}</span>
+      </td>
+      <td>${badge(stLabel)}</td>
+      <td>${esc(s.CreatedBy || '')}</td>
+      <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
+    const colSpan = all ? 5 : 4;
     root.innerHTML = shell('Stacks', `
-      ${pageHeader('Stacks')}
+      ${pageHeader(all ? 'Stacks — tous les nœuds' : 'Stacks')}
+      ${all ? pickNodeGuardHtml() : ''}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des stacks…" value="${esc(state.filters.stacks || '')}">
-        <a class="btn btn-info btn-create" href="#stacks/new" title="Créer une stack">
+        ${all ? '' : `<a class="btn btn-info btn-create" href="#stacks/new" title="Créer une stack">
           <span class="btn-ico">${ico('plus')}</span><span>Créer une stack</span>
-        </a>
+        </a>`}
         <div class="spacer"></div>
         <span class="muted mono" id="filter-count">${list.length} / ${list.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>Id</th><th>Nom</th><th>Statut</th><th>Créé par</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="5" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
-      </table></div>`, { subtitle: 'Projets Compose' });
+        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>État</th><th>Créé par</th><th>Actions</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
+      </table></div>`, { subtitle: all ? 'Vue agrégée' : 'Projets Compose' });
     bindRefresh();
     bindSearch('stacks');
-    root.querySelectorAll('[data-del]').forEach((btn) => {
+    root.querySelectorAll('[data-act]').forEach((btn) => {
+      const act = btn.dataset.act;
+      const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;
       onBusyClick(btn, async (el) => {
-        await Api.deleteStack(el.dataset.del);
-      }, { confirm: 'Supprimer la stack et ses conteneurs ?', reload: true });
+        const id = el.dataset.id;
+        if (act === 'start') await Api.startStack(id);
+        else if (act === 'stop') await Api.stopStack(id);
+        else if (act === 'restart') await Api.restartStack(id);
+        else if (act === 'remove') await Api.deleteStack(id);
+      }, { confirm: confirmMsg, reload: true });
     });
   }
 
@@ -3880,28 +4090,45 @@ CMD ["sh"]
       return;
     }
     const [stack, file] = await Promise.all([Api.stack(id), Api.stackFile(id)]);
+    const stLabel = Number(stack.Status) === 1 ? 'running' : 'exited';
     root.innerHTML = shell(`Stack · ${stack.Name}`, `
       ${pageHeader(stack.Name, false)}
       <div class="toolbar">
         ${iconBtn({ tag: 'a', href: '#stacks', title: 'Retour', icon: 'back' })}
         ${iconBtn({ elId: 'edit', title: 'Éditeur', icon: 'edit', info: true })}
-        ${iconBtn({ elId: 'del', title: 'Supprimer', icon: 'remove', danger: true })}
+        ${iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: true })}
+        ${iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop' })}
+        ${iconBtn({ act: 'restart', id: stack.Id, title: 'Redémarrer', icon: 'restart' })}
+        ${iconBtn({ act: 'remove', id: stack.Id, title: 'Supprimer', icon: 'remove', danger: true })}
       </div>
       <div class="panel" style="margin-bottom:1rem">
         <dl class="kv">
           <dt>Id</dt><dd>${stack.Id}</dd>
           <dt>Type</dt><dd>Compose</dd>
-          <dt>Environnement</dt><dd>${stack.EndpointId}</dd>
+          <dt>Statut</dt><dd>${badge(stLabel)}</dd>
+          <dt>Nœud</dt><dd>${esc(endpointLabel(stack.EndpointId))} <span class="muted">(#${esc(stack.EndpointId)})</span></dd>
         </dl>
       </div>
       <div class="section-title">Fichier Compose</div>
       <pre class="logs">${esc(file.StackFileContent || '')}</pre>`);
     document.getElementById('edit').onclick = () =>
       showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
-    onBusyClick(document.getElementById('del'), async () => {
-      await Api.deleteStack(id);
-      location.hash = '#stacks';
-    }, { confirm: 'Supprimer la stack ?', minMs: 300 });
+    root.querySelectorAll('[data-act]').forEach((btn) => {
+      const act = btn.dataset.act;
+      const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;
+      onBusyClick(btn, async (el) => {
+        const sid = el.dataset.id;
+        if (act === 'start') await Api.startStack(sid);
+        else if (act === 'stop') await Api.stopStack(sid);
+        else if (act === 'restart') await Api.restartStack(sid);
+        else if (act === 'remove') {
+          await Api.deleteStack(sid);
+          location.hash = '#stacks';
+          return;
+        }
+        await viewStackDetail(id);
+      }, { confirm: confirmMsg, minMs: 300 });
+    });
   }
 
   async function loadPublicUrl() {
@@ -3910,6 +4137,174 @@ CMD ["sh"]
       state.publicUrl = s.PublicURL || s.HostURL || '';
     } catch (_) {
       state.publicUrl = '';
+    }
+  }
+
+  /** Minimal Markdown → HTML (headers, lists, tables, code, links). */
+  function renderMarkdown(src) {
+    const lines = String(src || '').replace(/\r\n/g, '\n').split('\n');
+    const html = [];
+    let i = 0;
+    let inCode = false;
+    let codeLang = '';
+    let codeBuf = [];
+    let listType = null; // ul | ol
+    let inTable = false;
+
+    const flushList = () => {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = null;
+      }
+    };
+    const flushTable = () => {
+      if (inTable) {
+        html.push('</tbody></table></div>');
+        inTable = false;
+      }
+    };
+    const inline = (text) => {
+      let t = esc(text);
+      t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+      t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) => {
+        const safe = String(href).startsWith('http') || String(href).startsWith('/') || String(href).startsWith('#')
+          ? href
+          : '#';
+        const ext = String(safe).startsWith('http') ? ' target="_blank" rel="noopener"' : '';
+        return `<a href="${esc(safe)}"${ext}>${label}</a>`;
+      });
+      return t;
+    };
+    const splitRow = (line) => line.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.startsWith('```')) {
+        flushList();
+        flushTable();
+        if (!inCode) {
+          inCode = true;
+          codeLang = line.slice(3).trim();
+          codeBuf = [];
+        } else {
+          html.push(`<pre class="docs-code"><code class="lang-${esc(codeLang)}">${esc(codeBuf.join('\n'))}</code></pre>`);
+          inCode = false;
+          codeLang = '';
+          codeBuf = [];
+        }
+        i += 1;
+        continue;
+      }
+      if (inCode) {
+        codeBuf.push(line);
+        i += 1;
+        continue;
+      }
+      if (/^\|/.test(line) && line.includes('|')) {
+        flushList();
+        const cells = splitRow(line);
+        const next = lines[i + 1] || '';
+        const isSep = /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(next);
+        if (!inTable) {
+          html.push('<div class="table-wrap docs-table"><table class="data"><thead><tr>');
+          cells.forEach((c) => { html.push(`<th>${inline(c)}</th>`); });
+          html.push('</tr></thead><tbody>');
+          inTable = true;
+          if (isSep) {
+            i += 2;
+            continue;
+          }
+          i += 1;
+          continue;
+        }
+        if (isSep) {
+          i += 1;
+          continue;
+        }
+        html.push('<tr>');
+        cells.forEach((c) => { html.push(`<td>${inline(c)}</td>`); });
+        html.push('</tr>');
+        i += 1;
+        continue;
+      }
+      flushTable();
+      if (/^---+$/.test(line.trim())) {
+        flushList();
+        html.push('<hr class="docs-hr">');
+        i += 1;
+        continue;
+      }
+      const hm = line.match(/^(#{1,3})\s+(.*)$/);
+      if (hm) {
+        flushList();
+        const lvl = hm[1].length;
+        const id = hm[2].toLowerCase().replace(/[^a-z0-9àâäéèêëïîôùûüç]+/gi, '-').replace(/^-|-$/g, '');
+        html.push(`<h${lvl} id="${esc(id)}" class="docs-h${lvl}">${inline(hm[2])}</h${lvl}>`);
+        i += 1;
+        continue;
+      }
+      const ul = line.match(/^[-*]\s+(.*)$/);
+      if (ul) {
+        if (listType !== 'ul') {
+          flushList();
+          html.push('<ul class="docs-list">');
+          listType = 'ul';
+        }
+        html.push(`<li>${inline(ul[1])}</li>`);
+        i += 1;
+        continue;
+      }
+      const ol = line.match(/^\d+\.\s+(.*)$/);
+      if (ol) {
+        if (listType !== 'ol') {
+          flushList();
+          html.push('<ol class="docs-list">');
+          listType = 'ol';
+        }
+        html.push(`<li>${inline(ol[1])}</li>`);
+        i += 1;
+        continue;
+      }
+      if (line.trim() === '') {
+        flushList();
+        i += 1;
+        continue;
+      }
+      flushList();
+      html.push(`<p class="docs-p">${inline(line)}</p>`);
+      i += 1;
+    }
+    flushList();
+    flushTable();
+    if (inCode) {
+      html.push(`<pre class="docs-code"><code>${esc(codeBuf.join('\n'))}</code></pre>`);
+    }
+    return html.join('\n');
+  }
+
+  async function viewDocs() {
+    root.innerHTML = shell('Documentation', `
+      ${pageHeader('Documentation', false)}
+      <div class="panel-card docs-panel">
+        <div class="muted" id="docs-loading">Chargement du guide…</div>
+        <div class="docs-body" id="docs-body" hidden></div>
+      </div>
+    `, { subtitle: 'Guide produit & API' });
+    try {
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.1', { headers: { Accept: 'text/plain' } });
+      if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
+      const md = await res.text();
+      const el = document.getElementById('docs-body');
+      const loading = document.getElementById('docs-loading');
+      if (el) {
+        el.innerHTML = renderMarkdown(md);
+        el.hidden = false;
+      }
+      if (loading) loading.remove();
+    } catch (err) {
+      const loading = document.getElementById('docs-loading');
+      if (loading) loading.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
     }
   }
 
@@ -4200,26 +4595,46 @@ CMD ["sh"]
       errMsg = err.message || String(err);
     }
 
+    const shortSeen = (ts) => {
+      const n = Number(ts) || 0;
+      if (!n) return '—';
+      try {
+        const d = new Date(n * 1000);
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mi = String(d.getMinutes()).padStart(2, '0');
+        return `${dd}/${mm} ${hh}:${mi}`;
+      } catch (_) {
+        return formatAuditTime(ts);
+      }
+    };
+
     const tlsCell = (n) => {
       if (n.Kind !== 'agent') return '<span class="muted">—</span>';
       if (!n.TlsExpiresAt) {
-        return '<span class="muted" title="HTTPS autosigné — date inconnue tant que le nœud n’a pas répondu">HTTPS · ?</span>';
+        return '<span class="muted" title="HTTPS autosigné — date inconnue tant que le nœud n’a pas répondu">?</span>';
       }
       const days = Number(n.TlsDaysLeft);
-      const renew = n.TlsRenewBy || '';
-      const exp = formatAuditTime(n.TlsExpiresAt);
+      const renew = String(n.TlsRenewBy || '').slice(0, 7); // YYYY-MM
+      const expFull = formatAuditTime(n.TlsExpiresAt);
+      const tip = `TLS autosigné — expire ${expFull} · renouvellement auto ~30 j avant`;
       let cls = 'badge-success';
-      let label = `Expire ${esc(exp)}`;
+      let label = renew ? `OK · ${esc(renew)}` : 'OK';
       if (Number.isFinite(days) && days <= 0) {
         cls = 'badge-danger';
-        label = `Expiré (${esc(exp)})`;
+        label = 'Expiré';
       } else if (Number.isFinite(days) && days <= 30) {
         cls = 'badge-warn';
-        label = `Renouveler avant ${esc(renew || exp)} · ${days} j`;
-      } else if (renew) {
-        label = `Valide · renouveler ~${esc(renew)}`;
+        label = `${days} j`;
       }
-      return `<span class="badge ${cls}" title="Certificat TLS autosigné — renouvellement auto agent ~30 j avant expiry">${label}</span>`;
+      const pin = n.TlsFingerprintShort
+        ? ` · pin ${esc(n.TlsFingerprintShort)}`
+        : (n.TlsPinned ? '' : ' · pin…');
+      const pinTip = n.TlsFingerprint
+        ? `${tip} · empreinte SHA-256 ${n.TlsFingerprint}`
+        : `${tip} · empreinte pas encore épinglée (TOFU au prochain ping)`;
+      return `<span class="badge badge-compact ${cls}" title="${esc(pinTip)}">${label}${pin}</span>`;
     };
 
     const rows = nodes.map((n) => {
@@ -4227,19 +4642,20 @@ CMD ["sh"]
       const actions = isLocal
         ? '<span class="muted">—</span>'
         : `<div class="quick-actions">
-            <button type="button" class="btn btn-sm" data-ping="${esc(n.Id)}">Ping</button>
+            <button type="button" class="btn btn-icon btn-sm" title="Ping" aria-label="Ping" data-ping="${esc(n.Id)}"><span class="btn-ico">${ico('activity')}</span></button>
             ${Number(n.Status) === 0
-              ? `<button type="button" class="btn btn-sm btn-success" data-enable="${esc(n.Id)}">Activer</button>`
-              : `<button type="button" class="btn btn-sm" data-disable="${esc(n.Id)}">Désactiver</button>`}
-            <button type="button" class="btn btn-sm btn-danger" data-unlink="${esc(n.Id)}">Délier</button>
+              ? `<button type="button" class="btn btn-icon btn-sm btn-success" title="Activer" aria-label="Activer" data-enable="${esc(n.Id)}"><span class="btn-ico">${ico('start')}</span></button>`
+              : `<button type="button" class="btn btn-icon btn-sm" title="Désactiver" aria-label="Désactiver" data-disable="${esc(n.Id)}"><span class="btn-ico">${ico('stop')}</span></button>`}
+            <button type="button" class="btn btn-icon btn-sm btn-danger" title="Délier" aria-label="Délier" data-unlink="${esc(n.Id)}"><span class="btn-ico">${ico('remove')}</span></button>
           </div>`;
+      const url = n.AgentURL || n.URL || '—';
       return `<tr>
         <td><strong>${esc(n.NodeName || n.Name)}</strong><div class="muted mono">#${esc(n.Id)}</div></td>
         <td>${esc(n.Kind === 'agent' ? 'Agent' : 'Local')}</td>
-        <td class="mono cell-clip" title="${esc(n.AgentURL || n.URL)}">${esc(n.AgentURL || n.URL || '—')}</td>
+        <td class="mono cell-clip" title="${esc(url)}">${esc(url)}</td>
         <td>${nodeStatusLabel(n.Status)}</td>
         <td>${tlsCell(n)}</td>
-        <td class="muted">${n.LastSeenAt ? esc(formatAuditTime(n.LastSeenAt)) : '—'}</td>
+        <td class="muted mono" title="${esc(n.LastSeenAt ? formatAuditTime(n.LastSeenAt) : '')}">${esc(n.LastSeenAt ? shortSeen(n.LastSeenAt) : '—')}</td>
         <td class="actions">${actions}</td>
       </tr>`;
     }).join('');
@@ -4285,8 +4701,8 @@ CMD ["sh"]
       <div class="panel-card">
         <div class="panel-head"><h3>Nœuds enregistrés</h3></div>
         <div class="table-wrap" style="border:0;box-shadow:none">
-          <table class="data">
-            <thead><tr><th>Nom</th><th>Type</th><th>URL</th><th>Statut</th><th>TLS</th><th>Vu</th><th></th></tr></thead>
+          <table class="data table-nodes">
+            <thead><tr><th>Nom</th><th>Type</th><th>URL</th><th>Statut</th><th>TLS</th><th>Vu</th><th class="actions-col"></th></tr></thead>
             <tbody>${rows || `<tr><td colspan="7" class="empty">Aucun nœud</td></tr>`}</tbody>
           </table>
         </div>
@@ -4642,7 +5058,11 @@ CMD ["sh"]
           </div>` : ''}
           <div class="form-group">
             <label class="field-label">Nouveau mot de passe <span class="req">*</span></label>
-            <input id="new-password" type="password" minlength="8" autocomplete="new-password">
+            <input id="new-password" type="password" minlength="10" autocomplete="new-password">
+          </div>
+          <div class="form-group">
+            <label class="field-label">Confirmer le nouveau mot de passe <span class="req">*</span></label>
+            <input id="confirm-password" type="password" minlength="10" autocomplete="new-password">
           </div>
           <div class="actions-bar">
             <button class="btn btn-primary" id="save-pass">Mettre à jour</button>
@@ -4654,7 +5074,13 @@ CMD ["sh"]
     onBusyClick(document.getElementById('save-pass'), async () => {
       const errBox = document.getElementById('user-form-err');
       errBox.innerHTML = '';
-      const payload = { Password: document.getElementById('new-password').value };
+      const password = document.getElementById('new-password').value;
+      const confirm = document.getElementById('confirm-password').value;
+      if (password !== confirm) {
+        errBox.innerHTML = '<div class="error-box">Les mots de passe ne correspondent pas</div>';
+        return;
+      }
+      const payload = { Password: password, PasswordConfirm: confirm };
       if (isSelf) payload.CurrentPassword = document.getElementById('cur-password').value;
       try {
         await Api.changePassword(userId, payload);
@@ -4770,11 +5196,7 @@ CMD ["sh"]
       else if (state.route === 'networks') await viewNetworks();
       else if (state.route === 'stacks' || state.route === 'stacks/new') await viewStacks();
       else if (state.route.startsWith('stacks/')) {
-        if (isAllNodes()) {
-          root.innerHTML = shell('Stack', `${pageHeader('Stack')} ${pickNodeGuardHtml()}`);
-        } else {
-          await viewStackDetail(state.route.split('/')[1]);
-        }
+        await viewStackDetail(state.route.split('/')[1]);
       }
       else if (state.route === 'activity') await viewActivity();
       else if (state.route === 'nodes') {
@@ -4788,12 +5210,14 @@ CMD ["sh"]
       else if (state.route === 'users') await viewUsers();
       else if (state.route === 'registries') await viewRegistries();
       else if (state.route.startsWith('registries/')) await viewRegistryBrowse(state.route.split('/')[1]);
+      else if (state.route === 'docs') await viewDocs();
       else if (state.route === 'about') {
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.2.0</strong> — gestion Docker multi-nœuds (agents, vue Tous les nœuds).</p>
+          <p class="muted">Version <strong>1.4.1</strong> — volumes agents, drag-and-drop, TLS pin & health.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
+          <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
           <p class="muted">Socket : <code>unix:///var/run/docker.so</code></p>
           <p class="muted"><a href="/" target="_blank" rel="noopener">Site public</a> — présentation du projet et des outils.</p>

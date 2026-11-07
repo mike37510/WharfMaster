@@ -3,12 +3,58 @@ declare(strict_types=1);
 
 namespace App\Storage;
 
+use App\Security\SecretBox;
 use PDO;
 
 final class Repositories
 {
-    public function __construct(private readonly PDO $pdo)
+    private ?SecretBox $secrets = null;
+
+    public function __construct(private readonly PDO $pdo, ?SecretBox $secrets = null)
     {
+        $this->secrets = $secrets;
+    }
+
+    public function setSecretBox(SecretBox $secrets): void
+    {
+        $this->secrets = $secrets;
+    }
+
+    private function sealRegistryPassword(string $password): string
+    {
+        if ($this->secrets === null || $password === '') {
+            return $password;
+        }
+        return $this->secrets->encrypt($password);
+    }
+
+    private function openRegistryPassword(string $stored): string
+    {
+        if ($this->secrets === null || $stored === '') {
+            return $stored;
+        }
+        try {
+            return $this->secrets->decrypt($stored);
+        } catch (\Throwable) {
+            return $stored;
+        }
+    }
+
+    /** Encrypt any leftover plaintext registry passwords (idempotent). */
+    public function migrateRegistryPasswords(): void
+    {
+        if ($this->secrets === null) {
+            return;
+        }
+        $rows = $this->pdo->query('SELECT id, password FROM registries')->fetchAll() ?: [];
+        $stmt = $this->pdo->prepare('UPDATE registries SET password = ? WHERE id = ?');
+        foreach ($rows as $row) {
+            $pass = (string) ($row['password'] ?? '');
+            if ($pass === '' || $this->secrets->isEncrypted($pass)) {
+                continue;
+            }
+            $stmt->execute([$this->secrets->encrypt($pass), (int) $row['id']]);
+        }
     }
 
     public function userCount(): int
@@ -206,6 +252,27 @@ final class Repositories
     {
         $stmt = $this->pdo->prepare('UPDATE endpoints SET tls_expires_at = ? WHERE id = ?');
         $stmt->execute([$tlsExpiresAt, $id]);
+    }
+
+    public function updateEndpointTlsFingerprint(int $id, string $fingerprint): void
+    {
+        $stmt = $this->pdo->prepare('UPDATE endpoints SET tls_fingerprint = ? WHERE id = ?');
+        $stmt->execute([strtolower(trim($fingerprint)), $id]);
+    }
+
+    public function updateEndpointTlsMeta(int $id, ?int $tlsExpiresAt, ?string $fingerprint): void
+    {
+        if ($fingerprint !== null && $fingerprint !== '' && $tlsExpiresAt !== null) {
+            $stmt = $this->pdo->prepare('UPDATE endpoints SET tls_expires_at = ?, tls_fingerprint = ? WHERE id = ?');
+            $stmt->execute([$tlsExpiresAt, strtolower(trim($fingerprint)), $id]);
+            return;
+        }
+        if ($fingerprint !== null && $fingerprint !== '') {
+            $this->updateEndpointTlsFingerprint($id, $fingerprint);
+        }
+        if ($tlsExpiresAt !== null) {
+            $this->updateEndpointTlsExpires($id, $tlsExpiresAt);
+        }
     }
 
     public function setEndpointStatus(int $id, int $status): void
@@ -409,6 +476,14 @@ final class Repositories
         $stmt->execute([$id]);
     }
 
+    /** Status: 1 = active, 2 = stopped */
+    public function setStackStatus(int $id, int $status): ?array
+    {
+        $stmt = $this->pdo->prepare('UPDATE stacks SET status = ?, update_date = ? WHERE id = ?');
+        $stmt->execute([$status, time(), $id]);
+        return $this->getStack($id);
+    }
+
     public function getSetting(string $key, ?string $default = null): ?string
     {
         $stmt = $this->pdo->prepare('SELECT value FROM settings WHERE key = ?');
@@ -438,7 +513,11 @@ final class Repositories
         $stmt = $this->pdo->prepare('SELECT * FROM registries WHERE id = ?');
         $stmt->execute([$id]);
         $row = $stmt->fetch();
-        return $row ?: null;
+        if (!$row) {
+            return null;
+        }
+        $row['password'] = $this->openRegistryPassword((string) ($row['password'] ?? ''));
+        return $row;
     }
 
     public function createRegistry(
@@ -460,7 +539,7 @@ final class Repositories
             $name,
             $url,
             $username,
-            $password,
+            $this->sealRegistryPassword($password),
             $type,
             $now,
             $ownerId,
@@ -515,7 +594,8 @@ final class Repositories
         if (!$existing) {
             return null;
         }
-        $pass = $password !== null ? $password : (string) $existing['password'];
+        $passPlain = $password !== null ? $password : (string) $existing['password'];
+        $pass = $this->sealRegistryPassword($passPlain);
         $stmt = $this->pdo->prepare(
             'UPDATE registries SET name = ?, url = ?, username = ?, password = ?, type = ? WHERE id = ?'
         );

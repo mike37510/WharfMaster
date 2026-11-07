@@ -1,7 +1,8 @@
 FROM php:8.3-cli-alpine
 
-RUN apk add --no-cache curl openssl socat \
- && docker-php-ext-enable opcache 2>/dev/null || true
+RUN apk add --no-cache curl openssl socat docker-cli docker-cli-compose \
+ && docker-php-ext-enable opcache 2>/dev/null || true \
+ && (docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1)
 
 WORKDIR /app
 COPY agent.php /app/agent.php
@@ -15,10 +16,11 @@ ENV NODE_SECRET= \
     AGENT_PORT=9001 \
     AGENT_INTERNAL_PORT=9002 \
     AGENT_CERT_DIR=/data/certs \
+    AGENT_STACKS_DIR=/data/stacks \
     AGENT_TLS_DAYS=365 \
     AGENT_TLS_CN=wharfmaster-agent
 
-VOLUME ["/data/certs"]
+VOLUME ["/data/certs", "/data/stacks"]
 EXPOSE 9001
 
 CMD ["/app/entrypoint.sh"]

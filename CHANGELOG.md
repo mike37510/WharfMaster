@@ -2,6 +2,44 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.4.1] — 2026-11-07
+
+### Ajouté
+- **Drag-and-drop** dans l’explorateur de volumes (fichiers et dossiers, max 2 Mo / fichier)
+
+### Corrigé
+- Explorateur / écriture de volumes sur **nœuds agent** (APIs scopées `/api/endpoints/{id}/volumes/…`)
+- Ascenseur inutile masqué dans la barre latérale
+
+## [1.4.0] — 2026-11-07
+
+### Ajouté
+- **Pinning TLS agent** : empreinte SHA-256 stockée à la jointure / premier ping (TOFU) ; refus si mismatch
+- **Chiffrement at-rest** des mots de passe registres (AES-256-GCM, clé `WM_MASTER_KEY` ou `jwt.secret`)
+- **`GET /api/health`** : docker, compose, droits `data/`, SQLite
+- **`GET /api/backup`** (admin) : export SQLite cohérent
+- Image agent **versionnée** (`…/wharfmaster-agent:1.4.0`) injectée dans la commande d’install
+- Script [`scripts/sync-agent.sh`](scripts/sync-agent.sh) ; HSTS si HTTPS
+
+### Modifié
+- Colonne Nœuds TLS : badge compact + courte empreinte (`pin abcdef…`)
+- Version site / console alignées sur 1.4.0
+
+## [1.3.0] — 2026-11-07
+
+### Ajouté
+- **Stacks Compose sur nœuds agent** : le principal valide + miroir YAML ; `up` / `down` délégués à l’agent (`/compose/up|down`)
+- Image agent : `docker-cli` + plugin Compose ; bind-mount hôte `/var/lib/wharfmaster/stacks` → `/data/stacks`
+- Client `AgentComposeClient` ; liste stacks agrégée en mode **Tous les nœuds** (colonne Nœud)
+
+### Modifié
+- `install.sh` : `--stacks-dir`, volume stacks, health `compose: true`
+- Création / maj / suppression de stacks autorisées sur un endpoint agent sélectionné
+
+### Limites
+- Mode « Tous » : create stack exige un nœud précis (pas de placement multi-nœud d’une même stack)
+- Pas de sync bidirectionnelle si les fichiers sont édités à la main sur le nœud
+
 ## [1.2.0] — 2026-11-07
 
 ### Ajouté
@@ -22,7 +60,7 @@ Toutes les dates sont en UTC+1.
 
 ### Limites
 - Mode « Tous » en **lecture** : start/stop/create/pull/build exigent un nœud précis
-- Stacks Compose sur nœuds agent non supportées (nœud local uniquement)
+- Stacks Compose sur nœuds agent non supportées (nœud local uniquement) — levé en **1.3.0**
 
 ## [1.1.0] — 2026-11-07
 

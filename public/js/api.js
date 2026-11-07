@@ -158,6 +158,12 @@ const Api = (() => {
       }),
     deleteStack: (id) =>
       request(`/api/stacks/${id}?endpointId=${getEndpointId()}`, { method: 'DELETE' }),
+    startStack: (id) =>
+      request(`/api/stacks/${id}/start`, { method: 'POST' }),
+    stopStack: (id) =>
+      request(`/api/stacks/${id}/stop`, { method: 'POST' }),
+    restartStack: (id) =>
+      request(`/api/stacks/${id}/restart`, { method: 'POST' }),
     registries: () => request('/api/registries'),
     registry: (id) => request(`/api/registries/${id}`),
     createRegistry: (payload) =>
@@ -176,30 +182,42 @@ const Api = (() => {
         body: JSON.stringify({ Repository, Tag }),
       }),
     pingRegistry: (id) => request(`/api/registries/${id}/ping`),
+    volumeBase: (name) => {
+      const id = getEndpointId();
+      if (!Number.isFinite(id) || id < 1) {
+        throw new Error('Choisissez un nœud pour explorer ce volume');
+      }
+      return `/api/endpoints/${id}/volumes/${encodeURIComponent(name)}`;
+    },
     volumeBrowse: (name, path = '/') =>
-      request(`/api/volumes/${encodeURIComponent(name)}/browse?path=${encodeURIComponent(path)}`),
+      request(`${Api.volumeBase(name)}/browse?path=${encodeURIComponent(path)}`),
     volumeFile: (name, path) =>
-      request(`/api/volumes/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`),
+      request(`${Api.volumeBase(name)}/file?path=${encodeURIComponent(path)}`),
     volumeWriteFile: (name, Path, opts = {}) =>
-      request(`/api/volumes/${encodeURIComponent(name)}/file`, {
+      request(`${Api.volumeBase(name)}/file`, {
         method: 'POST',
-        body: JSON.stringify({ Path, Content: opts.Content ?? '', Encoding: opts.Encoding || 'text', CreateOnly: opts.CreateOnly !== false }),
+        body: JSON.stringify({
+          Path,
+          Content: opts.Content ?? '',
+          Encoding: opts.Encoding || 'text',
+          CreateOnly: opts.CreateOnly === undefined ? true : !!opts.CreateOnly,
+        }),
       }),
     volumeMkdir: (name, Path) =>
-      request(`/api/volumes/${encodeURIComponent(name)}/mkdir`, {
+      request(`${Api.volumeBase(name)}/mkdir`, {
         method: 'POST',
         body: JSON.stringify({ Path }),
       }),
     volumeRename: (name, From, To) =>
-      request(`/api/volumes/${encodeURIComponent(name)}/rename`, {
+      request(`${Api.volumeBase(name)}/rename`, {
         method: 'POST',
         body: JSON.stringify({ From, To }),
       }),
     volumeDeleteEntry: (name, Path) =>
-      request(`/api/volumes/${encodeURIComponent(name)}/entry?path=${encodeURIComponent(Path)}`, {
+      request(`${Api.volumeBase(name)}/entry?path=${encodeURIComponent(Path)}`, {
         method: 'DELETE',
       }),
     volumeDownloadUrl: (name, path) =>
-      `/api/volumes/${encodeURIComponent(name)}/download?path=${encodeURIComponent(path)}`,
+      `${Api.volumeBase(name)}/download?path=${encodeURIComponent(path)}`,
   };
 })();

@@ -7,7 +7,8 @@ CERT_DIR="${AGENT_CERT_DIR:-/data/certs}"
 DAYS="${AGENT_TLS_DAYS:-365}"
 CN="${AGENT_TLS_CN:-wharfmaster-agent}"
 
-mkdir -p "$CERT_DIR"
+STACKS_DIR="${AGENT_STACKS_DIR:-/data/stacks}"
+mkdir -p "$CERT_DIR" "$STACKS_DIR"
 CERT="$CERT_DIR/cert.pem"
 KEY="$CERT_DIR/key.pem"
 

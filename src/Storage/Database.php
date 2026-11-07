@@ -137,6 +137,7 @@ SQL);
         $this->ensureColumn('endpoints', 'last_seen_at', 'INTEGER');
         $this->ensureColumn('endpoints', 'joined_at', 'INTEGER');
         $this->ensureColumn('endpoints', 'tls_expires_at', 'INTEGER');
+        $this->ensureColumn('endpoints', 'tls_fingerprint', "TEXT NOT NULL DEFAULT ''");
         $this->pdo->exec("UPDATE endpoints SET kind = 'local' WHERE id = 1 AND (kind IS NULL OR kind = '')");
         $this->pdo->exec("UPDATE endpoints SET node_name = name WHERE (node_name IS NULL OR node_name = '') AND name IS NOT NULL AND name != ''");
     }

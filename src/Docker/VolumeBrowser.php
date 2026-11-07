@@ -171,11 +171,11 @@ SH;
         $target = '/volume/' . $rel;
         $out = $this->runInVolume($volumeName, [
             'sh', '-c',
-            'if [ -e "$1" ]; then echo EXISTS; exit 2; fi; mkdir -p "$1"',
+            'if [ -d "$1" ]; then exit 0; fi; if [ -e "$1" ]; then echo EXISTS; exit 2; fi; mkdir -p "$1"',
             'mkdir', $target,
         ], false);
         if (str_contains($out['Stdout'] . $out['Stderr'], 'EXISTS') || $out['ExitCode'] === 2) {
-            throw new \RuntimeException('Ce chemin existe déjà', 409);
+            throw new \RuntimeException('Ce chemin existe déjà (fichier)', 409);
         }
         if ($out['ExitCode'] !== 0) {
             throw new \RuntimeException($this->execError($out, 'Création du dossier impossible'), 500);

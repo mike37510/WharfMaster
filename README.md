@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.2.0 |
+| **Version** | 1.4.1 |
 | **Console** | `/app` |
 | **Site public** | `/` |
 | **API** | `/api` |
@@ -44,11 +44,11 @@
 - **Conteneurs** — création, start / stop / restart, logs (suivi live, recherche, export), console, inspect
 - **Images** — recherche locale + Docker Hub, pull, build Dockerfile
 - **Volumes** — création, explorateur de fichiers (créer / renommer / supprimer au clic droit)
-- **Réseaux & stacks Compose** — éditeur YAML, variables `.env`, déploiement
+- **Réseaux & stacks Compose** — éditeur YAML, variables `.env`, déploiement local **et sur agents**
 - **Registres** — Docker Hub / Registry V2, parcours dépôts & tags, pull
 - **Utilisateurs** — rôles admin / utilisateur, isolation par labels `dockermanager.owner*`
 - **Journaux** — audit applicatif (connexions, actions Docker / stacks / utilisateurs)
-- **Nœuds (multinode)** — agents HTTPS, token de jointure, sélecteur (nœud ou **Tous**), TLS, délier
+- **Nœuds (multinode)** — agents HTTPS, token de jointure, sélecteur (nœud ou **Tous**), TLS, délier, stacks distantes
 - **Sécurité** — rate-limit login, politique Compose résolue (`docker compose config`), proxy Docker restreint pour les non-admins
 
 ---
@@ -56,6 +56,8 @@
 ## Multinode (agents)
 
 Le serveur principal génère un **token de jointure**. Sur chaque hôte Docker distant, une commande installe un **agent HTTPS** (certificat autosigné) ; le principal proxyfie l’API Docker via cet agent. Le certificat est renouvelé automatiquement ~30 jours avant expiration ; la page **Nœuds** affiche la date de renouvellement / expiration TLS.
+
+Les **stacks Compose** peuvent être déployées sur un nœud agent : le principal valide le YAML (`ComposePolicy` + `docker compose config`) et conserve un miroir local pour l’éditeur ; l’agent exécute `docker compose up/down` sur le socket Docker du nœud. Les projets sont stockés sur l’hôte agent sous `/var/lib/wharfmaster/stacks` (monté dans l’agent en `/data/stacks`).
 
 ### Enrôler un nœud
 
@@ -72,9 +74,11 @@ curl -fsSL https://VOTRE-SERVEUR/public/agent/install.sh | sh -s -- \
   --name node5
 ```
 
-3. Dans la console, choisir le nœud via le sélecteur en haut à droite — ou **Tous les nœuds** pour le dashboard / listes agrégés (lecture seule ; les actions d’écriture demandent un nœud précis).
+Optionnel : `--stacks-dir /chemin` (défaut `/var/lib/wharfmaster/stacks`).
 
-Le nœud local ne peut pas être délié. Relancer `install.sh` sur le même advertise **rejoint** le nœud (nouveau secret). Les stacks Compose restent sur le nœud local. Les échanges HTTP non chiffrés vers l’agent sont refusés à la jointure.
+3. Dans la console, choisir le nœud via le sélecteur en haut à droite — ou **Tous les nœuds** pour le dashboard / listes agrégés (lecture seule ; create/update/delete stack et actions Docker demandent un nœud précis).
+
+Le nœud local ne peut pas être délié. Relancer `install.sh` sur le même advertise **rejoint** le nœud (nouveau secret) et met à jour l’image agent (Compose inclus). Les échanges HTTP non chiffrés vers l’agent sont refusés à la jointure.
 
 Fichiers agent : [`agent/`](agent/), script public : [`public/agent/install.sh`](public/agent/install.sh).
 
@@ -139,7 +143,9 @@ L’utilisateur Apache doit pouvoir lire/écrire le socket Docker (groupe `docke
 |-----|------|
 | `http://votre-hote/` | Site public de présentation |
 | `http://votre-hote/app` | Console WharfMaster |
-| `http://votre-hote/api/status` | Santé API (JSON) |
+| `http://votre-hote/api/status` | Version / InstanceID |
+| `http://votre-hote/api/health` | Santé (docker, compose, `data/`) |
+| `http://votre-hote/api/backup` | Export SQLite (admin, JWT) |
 
 ---
 
@@ -191,17 +197,42 @@ export DOCKER_SOCKET=/var/run/docker.sock
 export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
+export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.1
 ```
+
+### Backup / restauration
+
+```bash
+# Export (admin JWT)
+curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.sqlite https://VOTRE-SERVEUR/api/backup
+
+# Restauration : arrêter Apache, remplacer data/dockermanager.sqlite, redémarrer
+# Conserver aussi data/jwt.secret (et WM_MASTER_KEY) pour déchiffrer les registres.
+```
+
+Sources agent : éditer [`agent/`](agent/) puis `sh scripts/sync-agent.sh` avant release.
 
 ---
 
 ## Sécurité (rappel)
 
 - **`data/`** contient JWT + SQLite → ne pas exposer (bloqué par `.htaccess` / Apache)
-- En production : **HTTPS** obligatoire
+- En production : **HTTPS** obligatoire (HSTS activé si `HTTPS=on`)
+- Agents : empreinte TLS épinglée (SHA-256) ; mismatch → refus (rejoindre le nœud)
+- Mots de passe registres chiffrés at-rest (`enc:v1:…`)
 - Non-admin : pas de `privileged`, bind hôte, `docker.sock`, `network/pid: host`, etc.
 - Stacks non-admin validées via `docker compose config` (YAML + `.env` résolus)
 - Rate-limit : 8 tentatives de login / 15 min par IP
+
+---
+
+## Documentation
+
+Guide produit + **référence API** (auth JWT / clé API, Docker proxy, stacks, nœuds, registres, health, backup) :
+
+- Fichier : [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md)
+- Console : menu **Documentation** (`/app#docs`)
 
 ---
 
@@ -248,7 +279,7 @@ Authentification : header `Authorization: Bearer <jwt>` (obtenu via `POST /api/a
 ```
 ├── api/                 Front controller API PHP
 ├── agent/               Agent distant (Dockerfile + PHP)
-├── docs/                Schémas / visuels (ex. API Portainer)
+├── docs/                Documentation (`DOCUMENTATION.md`) + visuels API
 ├── public/
 │   ├── index.html       SPA console (/app)
 │   ├── js/ css/         Interface

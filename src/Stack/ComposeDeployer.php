@@ -25,14 +25,19 @@ final class ComposeDeployer
     public function writeComposeFile(string $stackName, string $content, string $entryPoint = 'docker-compose.yml'): string
     {
         $dir = $this->projectDir($stackName);
-        if (!is_dir($dir)) {
-            mkdir($dir, 0755, true);
+        $this->writeComposeContent($dir, $content, $entryPoint);
+        return $dir;
+    }
+
+    public function writeComposeContent(string $projectPath, string $content, string $entryPoint = 'docker-compose.yml'): void
+    {
+        if (!is_dir($projectPath)) {
+            mkdir($projectPath, 0755, true);
         }
-        $path = $dir . '/' . $entryPoint;
+        $path = rtrim($projectPath, '/') . '/' . $entryPoint;
         if (file_put_contents($path, $content) === false) {
             throw new \RuntimeException("Impossible d'écrire le fichier Compose");
         }
-        return $dir;
     }
 
     public function readComposeFile(string $projectPath, string $entryPoint = 'docker-compose.yml'): string
@@ -127,6 +132,42 @@ final class ComposeDeployer
             $this->runCompose($projectPath, $projectName, ['down', '--remove-orphans'], $env);
         } catch (\Throwable) {
             // best-effort cleanup
+        }
+    }
+
+    /** @param list<array{name?:string,value?:string}|array{Name?:string,Value?:string}> $env */
+    public function start(string $projectPath, string $projectName, array $env = []): void
+    {
+        if (!is_dir($projectPath)) {
+            throw new \RuntimeException('Projet Compose introuvable');
+        }
+        try {
+            $this->runCompose($projectPath, $projectName, ['start'], $env);
+        } catch (\Throwable) {
+            // Conteneurs absents après un down partiel → recreate
+            $this->up($projectPath, $projectName, $env);
+        }
+    }
+
+    /** @param list<array{name?:string,value?:string}|array{Name?:string,Value?:string}> $env */
+    public function stop(string $projectPath, string $projectName, array $env = []): void
+    {
+        if (!is_dir($projectPath)) {
+            return;
+        }
+        $this->runCompose($projectPath, $projectName, ['stop'], $env);
+    }
+
+    /** @param list<array{name?:string,value?:string}|array{Name?:string,Value?:string}> $env */
+    public function restart(string $projectPath, string $projectName, array $env = []): void
+    {
+        if (!is_dir($projectPath)) {
+            throw new \RuntimeException('Projet Compose introuvable');
+        }
+        try {
+            $this->runCompose($projectPath, $projectName, ['restart'], $env);
+        } catch (\Throwable) {
+            $this->up($projectPath, $projectName, $env);
         }
     }
 
