@@ -119,6 +119,10 @@ final class App
             return $user;
         }
 
+        if ($path === '/api/audit' && $method === 'GET') {
+            return $this->listAudit($request, $user);
+        }
+
         if ($path === '/api/users/me' && $method === 'GET') {
             return Response::json($this->publicUser($user));
         }
@@ -148,7 +152,7 @@ final class App
         }
 
         if (preg_match('#^/api/users/(\d+)$#', $path, $m) && $method === 'DELETE') {
-            return $this->deleteUser((int) $m[1], $user);
+            return $this->deleteUser((int) $m[1], $request, $user);
         }
 
         if (preg_match('#^/api/users/(\d+)/tokens$#', $path, $m) && $method === 'POST') {
@@ -321,7 +325,7 @@ final class App
                 return $this->updateStack($id, $request, $user);
             }
             if ($method === 'DELETE') {
-                return $this->deleteStack($id, $user);
+                return $this->deleteStack($id, $request, $user);
             }
         }
 
@@ -403,6 +407,12 @@ final class App
         }
         $user = $this->repo->createAdmin($username, $password);
         $this->rateLimiter->clear($bucket);
+        $this->audit(
+            ['id' => (int) $user['id'], 'username' => (string) $user['username'], 'role' => (int) $user['role']],
+            'auth.admin_init',
+            'Initialisation de l’administrateur « ' . $username . ' »',
+            $request,
+        );
         return Response::json($this->publicUser([
             'id' => (int) $user['id'],
             'username' => $user['username'],
@@ -416,6 +426,9 @@ final class App
         $bucket = 'auth:' . $ip;
         if ($this->rateLimiter->tooMany($bucket)) {
             $retry = $this->rateLimiter->retryAfter($bucket);
+            $this->audit(null, 'auth.login.rate_limited', 'Connexion refusée (trop de tentatives)', $request, [
+                'ip' => $ip,
+            ]);
             return new Response(
                 429,
                 json_encode(['message' => 'Trop de tentatives de connexion'], JSON_UNESCAPED_UNICODE) ?: '{}',
@@ -433,6 +446,13 @@ final class App
         if (!$user || !password_verify($password, $user['password_hash'])) {
             $this->rateLimiter->hit($bucket);
             usleep(random_int(80_000, 180_000));
+            $this->audit(
+                null,
+                'auth.login.fail',
+                'Échec de connexion' . ($username !== '' ? ' pour « ' . $username . ' »' : ''),
+                $request,
+                ['username' => $username],
+            );
             return Response::error('Identifiants invalides', 422);
         }
         $this->rateLimiter->clear($bucket);
@@ -441,6 +461,12 @@ final class App
             'username' => $user['username'],
             'role' => (int) $user['role'],
         ]);
+        $this->audit(
+            ['id' => (int) $user['id'], 'username' => (string) $user['username'], 'role' => (int) $user['role']],
+            'auth.login.ok',
+            'Connexion de « ' . $user['username'] . ' »',
+            $request,
+        );
         return Response::json(['jwt' => $token]);
     }
 
@@ -462,6 +488,10 @@ final class App
         }
         $raw = 'ptr_' . bin2hex(random_bytes(24));
         $meta = $this->repo->createApiKey($userId, $description, $raw);
+        $this->audit($user, 'api_key.create', 'Création d’une clé API (« ' . $description . ' »)', $request, [
+            'targetUserId' => $userId,
+            'prefix' => $meta['prefix'],
+        ]);
         return Response::json([
             'id' => $meta['id'],
             'description' => $description,
@@ -486,7 +516,7 @@ final class App
             $forwardHeaders['Content-Type'] = $contentType;
         }
 
-        return $this->dockerScope->handle(
+        $response = $this->dockerScope->handle(
             $user,
             $request->method,
             $dockerPath,
@@ -494,6 +524,10 @@ final class App
             $forwardHeaders,
             $request->query,
         );
+        if ($response->status < 400) {
+            $this->auditDockerMutation($user, $request->method, $dockerPath, $request);
+        }
+        return $response;
     }
 
     /** @param array{id:int,username:string,role:int} $user */
@@ -505,11 +539,26 @@ final class App
         if (!$this->dockerScope->canAccessContainer($containerId, $user)) {
             return Response::error('Accès refusé à ce conteneur', 403);
         }
-        $tail = (int) ($request->query('tail') ?? 200);
+
+        $tailRaw = (string) ($request->query('tail') ?? '200');
+        $tail = strtolower($tailRaw) === 'all' ? 'all' : max(0, min(5000, (int) $tailRaw));
         $timestamps = ($request->query('timestamps') ?? 'true') !== 'false';
+        $stdout = ($request->query('stdout') ?? 'true') !== 'false';
+        $stderr = ($request->query('stderr') ?? 'true') !== 'false';
+        $annotate = ($request->query('annotate') ?? 'true') !== 'false';
+        $sinceRaw = $request->query('since');
+        $since = ($sinceRaw !== null && $sinceRaw !== '' && (int) $sinceRaw > 0) ? (int) $sinceRaw : null;
+
         try {
             $exec = new \App\Docker\Exec($this->docker);
-            $text = $exec->logs($containerId, $tail, $timestamps);
+            $text = $exec->logs($containerId, [
+                'tail' => $tail,
+                'timestamps' => $timestamps,
+                'stdout' => $stdout,
+                'stderr' => $stderr,
+                'since' => $since,
+                'annotate' => $annotate,
+            ]);
         } catch (\Throwable $e) {
             $status = $e->getCode() >= 400 && $e->getCode() < 600 ? (int) $e->getCode() : 500;
             return Response::error($e->getMessage(), $status);
@@ -654,6 +703,10 @@ final class App
             return Response::error($e->getMessage(), 500);
         }
 
+        $this->audit($user, 'stack.create', 'Création de la stack « ' . $name . ' »', $request, [
+            'stackId' => (int) ($row['id'] ?? 0),
+            'name' => $name,
+        ]);
         return Response::json($this->formatStack($row), 200);
     }
 
@@ -690,11 +743,15 @@ final class App
             return Response::error($e->getMessage(), 500);
         }
 
+        $this->audit($user, 'stack.update', 'Mise à jour de la stack « ' . $stack['name'] . ' »', $request, [
+            'stackId' => $id,
+            'name' => $stack['name'],
+        ]);
         return Response::json($this->formatStack($row ?? $stack));
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function deleteStack(int $id, array $user): Response
+    private function deleteStack(int $id, Request $request, array $user): Response
     {
         $stack = $this->repo->getStack($id);
         if (!$stack || !$this->canAccessStack($stack, $user)) {
@@ -711,6 +768,10 @@ final class App
         } catch (\Throwable $e) {
             return Response::error($e->getMessage(), 500);
         }
+        $this->audit($user, 'stack.delete', 'Suppression de la stack « ' . $stack['name'] . ' »', $request, [
+            'stackId' => $id,
+            'name' => $stack['name'],
+        ]);
         return Response::empty(204);
     }
 
@@ -1255,7 +1316,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.0.1',
+                'User-Agent: WharfMaster/1.0.2',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1372,6 +1433,9 @@ final class App
         }
         $this->repo->setSetting('public_url', $publicUrl);
         $this->repo->updateEndpointPublicUrl(1, $publicUrl);
+        $this->audit($user, 'settings.update', 'Mise à jour des paramètres', $request, [
+            'publicUrl' => $publicUrl,
+        ]);
         return Response::json($this->formatSettings());
     }
 
@@ -1415,6 +1479,10 @@ final class App
             return Response::error('Ce nom d\'utilisateur existe déjà', 409);
         }
         $created = $this->repo->createUser($username, $password, $role);
+        $this->audit($user, 'user.create', 'Création de l’utilisateur « ' . $username . ' »', $request, [
+            'targetId' => (int) $created['id'],
+            'role' => $role,
+        ]);
         return Response::json($this->publicUser([
             'id' => (int) $created['id'],
             'username' => $created['username'],
@@ -1447,11 +1515,15 @@ final class App
             }
         }
         $this->repo->updateUserPassword($id, $newPassword);
+        $this->audit($user, 'user.password', 'Changement de mot de passe pour « ' . $target['username'] . ' »', $request, [
+            'targetId' => $id,
+            'self' => $isSelf,
+        ]);
         return Response::empty(204);
     }
 
     /** @param array<string, mixed> $user */
-    private function deleteUser(int $id, array $user): Response
+    private function deleteUser(int $id, Request $request, array $user): Response
     {
         if ($err = $this->requireAdmin($user)) {
             return $err;
@@ -1471,6 +1543,9 @@ final class App
             }
         }
         $this->repo->deleteUser($id);
+        $this->audit($user, 'user.delete', 'Suppression de l’utilisateur « ' . $target['username'] . ' »', $request, [
+            'targetId' => $id,
+        ]);
         return Response::empty(204);
     }
 
@@ -1552,5 +1627,128 @@ final class App
         $id = bin2hex(random_bytes(16));
         $this->repo->setSetting('instance_id', $id);
         return $id;
+    }
+
+    /**
+     * @param array{id?:int,username?:string,role?:int}|null $user
+     * @param array<string, mixed> $meta
+     */
+    private function audit(?array $user, string $action, string $message, ?Request $request = null, array $meta = []): void
+    {
+        try {
+            $ip = $request ? $this->clientIp($request) : '';
+            $this->repo->addAuditEvent(
+                isset($user['id']) ? (int) $user['id'] : null,
+                (string) ($user['username'] ?? ''),
+                $action,
+                $message,
+                $ip,
+                $meta,
+            );
+        } catch (\Throwable $e) {
+            error_log('[WharfMaster] audit failed: ' . $e->getMessage());
+        }
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function auditDockerMutation(array $user, string $method, string $dockerPath, Request $request): void
+    {
+        $method = strtoupper($method);
+        $path = $dockerPath === '' ? '/' : $dockerPath;
+        $action = null;
+        $message = null;
+        $meta = ['method' => $method, 'path' => $path];
+
+        if ($method === 'POST' && preg_match('#^/containers/([^/]+)/start$#', $path, $m)) {
+            $action = 'docker.container.start';
+            $message = 'Démarrage du conteneur ' . $m[1];
+            $meta['containerId'] = $m[1];
+        } elseif ($method === 'POST' && preg_match('#^/containers/([^/]+)/stop#', $path, $m)) {
+            $action = 'docker.container.stop';
+            $message = 'Arrêt du conteneur ' . $m[1];
+            $meta['containerId'] = $m[1];
+        } elseif ($method === 'POST' && preg_match('#^/containers/([^/]+)/restart#', $path, $m)) {
+            $action = 'docker.container.restart';
+            $message = 'Redémarrage du conteneur ' . $m[1];
+            $meta['containerId'] = $m[1];
+        } elseif ($method === 'POST' && preg_match('#^/containers/create#', $path)) {
+            $action = 'docker.container.create';
+            $message = 'Création d’un conteneur';
+            $name = (string) ($request->query('name') ?? '');
+            if ($name !== '') {
+                $message .= ' « ' . $name . ' »';
+                $meta['name'] = $name;
+            }
+        } elseif ($method === 'DELETE' && preg_match('#^/containers/([^/]+)#', $path, $m)) {
+            $action = 'docker.container.remove';
+            $message = 'Suppression du conteneur ' . $m[1];
+            $meta['containerId'] = $m[1];
+        } elseif ($method === 'POST' && preg_match('#^/images/create#', $path)) {
+            $action = 'docker.image.pull';
+            $from = (string) ($request->query('fromImage') ?? $request->query('fromSrc') ?? '');
+            $message = 'Pull d’image' . ($from !== '' ? ' « ' . $from . ' »' : '');
+            $meta['image'] = $from;
+        } elseif ($method === 'DELETE' && preg_match('#^/images/(.+)$#', $path, $m)) {
+            $action = 'docker.image.remove';
+            $message = 'Suppression de l’image ' . rawurldecode($m[1]);
+            $meta['image'] = rawurldecode($m[1]);
+        } elseif ($method === 'POST' && preg_match('#^/volumes/create#', $path)) {
+            $action = 'docker.volume.create';
+            $message = 'Création d’un volume';
+        } elseif ($method === 'DELETE' && preg_match('#^/volumes/(.+)$#', $path, $m)) {
+            $action = 'docker.volume.remove';
+            $message = 'Suppression du volume ' . rawurldecode($m[1]);
+            $meta['volume'] = rawurldecode($m[1]);
+        } elseif ($method === 'POST' && preg_match('#^/networks/create#', $path)) {
+            $action = 'docker.network.create';
+            $message = 'Création d’un réseau';
+        } elseif ($method === 'DELETE' && preg_match('#^/networks/(.+)$#', $path, $m)) {
+            $action = 'docker.network.remove';
+            $message = 'Suppression du réseau ' . rawurldecode($m[1]);
+            $meta['network'] = rawurldecode($m[1]);
+        } elseif ($method === 'POST' && preg_match('#^/(containers|images|networks|build)/prune#', $path, $m)) {
+            $action = 'docker.prune.' . $m[1];
+            $message = 'Nettoyage Docker (' . $m[1] . ')';
+        }
+
+        if ($action !== null && $message !== null) {
+            $this->audit($user, $action, $message, $request, $meta);
+        }
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listAudit(Request $request, array $user): Response
+    {
+        $isAdmin = (int) ($user['role'] ?? 0) === 1;
+        $limit = (int) ($request->query('limit') ?? 100);
+        $offset = (int) ($request->query('offset') ?? 0);
+        $action = trim((string) ($request->query('action') ?? ''));
+        $actionFilter = $action !== '' ? $action : null;
+        $userFilter = $isAdmin ? null : (int) $user['id'];
+
+        $rows = $this->repo->listAuditEvents($limit, $offset, $actionFilter, $userFilter);
+        $total = $this->repo->countAuditEvents($actionFilter, $userFilter);
+
+        $items = array_map(static function (array $row): array {
+            $meta = json_decode((string) ($row['meta_json'] ?? '{}'), true);
+            if (!is_array($meta)) {
+                $meta = [];
+            }
+            return [
+                'Id' => (int) $row['id'],
+                'CreatedAt' => (int) $row['created_at'],
+                'UserId' => $row['user_id'] !== null ? (int) $row['user_id'] : null,
+                'Username' => (string) ($row['username'] ?? ''),
+                'Action' => (string) $row['action'],
+                'Message' => (string) $row['message'],
+                'Ip' => (string) ($row['ip'] ?? ''),
+                'Meta' => $meta,
+            ];
+        }, $rows);
+
+        return Response::json([
+            'Total' => $total,
+            'Items' => $items,
+        ]);
     }
 }

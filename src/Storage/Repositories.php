@@ -362,4 +362,87 @@ final class Repositories
         }
         $this->createRegistry('Docker Hub', 'https://docker.io', '', '', 'hub', null, '', true);
     }
+
+    /**
+     * @param array<string, mixed> $meta
+     */
+    public function addAuditEvent(
+        ?int $userId,
+        string $username,
+        string $action,
+        string $message,
+        string $ip = '',
+        array $meta = [],
+    ): void {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO audit_events (created_at, user_id, username, action, message, ip, meta_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+        $stmt->execute([
+            time(),
+            $userId,
+            $username,
+            $action,
+            $message,
+            $ip,
+            json_encode($meta === [] ? new \stdClass() : $meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}',
+        ]);
+        // Keep the table bounded (~5000 latest events)
+        $cutoff = $this->pdo->query(
+            'SELECT id FROM audit_events ORDER BY id DESC LIMIT 1 OFFSET 4999'
+        )->fetchColumn();
+        if ($cutoff) {
+            $del = $this->pdo->prepare('DELETE FROM audit_events WHERE id < ?');
+            $del->execute([(int) $cutoff]);
+        }
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function listAuditEvents(int $limit = 100, int $offset = 0, ?string $action = null, ?int $userId = null): array
+    {
+        $limit = max(1, min(500, $limit));
+        $offset = max(0, $offset);
+        $sql = 'SELECT id, created_at, user_id, username, action, message, ip, meta_json
+                FROM audit_events';
+        $where = [];
+        $params = [];
+        if ($action !== null && $action !== '') {
+            $where[] = 'action LIKE ?';
+            $params[] = $action . '%';
+        }
+        if ($userId !== null) {
+            $where[] = 'user_id = ?';
+            $params[] = $userId;
+        }
+        if ($where) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= ' ORDER BY id DESC LIMIT ' . $limit . ' OFFSET ' . $offset;
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    public function countAuditEvents(?string $action = null, ?int $userId = null): int
+    {
+        $sql = 'SELECT COUNT(*) FROM audit_events';
+        $where = [];
+        $params = [];
+        if ($action !== null && $action !== '') {
+            $where[] = 'action LIKE ?';
+            $params[] = $action . '%';
+        }
+        if ($userId !== null) {
+            $where[] = 'user_id = ?';
+            $params[] = $userId;
+        }
+        if ($where) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return (int) $stmt->fetchColumn();
+    }
 }

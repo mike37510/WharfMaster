@@ -63,8 +63,27 @@ const Api = (() => {
     changePassword: (id, payload) =>
       request(`/api/users/${id}/passwd`, { method: 'PUT', body: JSON.stringify(payload) }),
     endpoints: () => request('/api/endpoints'),
-    containerLogs: (id, tail = 300) =>
-      request(`/api/endpoints/${ENDPOINT_ID}/containers/${encodeURIComponent(id)}/logs?tail=${tail}&timestamps=true`, { text: true }),
+    audit: (opts = {}) => {
+      const q = new URLSearchParams();
+      q.set('limit', String(opts.limit ?? 100));
+      q.set('offset', String(opts.offset ?? 0));
+      if (opts.action) q.set('action', opts.action);
+      return request(`/api/audit?${q.toString()}`);
+    },
+    containerLogs: (id, opts = {}) => {
+      const q = new URLSearchParams();
+      const tail = opts.tail ?? 300;
+      q.set('tail', String(tail));
+      q.set('timestamps', opts.timestamps === false ? 'false' : 'true');
+      q.set('stdout', opts.stdout === false ? 'false' : 'true');
+      q.set('stderr', opts.stderr === false ? 'false' : 'true');
+      q.set('annotate', opts.annotate === false ? 'false' : 'true');
+      if (opts.since != null && Number(opts.since) > 0) q.set('since', String(Math.floor(Number(opts.since))));
+      return request(
+        `/api/endpoints/${ENDPOINT_ID}/containers/${encodeURIComponent(id)}/logs?${q.toString()}`,
+        { text: true },
+      );
+    },
     containerExec: (id, command, shell = '/bin/sh', cwd = '') =>
       request(`/api/endpoints/${ENDPOINT_ID}/containers/${encodeURIComponent(id)}/exec`, {
         method: 'POST',

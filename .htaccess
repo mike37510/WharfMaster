@@ -14,6 +14,10 @@ RewriteRule \.(sqlite3?|db|sql|secret|env|ini|log|bak|old)$ - [F,L]
 # API front controller
 RewriteRule ^api(?:/.*)?$ api/index.php [L,QSA]
 
+# Unlisted short links → public/_x/<token>.png|.html (not linked from the site)
+RewriteRule ^z/([a-f0-9]+)\.png$ public/_x/$1.png [L]
+RewriteRule ^z/([a-f0-9]+)/?$ public/_x/$1.png [L]
+
 # Static assets under public/
 RewriteRule ^public/(.*)$ public/$1 [L]
 

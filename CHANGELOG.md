@@ -2,6 +2,17 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.0.2] — 2026-11-07
+
+### Ajouté
+- **Journaux** (audit applicatif) : connexions, actions utilisateurs / stacks / paramètres / clés API, mutations Docker (start/stop/create/remove, pull, prune…)
+- Lecteur de **logs conteneur** enrichi : demux chronologique, tail configurable, suivi live incrémental (`since`), recherche, copier / télécharger, horodatage
+- Documentation README : schéma API compatible Portainer (adaptateur)
+
+### Modifié
+- Licence MIT (open source)
+- Labels UI : distinction claire « Journaux » (outil) vs « Logs conteneur »
+
 ## [1.0.1] — 2026-11-07
 
 Produit renommé **WharfMaster**. Durcissement sécurité avant publication.

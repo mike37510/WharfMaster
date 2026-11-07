@@ -36,6 +36,9 @@ composer.lock
 image_*.jpg
 image_*.png
 
+# Unlisted / hidden public pages
+/public/_x/
+
 # PHP / coverage
 .phpunit.result.cache
 coverage/

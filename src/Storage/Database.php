@@ -97,6 +97,19 @@ CREATE TABLE IF NOT EXISTS registries (
     owner_username TEXT NOT NULL DEFAULT '',
     is_shared INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at INTEGER NOT NULL,
+    user_id INTEGER,
+    username TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    ip TEXT NOT NULL DEFAULT '',
+    meta_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(action);
 SQL);
         $this->ensureColumn('registries', 'owner_id', 'INTEGER');
         $this->ensureColumn('registries', 'owner_username', "TEXT NOT NULL DEFAULT ''");

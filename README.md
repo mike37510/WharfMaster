@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.0.1 |
+| **Version** | 1.0.2 |
 | **Console** | `/app` |
 | **Site public** | `/` |
 | **API** | `/api` |
@@ -41,12 +41,13 @@
 ## Fonctionnalités
 
 - **Tableau de bord** — stats, conteneurs, ressources hôte (CPU / RAM / disque), activité
-- **Conteneurs** — création, start / stop / restart, logs, console, inspect
+- **Conteneurs** — création, start / stop / restart, logs (suivi live, recherche, export), console, inspect
 - **Images** — recherche locale + Docker Hub, pull, build Dockerfile
 - **Volumes** — création, explorateur de fichiers (créer / renommer / supprimer au clic droit)
 - **Réseaux & stacks Compose** — éditeur YAML, variables `.env`, déploiement
 - **Registres** — Docker Hub / Registry V2, parcours dépôts & tags, pull
 - **Utilisateurs** — rôles admin / utilisateur, isolation par labels `dockermanager.owner*`
+- **Journaux** — audit applicatif (connexions, actions Docker / stacks / utilisateurs)
 - **Sécurité** — rate-limit login, politique Compose résolue (`docker compose config`), proxy Docker restreint pour les non-admins
 
 ---

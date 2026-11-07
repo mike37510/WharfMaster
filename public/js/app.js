@@ -1088,6 +1088,7 @@ CMD ["sh"]
       back: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5L5.5 8 10 12.5"/></svg>',
       save: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3.5h7.2L12.5 5.3V12.5h-9V3.5zM5.5 3.5V6h5V3.5M5.5 9.5h5"/></svg>',
       logs: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 2.5h9v11h-9z"/><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"/></svg>',
+      activity: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v9H3z"/><path d="M5.5 6.5h5M5.5 9h3.5M5.5 11.5h2"/><path d="M11.5 2.5v2"/></svg>',
       console: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 7l2 1.5L5 10M8.5 10h2.5"/></svg>',
       start: '<svg viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8 4.5 2.8z"/></svg>',
       stop: '<svg viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.2"/></svg>',
@@ -1105,9 +1106,10 @@ CMD ["sh"]
   function iconBtn({
     tag = 'button', href, act, id, title, icon,
     danger = false, info = false, success = false,
-    modal, name, running, del, reset, elId,
+    modal, name, running, del, reset, elId, label,
   }) {
-    const cls = `btn btn-icon btn-sm${danger ? ' btn-danger' : ''}${info ? ' btn-info' : ''}${success ? ' btn-success' : ''}`;
+    const withLabel = !!(label && String(label).trim());
+    const cls = `btn btn-icon btn-sm${withLabel ? ' btn-icon-label' : ''}${danger ? ' btn-danger' : ''}${info ? ' btn-info' : ''}${success ? ' btn-success' : ''}`;
     const attrs = [
       `class="${cls}"`,
       `title="${esc(title)}"`,
@@ -1123,7 +1125,8 @@ CMD ["sh"]
       reset != null ? `data-reset="${esc(reset)}"` : '',
       tag === 'button' ? 'type="button"' : '',
     ].filter(Boolean).join(' ');
-    return `<${tag} ${attrs}><span class="btn-ico">${ico(icon)}</span></${tag}>`;
+    const labelHtml = withLabel ? `<span class="btn-label">${esc(label)}</span>` : '';
+    return `<${tag} ${attrs}><span class="btn-ico">${ico(icon)}</span>${labelHtml}</${tag}>`;
   }
 
   function modalHost() {
@@ -1328,47 +1331,251 @@ CMD ["sh"]
     });
   }
 
+  function parseLogTimestamp(line) {
+    const s = line.charCodeAt(0) === 0x1e ? line.slice(1) : line;
+    const m = s.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s/);
+    return m ? m[1] : null;
+  }
+
+  function stripLogAnnotations(text) {
+    return String(text || '').replace(/\x1e/g, '');
+  }
+
+  function renderLogLines(text, filter) {
+    const raw = String(text || '');
+    if (!raw) {
+      return '<div class="log-empty">(aucun journal)</div>';
+    }
+    const q = (filter || '').trim().toLowerCase();
+    const lines = raw.split(/\r\n|\n|\r/);
+    let html = '';
+    let shown = 0;
+    for (const line of lines) {
+      if (line === '' && shown === 0 && lines.length === 1) continue;
+      const isErr = line.charCodeAt(0) === 0x1e;
+      const clean = isErr ? line.slice(1) : line;
+      if (q && !clean.toLowerCase().includes(q)) continue;
+      shown += 1;
+      const cls = isErr ? 'log-line log-err' : 'log-line';
+      if (q) {
+        const idx = clean.toLowerCase().indexOf(q);
+        const before = esc(clean.slice(0, idx));
+        const match = esc(clean.slice(idx, idx + q.length));
+        const after = esc(clean.slice(idx + q.length));
+        html += `<div class="${cls}">${before}<mark class="log-hit">${match}</mark>${after}</div>`;
+      } else {
+        html += `<div class="${cls}">${esc(clean)}</div>`;
+      }
+    }
+    if (!shown) {
+      return `<div class="log-empty">Aucun résultat pour « ${esc(filter)} »</div>`;
+    }
+    return html;
+  }
+
+  function downloadTextFile(filename, text) {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
   async function openLogsModal(id, name) {
     closeAppModal();
     const host = modalHost();
+    const safeName = String(name || id).replace(/[^\w.-]+/g, '_');
     host.innerHTML = `
       <div class="modal-backdrop">
         <div class="modal modal-xl modal-logs" role="dialog" aria-modal="true">
           <div class="modal-head">
             <div>
-              <h3>Journaux</h3>
+              <h3>Logs conteneur</h3>
               <div class="modal-sub mono">${esc(name)} · ${esc(shortId(id))}</div>
             </div>
             <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
           </div>
-          <div class="toolbar">
-            <button class="btn btn-sm" id="refresh-logs">Actualiser</button>
-            <label class="muted" style="display:flex;align-items:center;gap:.4rem">
-              <input type="checkbox" id="auto-logs" checked> Actualisation auto
-            </label>
-            <div class="spacer"></div>
-            <span class="muted">300 dernières lignes</span>
+          <div class="logs-panel">
+            <div class="logs-toolbar">
+              <div class="field-inline">
+                <label for="log-tail">Tail</label>
+                <select id="log-tail">
+                  <option value="100">100</option>
+                  <option value="300" selected>300</option>
+                  <option value="1000">1000</option>
+                  <option value="all">Tout</option>
+                </select>
+              </div>
+              <label class="logs-check"><input type="checkbox" id="log-follow" checked> Suivre</label>
+              <label class="logs-check"><input type="checkbox" id="log-timestamps" checked> Horodatage</label>
+              <div class="field-inline logs-search-wrap">
+                <label for="log-search">Recherche</label>
+                <input type="search" id="log-search" placeholder="Filtrer…" autocomplete="off">
+              </div>
+              <button type="button" class="btn btn-sm" id="refresh-logs">Actualiser</button>
+              <button type="button" class="btn btn-sm" id="copy-logs">Copier</button>
+              <button type="button" class="btn btn-sm" id="download-logs">Télécharger</button>
+              <div class="logs-status" id="log-status">
+                <span class="dot"></span>
+                <span class="label">Chargement…</span>
+              </div>
+            </div>
+            <div class="logs log-view" id="log-view" tabindex="0">Chargement des journaux…</div>
           </div>
-          <pre class="logs" id="log-view">Chargement des journaux…</pre>
         </div>
       </div>`;
     bindAppModalChrome();
+
     const view = document.getElementById('log-view');
-    const loadLogs = async () => {
-      try {
-        const text = await Api.containerLogs(id, 300);
-        view.textContent = text || '(aucun journal)';
-        view.scrollTop = view.scrollHeight;
-      } catch (err) {
-        view.textContent = err.message;
+    const statusEl = document.getElementById('log-status');
+    const followEl = document.getElementById('log-follow');
+    const tsEl = document.getElementById('log-timestamps');
+    const tailEl = document.getElementById('log-tail');
+    const searchEl = document.getElementById('log-search');
+
+    const session = {
+      buffer: '',
+      lastIso: null,
+      stickBottom: true,
+      loading: false,
+      err: null,
+    };
+
+    const setStatus = (mode, text) => {
+      if (!statusEl) return;
+      statusEl.classList.remove('is-live', 'is-paused', 'is-error');
+      if (mode) statusEl.classList.add(mode);
+      const label = statusEl.querySelector('.label');
+      if (label) label.textContent = text;
+    };
+
+    const paint = () => {
+      const filter = searchEl?.value || '';
+      if (session.err && !session.buffer) {
+        view.innerHTML = `<div class="log-empty log-error">${esc(session.err)}</div>`;
+        return;
+      }
+      view.innerHTML = renderLogLines(session.buffer, filter);
+      if (session.stickBottom) view.scrollTop = view.scrollHeight;
+    };
+
+    const advanceCursor = (chunk) => {
+      const lines = String(chunk || '').split(/\r\n|\n|\r/);
+      for (const line of lines) {
+        if (!line) continue;
+        const iso = parseLogTimestamp(line);
+        if (iso && (!session.lastIso || iso > session.lastIso)) session.lastIso = iso;
       }
     };
-    await loadLogs();
-    onBusyClick(document.getElementById('refresh-logs'), loadLogs, { disableSiblings: false, minMs: 200 });
-    const auto = document.getElementById('auto-logs');
+
+    const fetchLogs = async ({ incremental = false } = {}) => {
+      if (session.loading) return;
+      session.loading = true;
+      const timestamps = !!tsEl?.checked;
+      const tail = tailEl?.value || '300';
+      const opts = {
+        timestamps,
+        annotate: true,
+        stdout: true,
+        stderr: true,
+      };
+      if (incremental && timestamps && session.lastIso) {
+        const since = Math.floor(Date.parse(session.lastIso) / 1000);
+        if (Number.isFinite(since) && since > 0) {
+          opts.since = since;
+          opts.tail = 'all';
+        } else {
+          opts.tail = tail;
+        }
+      } else {
+        opts.tail = tail;
+      }
+      try {
+        const text = await Api.containerLogs(id, opts);
+        session.err = null;
+        if (incremental && session.buffer && opts.since) {
+          if (text) {
+            const incoming = String(text);
+            const filtered = incoming.split(/\r\n|\n|\r/).filter((line) => {
+              if (!line) return false;
+              const iso = parseLogTimestamp(line);
+              if (!iso) return true;
+              return iso > session.lastIso;
+            }).join('\n');
+            if (filtered) {
+              session.buffer = session.buffer.replace(/\s*$/, '') + (session.buffer ? '\n' : '') + filtered;
+              advanceCursor(filtered);
+            }
+          }
+        } else {
+          session.buffer = String(text || '');
+          session.lastIso = null;
+          advanceCursor(session.buffer);
+        }
+        paint();
+        const when = new Date().toLocaleTimeString();
+        if (followEl?.checked) setStatus('is-live', `En direct · ${when}`);
+        else setStatus('is-paused', `À jour · ${when}`);
+      } catch (err) {
+        session.err = err.message || String(err);
+        if (!session.buffer) paint();
+        setStatus('is-error', session.err);
+      } finally {
+        session.loading = false;
+      }
+    };
+
+    view.addEventListener('scroll', () => {
+      const gap = view.scrollHeight - view.scrollTop - view.clientHeight;
+      session.stickBottom = gap < 40;
+    });
+
+    searchEl?.addEventListener('input', () => paint());
+    tsEl?.addEventListener('change', async () => {
+      session.lastIso = null;
+      await fetchLogs({ incremental: false });
+    });
+    tailEl?.addEventListener('change', async () => {
+      session.lastIso = null;
+      await fetchLogs({ incremental: false });
+    });
+    followEl?.addEventListener('change', () => {
+      if (followEl.checked) setStatus('is-live', 'En direct…');
+      else setStatus('is-paused', 'Suivi en pause');
+    });
+
+    onBusyClick(document.getElementById('refresh-logs'), async () => {
+      session.lastIso = null;
+      await fetchLogs({ incremental: false });
+    }, { disableSiblings: false, minMs: 200 });
+
+    document.getElementById('copy-logs')?.addEventListener('click', async () => {
+      const plain = stripLogAnnotations(session.buffer);
+      try {
+        await navigator.clipboard.writeText(plain);
+        setStatus(followEl?.checked ? 'is-live' : 'is-paused', 'Copié dans le presse-papiers');
+      } catch (_) {
+        setStatus('is-error', 'Impossible de copier');
+      }
+    });
+
+    document.getElementById('download-logs')?.addEventListener('click', () => {
+      downloadTextFile(`${safeName}-logs.txt`, stripLogAnnotations(session.buffer));
+    });
+
+    await fetchLogs({ incremental: false });
+    if (state.logTimer) {
+      clearInterval(state.logTimer);
+      state.logTimer = null;
+    }
     state.logTimer = setInterval(() => {
-      if (auto?.checked) loadLogs();
-    }, 2500);
+      if (!followEl?.checked) return;
+      fetchLogs({ incremental: !!tsEl?.checked && !!session.lastIso });
+    }, 1800);
   }
 
   async function openConsoleModal(id, name, runningHint) {
@@ -1443,6 +1650,7 @@ CMD ["sh"]
       ['networks', 'Réseaux'],
       ['stacks', 'Stacks'],
       ['registries', 'Registres'],
+      ['activity', 'Journaux'],
       ['settings', 'Paramètres'],
     ];
     if (Number(state.user?.Role) === 1) items.push(['users', 'Utilisateurs']);
@@ -1460,7 +1668,7 @@ CMD ["sh"]
             <div class="brand-mark">${brandMarkImg()}</div>
             <div>
               <div class="brand-title">WharfMaster</div>
-              <div class="brand-ver">v1.0.1</div>
+              <div class="brand-ver">v1.0.2</div>
             </div>
           </div>
           <div class="nav-section">
@@ -2146,7 +2354,7 @@ CMD ["sh"]
         <td>${badge(c.State)}</td>
         <td>${formatPorts(c.Ports || [])}</td>
         <td class="actions"><div class="quick-actions">
-          ${iconBtn({ modal: 'logs', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Journaux', icon: 'logs' })}
+          ${iconBtn({ modal: 'logs', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Logs conteneur', icon: 'logs' })}
           ${iconBtn({ modal: 'console', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Console', icon: 'console' })}
           ${iconBtn({ modal: 'inspect', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Inspecter', icon: 'inspect' })}
           ${iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: true })}
@@ -2191,7 +2399,7 @@ CMD ["sh"]
     const running = String(info.State?.Status || '').toLowerCase() === 'running';
     const tabs = [
       ['overview', 'Aperçu'],
-      ['logs', 'Journaux'],
+      ['logs', 'Logs conteneur'],
       ['console', 'Console'],
       ['inspect', 'Inspecter'],
     ].map(([t, label]) =>
@@ -2216,7 +2424,7 @@ CMD ["sh"]
       ${pageHeader(name, false)}
       <div class="toolbar">
         ${iconBtn({ tag: 'a', href: '#containers', title: 'Retour', icon: 'back' })}
-        ${iconBtn({ modal: 'logs', id, name, running, title: 'Journaux', icon: 'logs' })}
+        ${iconBtn({ modal: 'logs', id, name, running, title: 'Logs conteneur', icon: 'logs' })}
         ${iconBtn({ modal: 'console', id, name, running, title: 'Console', icon: 'console' })}
         ${iconBtn({ modal: 'inspect', id, name, running, title: 'Inspecter', icon: 'inspect' })}
         ${iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: true })}
@@ -3470,6 +3678,87 @@ CMD ["sh"]
     await loadRepos('');
   }
 
+  function formatAuditTime(ts) {
+    const n = Number(ts) || 0;
+    if (!n) return '—';
+    try {
+      return new Date(n * 1000).toLocaleString();
+    } catch (_) {
+      return String(ts);
+    }
+  }
+
+  function auditActionBadge(action) {
+    const a = String(action || '');
+    let tone = 'neutral';
+    if (a.includes('fail') || a.includes('rate_limited') || a.includes('delete') || a.includes('remove')) tone = 'danger';
+    else if (a.includes('login.ok') || a.includes('create') || a.includes('start')) tone = 'success';
+    else if (a.includes('update') || a.includes('stop') || a.includes('restart') || a.includes('password')) tone = 'warn';
+    return `<span class="audit-action tone-${tone}">${esc(a)}</span>`;
+  }
+
+  async function viewActivity() {
+    const actionFilter = state.filters.activityAction || '';
+    let data;
+    try {
+      data = await Api.audit({ limit: 150, action: actionFilter || undefined });
+    } catch (err) {
+      root.innerHTML = shell('Journaux', `${pageHeader('Journaux d’activité', false)}<div class="error-box">${esc(err.message)}</div>`, {
+        subtitle: 'Qui se connecte, qui fait quoi',
+      });
+      return;
+    }
+    const items = data?.Items || [];
+    const total = Number(data?.Total) || items.length;
+    const isAdmin = Number(state.user?.Role) === 1;
+    const rows = items.map((ev) => {
+      const who = ev.Username || (ev.UserId ? `#${ev.UserId}` : '—');
+      const search = `${ev.Action} ${ev.Message} ${who} ${ev.Ip}`.toLowerCase();
+      return `<tr data-search="${esc(search)}">
+        <td class="muted cell-nowrap">${esc(formatAuditTime(ev.CreatedAt))}</td>
+        <td>${esc(who)}</td>
+        <td>${auditActionBadge(ev.Action)}</td>
+        <td>${esc(ev.Message || '')}</td>
+        <td class="mono muted">${esc(ev.Ip || '—')}</td>
+      </tr>`;
+    }).join('');
+
+    root.innerHTML = shell('Journaux', `
+      ${pageHeader('Journaux d’activité')}
+      <div class="toolbar">
+        <input class="search" id="filter" type="search" placeholder="Filtrer les événements…" value="${esc(state.filters.activity || '')}">
+        <select id="audit-action-filter" class="audit-filter">
+          <option value="">Toutes les actions</option>
+          <option value="auth" ${actionFilter === 'auth' ? 'selected' : ''}>Connexions</option>
+          <option value="user" ${actionFilter === 'user' ? 'selected' : ''}>Utilisateurs</option>
+          <option value="stack" ${actionFilter === 'stack' ? 'selected' : ''}>Stacks</option>
+          <option value="docker" ${actionFilter === 'docker' ? 'selected' : ''}>Docker</option>
+          <option value="settings" ${actionFilter === 'settings' ? 'selected' : ''}>Paramètres</option>
+          <option value="api_key" ${actionFilter === 'api_key' ? 'selected' : ''}>Clés API</option>
+        </select>
+        <div class="spacer"></div>
+        <span class="muted mono" id="filter-count">${items.length} / ${total}</span>
+      </div>
+      <p class="muted audit-hint">${isAdmin
+        ? 'Histor des connexions et actions réalisées dans WharfMaster (admin : vue globale).'
+        : 'Vos connexions et actions dans WharfMaster.'}</p>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Détail</th><th>IP</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="empty">Aucun événement pour le moment — connectez-vous ou lancez une action.</td></tr>`}</tbody>
+      </table></div>
+    `, { subtitle: 'Qui se connecte, qui fait quoi' });
+
+    bindRefresh();
+    bindSearch('activity');
+    const sel = document.getElementById('audit-action-filter');
+    if (sel) {
+      sel.onchange = () => {
+        state.filters.activityAction = sel.value || '';
+        route();
+      };
+    }
+  }
+
   async function viewSettings() {
     await loadPublicUrl();
     const fallback = `${window.location.protocol}//${window.location.hostname}`;
@@ -3740,6 +4029,7 @@ CMD ["sh"]
       else if (state.route === 'networks') await viewNetworks();
       else if (state.route === 'stacks' || state.route === 'stacks/new') await viewStacks();
       else if (state.route.startsWith('stacks/')) await viewStackDetail(state.route.split('/')[1]);
+      else if (state.route === 'activity') await viewActivity();
       else if (state.route === 'settings') await viewSettings();
       else if (state.route === 'users') await viewUsers();
       else if (state.route === 'registries') await viewRegistries();
@@ -3748,7 +4038,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.0.1</strong> — interface de gestion Docker locale.</p>
+          <p class="muted">Version <strong>1.0.2</strong> — interface de gestion Docker locale.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
           <p class="muted">Socket : <code>unix:///var/run/docker.so</code></p>
