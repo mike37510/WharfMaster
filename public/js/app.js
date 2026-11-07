@@ -1824,7 +1824,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.1</div>
+            <div class="brand-ver">v1.4.2</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -3485,12 +3485,16 @@ CMD ["sh"]
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => {
-          const s = String(reader.result || '');
-          const i = s.indexOf(',');
-          resolve(i >= 0 ? s.slice(i + 1) : s);
+          const bytes = new Uint8Array(reader.result || new ArrayBuffer(0));
+          let binary = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          resolve(btoa(binary));
         };
         reader.onerror = () => reject(new Error('Lecture fichier impossible'));
-        reader.readAsDataURL(file);
+        reader.readAsArrayBuffer(file);
       });
     }
 
@@ -3571,21 +3575,83 @@ CMD ["sh"]
 
     let volUploadBusy = false;
 
+    function openVolumeUploadModal() {
+      closeAppModal();
+      const host = modalHost();
+      host.innerHTML = `
+        <div class="modal-backdrop vol-up-backdrop" data-no-dismiss="1">
+          <div class="modal modal-form vol-up-modal" role="dialog" aria-modal="true" aria-labelledby="vol-up-title">
+            <div class="modal-head">
+              <div>
+                <h3 id="vol-up-title">Envoi vers le volume</h3>
+                <p class="modal-sub" id="vol-up-sub">Préparation…</p>
+              </div>
+            </div>
+            <div class="vol-up-body">
+              <div class="progress vol-up-bar-wrap"><span id="vol-up-bar" style="width:0%"></span></div>
+              <div class="vol-up-meta">
+                <span id="vol-up-count">0 / 0</span>
+                <span id="vol-up-pct">0 %</span>
+              </div>
+              <p class="muted mono vol-up-file" id="vol-up-file"></p>
+              <div id="vol-up-err"></div>
+            </div>
+            <div class="actions-bar">
+              <button type="button" class="btn btn-primary" id="vol-up-close" hidden>Fermer</button>
+            </div>
+          </div>
+        </div>`;
+      document.getElementById('vol-up-close')?.addEventListener('click', () => closeAppModal());
+      return {
+        setProgress({ done, total, label, phase }) {
+          const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+          const bar = document.getElementById('vol-up-bar');
+          const count = document.getElementById('vol-up-count');
+          const pctEl = document.getElementById('vol-up-pct');
+          const fileEl = document.getElementById('vol-up-file');
+          const sub = document.getElementById('vol-up-sub');
+          if (bar) bar.style.width = `${pct}%`;
+          if (count) count.textContent = `${done} / ${total}`;
+          if (pctEl) pctEl.textContent = `${pct} %`;
+          if (fileEl) fileEl.textContent = label || '';
+          if (sub) sub.textContent = phase || 'Envoi en cours…';
+        },
+        done(ok, message) {
+          const sub = document.getElementById('vol-up-sub');
+          const err = document.getElementById('vol-up-err');
+          const closeBtn = document.getElementById('vol-up-close');
+          const bar = document.getElementById('vol-up-bar');
+          if (ok) {
+            if (sub) sub.textContent = message || 'Terminé';
+            if (bar) {
+              bar.style.width = '100%';
+              bar.classList.add('is-done');
+            }
+            if (closeBtn) closeBtn.hidden = false;
+            setTimeout(() => closeAppModal(), 900);
+          } else {
+            if (sub) sub.textContent = 'Échec de l’envoi';
+            if (err) err.innerHTML = `<div class="error-box">${esc(message || 'Erreur')}</div>`;
+            if (closeBtn) closeBtn.hidden = false;
+          }
+        },
+      };
+    }
+
     async function uploadDropped(dataTransfer) {
       if (volUploadBusy) return;
       volUploadBusy = true;
-      const setStatus = (msg) => {
-        const status = document.getElementById('vol-upload-status');
-        if (status) status.textContent = msg || '';
-      };
       const errBox = document.getElementById('vol-err');
       if (errBox) errBox.innerHTML = '';
+      const modal = openVolumeUploadModal();
       try {
+        modal.setProgress({ done: 0, total: 1, label: '', phase: 'Analyse des fichiers…' });
         const payload = await collectDropEntries(dataTransfer, currentPath);
         if (!payload.files.length && !payload.dirs.length) {
-          setStatus('');
+          closeAppModal();
           return;
         }
+        // Tous types MIME / extensions acceptés (binaire inclus via base64)
         const maxBytes = 2 * 1000 * 1000;
         for (const { file, relPath } of payload.files) {
           if (file.size > maxBytes) {
@@ -3594,14 +3660,31 @@ CMD ["sh"]
         }
         let done = 0;
         const total = payload.dirs.length + payload.files.length;
+        modal.setProgress({
+          done: 0,
+          total,
+          label: '',
+          phase: `${payload.files.length} fichier(s) · ${payload.dirs.length} dossier(s)`,
+        });
         for (const dir of payload.dirs) {
           done += 1;
-          setStatus(`Création dossiers… ${done}/${total}`);
+          modal.setProgress({
+            done,
+            total,
+            label: dir,
+            phase: 'Création des dossiers…',
+          });
           await Api.volumeMkdir(volumeName, joinVolPath(currentPath, dir));
         }
         for (const { file, relPath } of payload.files) {
           done += 1;
-          setStatus(`Envoi… ${done}/${total} — ${relPath}`);
+          const typeHint = file.type ? ` (${file.type})` : '';
+          modal.setProgress({
+            done,
+            total,
+            label: `${relPath}${typeHint}`,
+            phase: 'Envoi des fichiers…',
+          });
           const b64 = await fileToBase64(file);
           await Api.volumeWriteFile(volumeName, joinVolPath(currentPath, relPath), {
             Content: b64,
@@ -3609,18 +3692,13 @@ CMD ["sh"]
             CreateOnly: false,
           });
         }
-        const summary = `${payload.files.length} fichier(s), ${payload.dirs.length} dossier(s) — terminé`;
+        modal.setProgress({ done: total, total, label: '', phase: 'Actualisation…' });
         await render(currentPath);
-        setStatus(summary);
-        setTimeout(() => {
-          const s = document.getElementById('vol-upload-status');
-          if (s && s.textContent === summary) s.textContent = '';
-        }, 2500);
+        modal.done(true, `${payload.files.length} fichier(s), ${payload.dirs.length} dossier(s) envoyés`);
       } catch (err) {
-        setStatus('');
+        modal.done(false, err.message || String(err));
         const box = document.getElementById('vol-err');
         if (box) box.innerHTML = `<div class="error-box">${esc(err.message || String(err))}</div>`;
-        else alert(err.message || String(err));
       } finally {
         volUploadBusy = false;
       }
@@ -3677,10 +3755,9 @@ CMD ["sh"]
           <span class="muted mono">${esc(volumeName)}</span>
         </div>
         <div id="vol-err"></div>
-        <div class="muted vol-upload-status" id="vol-upload-status"></div>
         ${volumeBreadcrumbs(volumeName, path)}
         <div class="table-wrap vol-explorer" id="vol-explorer">
-          <div class="vol-drop-hint">Déposez fichiers ou dossiers ici</div>
+          <div class="vol-drop-hint">Déposez tout type de fichier ou dossier ici</div>
           <table class="data">
             <thead><tr><th>Nom</th><th>Taille</th><th>Modifié</th><th></th></tr></thead>
             <tbody id="vol-rows"><tr><td colspan="4" class="muted">Chargement…</td></tr></tbody>
@@ -4292,7 +4369,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.1', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.2', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -5215,7 +5292,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.1</strong> — volumes agents, drag-and-drop, TLS pin & health.</p>
+          <p class="muted">Version <strong>1.4.2</strong> — volumes agents, drag-and-drop, TLS pin & health.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

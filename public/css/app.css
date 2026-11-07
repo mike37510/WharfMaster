@@ -1686,9 +1686,36 @@ button.quick-tile {
   padding: 16px;
 }
 .vol-explorer.is-dragover .vol-drop-hint { display: flex; }
-.vol-upload-status {
-  margin: 8px 0 0;
+.vol-up-backdrop[data-no-dismiss="1"] {
+  cursor: default;
+}
+.vol-up-modal .vol-up-body {
+  padding: 4px 0 8px;
+}
+.vol-up-bar-wrap {
+  margin-top: 4px;
+  height: 8px;
+}
+.vol-up-bar-wrap > span.is-done {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+.vol-up-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
   font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.vol-up-file {
+  margin: 10px 0 0;
+  font-size: 12px;
+  word-break: break-all;
+  min-height: 1.4em;
+}
+.vol-up-modal .actions-bar {
+  margin-top: 14px;
 }
 .vol-row[data-entry]:hover {
   background: var(--accent-soft, rgba(59, 130, 246, 0.1));

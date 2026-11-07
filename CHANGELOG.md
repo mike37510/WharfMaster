@@ -2,6 +2,14 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.4.2] — 2026-11-07
+
+### Ajouté
+- Modale de **progression** lors du drag-and-drop vers un volume (barre %, fichier en cours)
+
+### Modifié
+- Upload volume : tous types de fichiers (binaires via `ArrayBuffer` → base64)
+
 ## [1.4.1] — 2026-11-07
 
 ### Ajouté
