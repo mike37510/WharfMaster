@@ -110,12 +110,35 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events(action);
+
+CREATE TABLE IF NOT EXISTS join_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_hint TEXT NOT NULL DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    max_uses INTEGER,
+    use_count INTEGER NOT NULL DEFAULT 0
+);
 SQL);
         $this->ensureColumn('registries', 'owner_id', 'INTEGER');
         $this->ensureColumn('registries', 'owner_username', "TEXT NOT NULL DEFAULT ''");
         $this->ensureColumn('registries', 'is_shared', 'INTEGER NOT NULL DEFAULT 0');
         // Legacy registries without owner become shared (visible to all)
         $this->pdo->exec("UPDATE registries SET is_shared = 1 WHERE (owner_id IS NULL OR owner_id = 0) AND (owner_username IS NULL OR owner_username = '')");
+
+        $this->ensureColumn('endpoints', 'kind', "TEXT NOT NULL DEFAULT 'local'");
+        $this->ensureColumn('endpoints', 'agent_url', "TEXT NOT NULL DEFAULT ''");
+        $this->ensureColumn('endpoints', 'agent_secret', "TEXT NOT NULL DEFAULT ''");
+        $this->ensureColumn('endpoints', 'node_name', "TEXT NOT NULL DEFAULT ''");
+        $this->ensureColumn('endpoints', 'last_seen_at', 'INTEGER');
+        $this->ensureColumn('endpoints', 'joined_at', 'INTEGER');
+        $this->ensureColumn('endpoints', 'tls_expires_at', 'INTEGER');
+        $this->pdo->exec("UPDATE endpoints SET kind = 'local' WHERE id = 1 AND (kind IS NULL OR kind = '')");
+        $this->pdo->exec("UPDATE endpoints SET node_name = name WHERE (node_name IS NULL OR node_name = '') AND name IS NOT NULL AND name != ''");
     }
 
     private function ensureColumn(string $table, string $column, string $ddl): void

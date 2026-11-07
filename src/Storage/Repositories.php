@@ -124,12 +124,16 @@ final class Repositories
     {
         $existing = $this->pdo->query('SELECT * FROM endpoints ORDER BY id ASC LIMIT 1')->fetch();
         if ($existing) {
-            return $existing;
+            // Ensure local metadata
+            $this->pdo->prepare(
+                "UPDATE endpoints SET kind = 'local', node_name = COALESCE(NULLIF(node_name,''), name), url = ? WHERE id = ?"
+            )->execute(['unix://' . $socketPath, (int) $existing['id']]);
+            return $this->getEndpoint((int) $existing['id']) ?? $existing;
         }
         $now = time();
         $stmt = $this->pdo->prepare(
-            'INSERT INTO endpoints (id, name, type, url, group_id, public_url, status, snapshots, created_at)
-             VALUES (1, ?, 1, ?, 1, ?, 1, ?, ?)'
+            'INSERT INTO endpoints (id, name, type, url, group_id, public_url, status, snapshots, created_at, kind, node_name)
+             VALUES (1, ?, 1, ?, 1, ?, 1, ?, ?, \'local\', ?)'
         );
         $stmt->execute([
             'local',
@@ -137,6 +141,7 @@ final class Repositories
             '',
             '[]',
             $now,
+            'local',
         ]);
         return $this->getEndpoint(1) ?? [
             'id' => 1,
@@ -148,7 +153,177 @@ final class Repositories
             'status' => 1,
             'snapshots' => '[]',
             'created_at' => $now,
+            'kind' => 'local',
+            'node_name' => 'local',
         ];
+    }
+
+    public function createAgentEndpoint(string $name, string $agentUrl, string $agentSecret): array
+    {
+        $now = time();
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO endpoints
+            (name, type, url, group_id, public_url, status, snapshots, created_at, kind, agent_url, agent_secret, node_name, joined_at, last_seen_at)
+            VALUES (?, 2, ?, 1, \'\', 1, \'[]\', ?, \'agent\', ?, ?, ?, ?, ?)'
+        );
+        $stmt->execute([
+            $name,
+            $agentUrl,
+            $now,
+            $agentUrl,
+            $agentSecret,
+            $name,
+            $now,
+            $now,
+        ]);
+        return $this->getEndpoint((int) $this->pdo->lastInsertId()) ?? [];
+    }
+
+    /** Re-join existing agent: rotate secret, refresh name/status (idempotent install). */
+    public function rejoinAgentEndpoint(int $id, string $name, string $agentSecret): array
+    {
+        $now = time();
+        $stmt = $this->pdo->prepare(
+            'UPDATE endpoints SET name = ?, node_name = ?, agent_secret = ?, status = 1,
+             joined_at = ?, last_seen_at = ? WHERE id = ? AND kind = \'agent\''
+        );
+        $stmt->execute([$name, $name, $agentSecret, $now, $now, $id]);
+        return $this->getEndpoint($id) ?? [];
+    }
+
+    public function updateEndpointLastSeen(int $id, ?int $status = null): void
+    {
+        if ($status !== null) {
+            $stmt = $this->pdo->prepare('UPDATE endpoints SET last_seen_at = ?, status = ? WHERE id = ?');
+            $stmt->execute([time(), $status, $id]);
+            return;
+        }
+        $stmt = $this->pdo->prepare('UPDATE endpoints SET last_seen_at = ? WHERE id = ?');
+        $stmt->execute([time(), $id]);
+    }
+
+    public function updateEndpointTlsExpires(int $id, ?int $tlsExpiresAt): void
+    {
+        $stmt = $this->pdo->prepare('UPDATE endpoints SET tls_expires_at = ? WHERE id = ?');
+        $stmt->execute([$tlsExpiresAt, $id]);
+    }
+
+    public function setEndpointStatus(int $id, int $status): void
+    {
+        $stmt = $this->pdo->prepare('UPDATE endpoints SET status = ? WHERE id = ?');
+        $stmt->execute([$status, $id]);
+    }
+
+    public function clearEndpointAgentSecret(int $id): void
+    {
+        $stmt = $this->pdo->prepare("UPDATE endpoints SET agent_secret = '', status = 2 WHERE id = ?");
+        $stmt->execute([$id]);
+    }
+
+    public function deleteEndpoint(int $id): void
+    {
+        if ($id <= 1) {
+            return;
+        }
+        $stmt = $this->pdo->prepare('DELETE FROM endpoints WHERE id = ? AND kind = \'agent\'');
+        $stmt->execute([$id]);
+    }
+
+    public function findEndpointByAgentUrl(string $agentUrl): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM endpoints WHERE agent_url = ? LIMIT 1');
+        $stmt->execute([rtrim($agentUrl, '/')]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    /**
+     * @return array{token:string, row:array<string,mixed>}
+     */
+    public function createJoinToken(string $createdBy, string $label = '', int $ttlSeconds = 86400, ?int $maxUses = null): array
+    {
+        $raw = 'wmj_' . bin2hex(random_bytes(24));
+        $now = time();
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO join_tokens
+            (token_hash, token_hint, label, created_at, created_by, expires_at, revoked_at, max_uses, use_count)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0)'
+        );
+        $stmt->execute([
+            hash('sha256', $raw),
+            substr($raw, -6),
+            $label,
+            $now,
+            $createdBy,
+            $now + max(60, $ttlSeconds),
+            $maxUses,
+        ]);
+        $id = (int) $this->pdo->lastInsertId();
+        $row = $this->getJoinToken($id) ?? [];
+        return ['token' => $raw, 'row' => $row];
+    }
+
+    /** @return array<string, mixed>|null */
+    public function getJoinToken(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM join_tokens WHERE id = ?');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    /** @return array<string, mixed>|null */
+    public function getActiveJoinToken(): ?array
+    {
+        $now = time();
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM join_tokens
+             WHERE revoked_at IS NULL AND expires_at > ?
+             ORDER BY id DESC LIMIT 1'
+        );
+        $stmt->execute([$now]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    public function revokeJoinToken(int $id): void
+    {
+        $stmt = $this->pdo->prepare('UPDATE join_tokens SET revoked_at = ? WHERE id = ?');
+        $stmt->execute([time(), $id]);
+    }
+
+    public function revokeAllJoinTokens(): void
+    {
+        $this->pdo->prepare(
+            'UPDATE join_tokens SET revoked_at = ? WHERE revoked_at IS NULL'
+        )->execute([time()]);
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findValidJoinToken(string $raw): ?array
+    {
+        $hash = hash('sha256', $raw);
+        $stmt = $this->pdo->prepare('SELECT * FROM join_tokens WHERE token_hash = ?');
+        $stmt->execute([$hash]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return null;
+        }
+        if ($row['revoked_at'] !== null) {
+            return null;
+        }
+        if ((int) $row['expires_at'] < time()) {
+            return null;
+        }
+        if ($row['max_uses'] !== null && (int) $row['use_count'] >= (int) $row['max_uses']) {
+            return null;
+        }
+        return $row;
+    }
+
+    public function incrementJoinTokenUse(int $id): void
+    {
+        $this->pdo->prepare('UPDATE join_tokens SET use_count = use_count + 1 WHERE id = ?')->execute([$id]);
     }
 
     /** @return list<array<string, mixed>> */

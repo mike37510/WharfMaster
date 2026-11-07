@@ -2,6 +2,40 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.2.0] — 2026-11-07
+
+### Ajouté
+- **Vue « Tous les nœuds »** dans le sélecteur : dashboard et listes (conteneurs, images, volumes, réseaux) **agrégés** avec colonne Nœud
+- Répartition par nœud sur le dashboard commun ; échantillon équitable (plus seulement le nœud local)
+- Enrôlement guidé : saisie IP + nom → commande `install.sh` **prête à coller** (URL publique configurable)
+- Re-join idempotent (même advertise = renouvellement du secret agent, plus d’erreur 409)
+- Colonne **TLS** (expiration / date de renouvellement) ; agent HTTPS autosigné avec renouvellement auto ~30 j avant expiry
+
+### Modifié
+- Sources agent servies en statique (`public/agent/.htaccess`) pour le build local si le pull d’image échoue
+- Commande d’install basée sur l’**URL publique / hôte** (paramètres) ou l’origine de la requête
+
+### Corrigé
+- Création de conteneur : `PortBindings` / `ExposedPorts` vides plus envoyés comme `[]` (rejet Docker)
+- Statut « En ligne » en mode Tous les nœuds (poll qui n’appelait plus `Api.docker()` à tort)
+- Ascenseur horizontal inutile dans le panneau Nœuds du dashboard
+
+### Limites
+- Mode « Tous » en **lecture** : start/stop/create/pull/build exigent un nœud précis
+- Stacks Compose sur nœuds agent non supportées (nœud local uniquement)
+
+## [1.1.0] — 2026-11-07
+
+### Ajouté
+- **Multinode** : token de jointure, enrôlement d’agents distants, page **Nœuds** (liste, ping, désactiver, délier)
+- Agent **HTTPS** autosigné (`agent/` + socat OPENSSL) + script `public/agent/install.sh` (`--advertise https://…` obligatoire)
+- Sélecteur de nœud dans la console ; proxy Docker vers agents (`/api/endpoints/{id}/…`)
+- API `/api/nodes` (admin) + `POST /api/nodes/join` (token, HTTPS only)
+
+### Limites
+- L’agent doit être joignable depuis le serveur principal (pas de mode edge/NAT)
+- Certificats autosignés : le principal ne vérifie pas la CA (verify peer désactivé)
+
 ## [1.0.2] — 2026-11-07
 
 ### Ajouté

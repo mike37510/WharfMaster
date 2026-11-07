@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.0.2 |
+| **Version** | 1.2.0 |
 | **Console** | `/app` |
 | **Site public** | `/` |
 | **API** | `/api` |
@@ -40,7 +40,7 @@
 
 ## Fonctionnalités
 
-- **Tableau de bord** — stats, conteneurs, ressources hôte (CPU / RAM / disque), activité
+- **Tableau de bord** — stats, conteneurs, ressources hôte (CPU / RAM / disque), activité ; vue **Tous les nœuds** agrégée
 - **Conteneurs** — création, start / stop / restart, logs (suivi live, recherche, export), console, inspect
 - **Images** — recherche locale + Docker Hub, pull, build Dockerfile
 - **Volumes** — création, explorateur de fichiers (créer / renommer / supprimer au clic droit)
@@ -48,7 +48,35 @@
 - **Registres** — Docker Hub / Registry V2, parcours dépôts & tags, pull
 - **Utilisateurs** — rôles admin / utilisateur, isolation par labels `dockermanager.owner*`
 - **Journaux** — audit applicatif (connexions, actions Docker / stacks / utilisateurs)
+- **Nœuds (multinode)** — agents HTTPS, token de jointure, sélecteur (nœud ou **Tous**), TLS, délier
 - **Sécurité** — rate-limit login, politique Compose résolue (`docker compose config`), proxy Docker restreint pour les non-admins
+
+---
+
+## Multinode (agents)
+
+Le serveur principal génère un **token de jointure**. Sur chaque hôte Docker distant, une commande installe un **agent HTTPS** (certificat autosigné) ; le principal proxyfie l’API Docker via cet agent. Le certificat est renouvelé automatiquement ~30 jours avant expiration ; la page **Nœuds** affiche la date de renouvellement / expiration TLS.
+
+### Enrôler un nœud
+
+1. Console → **Nœuds** (admin) → saisir l’**IP** et le **nom** du nœud → **Générer la commande**
+2. Copier-coller la commande sur la machine distante (Docker + curl). L’URL `--url` reprend l’**URL publique** configurée dans Paramètres. **`--advertise` doit être en `https://`**.
+
+Exemple (valeurs déjà remplies par l’UI) :
+
+```bash
+curl -fsSL https://VOTRE-SERVEUR/public/agent/install.sh | sh -s -- \
+  --url https://VOTRE-SERVEUR \
+  --token wmj_... \
+  --advertise https://192.168.1.5:9001 \
+  --name node5
+```
+
+3. Dans la console, choisir le nœud via le sélecteur en haut à droite — ou **Tous les nœuds** pour le dashboard / listes agrégés (lecture seule ; les actions d’écriture demandent un nœud précis).
+
+Le nœud local ne peut pas être délié. Relancer `install.sh` sur le même advertise **rejoint** le nœud (nouveau secret). Les stacks Compose restent sur le nœud local. Les échanges HTTP non chiffrés vers l’agent sont refusés à la jointure.
+
+Fichiers agent : [`agent/`](agent/), script public : [`public/agent/install.sh`](public/agent/install.sh).
 
 ---
 
@@ -219,6 +247,7 @@ Authentification : header `Authorization: Bearer <jwt>` (obtenu via `POST /api/a
 
 ```
 ├── api/                 Front controller API PHP
+├── agent/               Agent distant (Dockerfile + PHP)
 ├── docs/                Schémas / visuels (ex. API Portainer)
 ├── public/
 │   ├── index.html       SPA console (/app)

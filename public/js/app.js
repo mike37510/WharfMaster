@@ -38,6 +38,8 @@
     publicUrl: '',
     dashFilter: 'all',
     engineVersion: '',
+    endpoints: [],
+    endpointId: 1,
     alerts: [],
     dockerOnline: true,
     alertTimer: null,
@@ -460,10 +462,12 @@
       const payload = {
         Image: image,
         HostConfig: {
-          PortBindings,
           RestartPolicy: { Name: 'unless-stopped' },
         },
       };
+      // Ne pas envoyer PortBindings/ExposedPorts vides : PHP les ré-encode en []
+      // et Docker attend des maps (objets), pas des tableaux.
+      if (Object.keys(PortBindings).length) payload.HostConfig.PortBindings = PortBindings;
       if (Object.keys(ExposedPorts).length) payload.ExposedPorts = ExposedPorts;
       if (binds.length) payload.HostConfig.Binds = binds;
       if (cmd) payload.Cmd = cmd.split(/\s+/);
@@ -887,6 +891,135 @@ CMD ["sh"]
     }
   });
 
+  document.addEventListener('change', (e) => {
+    const sel = e.target.closest('#endpoint-select');
+    if (!sel) return;
+    const id = parseInt(sel.value, 10);
+    if (!Number.isFinite(id) || id < 0) return;
+    Api.setEndpointId(id);
+    state.endpointId = id;
+    route();
+  });
+
+  function isAllNodes() {
+    return Number(state.endpointId) === 0 || Api.isAllEndpoints();
+  }
+
+  function activeEndpoints() {
+    return (state.endpoints || []).filter((e) => {
+      const id = Number(e.Id ?? e.id);
+      if (!Number.isFinite(id) || id < 1) return false;
+      // 0 = désactivé ; 1/2 = inclure (on tente quand même le hors-ligne)
+      return Number(e.Status) !== 0;
+    });
+  }
+
+  async function refreshEndpointsList() {
+    try {
+      const list = await Api.endpoints();
+      if (Array.isArray(list) && list.length) state.endpoints = list;
+    } catch (_) {}
+  }
+
+  /** Round-robin sample so every node appears (not only the first fat local node). */
+  function sampleAcrossNodes(items, limit = 24) {
+    const byNode = new Map();
+    (items || []).forEach((it) => {
+      const key = String(it._nodeId ?? it._nodeName ?? '?');
+      if (!byNode.has(key)) byNode.set(key, []);
+      byNode.get(key).push(it);
+    });
+    const queues = [...byNode.values()];
+    const out = [];
+    let i = 0;
+    while (out.length < limit && queues.some((q) => q.length)) {
+      const q = queues[i % queues.length];
+      if (q.length) out.push(q.shift());
+      i += 1;
+    }
+    return out;
+  }
+
+  /** Fan-out Docker GET across nodes; tags each item with _nodeId / _nodeName. */
+  async function dockerAll(path, { pick, refresh = true } = {}) {
+    if (refresh) await refreshEndpointsList();
+    const eps = activeEndpoints();
+    if (!eps.length) {
+      return { items: [], results: [], failed: 0, okCount: 0, total: 0, perNode: [] };
+    }
+    const results = await Promise.all(eps.map(async (ep) => {
+      const id = Number(ep.Id ?? ep.id);
+      const name = ep.NodeName || ep.Name || String(id);
+      try {
+        const data = await Api.dockerOn(id, path);
+        return { ok: true, id, name, data };
+      } catch (err) {
+        return { ok: false, id, name, error: err, message: err?.message || String(err) };
+      }
+    }));
+    const failed = results.filter((r) => !r.ok).length;
+    const ok = results.filter((r) => r.ok);
+    let items = [];
+    const perNode = [];
+    if (typeof pick === 'function') {
+      ok.forEach((r) => {
+        const arr = pick(r.data) || [];
+        const list = Array.isArray(arr) ? arr : [];
+        perNode.push({ id: r.id, name: r.name, count: list.length });
+        list.forEach((item) => {
+          items.push(Object.assign({}, item, { _nodeId: r.id, _nodeName: r.name }));
+        });
+      });
+    } else {
+      ok.forEach((r) => {
+        const arr = Array.isArray(r.data) ? r.data : [];
+        perNode.push({ id: r.id, name: r.name, count: arr.length });
+        arr.forEach((item) => {
+          items.push(Object.assign({}, item, { _nodeId: r.id, _nodeName: r.name }));
+        });
+      });
+    }
+    // Stable order: by node name then keep docker order within node
+    items.sort((a, b) => String(a._nodeName || '').localeCompare(String(b._nodeName || ''), 'fr'));
+    return {
+      items,
+      results,
+      failed,
+      okCount: ok.length,
+      total: eps.length,
+      perNode,
+      failedNames: results.filter((r) => !r.ok).map((r) => r.name),
+    };
+  }
+
+  function requireSingleNodeMsg() {
+    return 'Choisissez un nœud dans le sélecteur pour cette action.';
+  }
+
+  function pickNodeGuardHtml() {
+    if (!isAllNodes()) return '';
+    return `<div class="info-box" style="margin-bottom:12px">${esc(requireSingleNodeMsg())}</div>`;
+  }
+
+  async function loadEndpoints() {
+    try {
+      const list = await Api.endpoints();
+      state.endpoints = Array.isArray(list) ? list : [];
+      const preferred = Api.getEndpointId();
+      if (preferred === 0 && state.endpoints.length > 1) {
+        state.endpointId = 0;
+        Api.setEndpointId(0);
+      } else {
+        const exists = state.endpoints.some((e) => Number(e.Id) === Number(preferred));
+        state.endpointId = exists ? preferred : (Number(state.endpoints[0]?.Id) || 1);
+        Api.setEndpointId(state.endpointId);
+      }
+    } catch (_) {
+      state.endpoints = state.endpoints || [];
+      state.endpointId = Api.getEndpointId();
+    }
+  }
+
   function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -1089,6 +1222,7 @@ CMD ["sh"]
       save: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3.5h7.2L12.5 5.3V12.5h-9V3.5zM5.5 3.5V6h5V3.5M5.5 9.5h5"/></svg>',
       logs: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 2.5h9v11h-9z"/><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"/></svg>',
       activity: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v9H3z"/><path d="M5.5 6.5h5M5.5 9h3.5M5.5 11.5h2"/><path d="M11.5 2.5v2"/></svg>',
+      nodes: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>',
       console: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 7l2 1.5L5 10M8.5 10h2.5"/></svg>',
       start: '<svg viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8 4.5 2.8z"/></svg>',
       stop: '<svg viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.2"/></svg>',
@@ -1653,13 +1787,36 @@ CMD ["sh"]
       ['activity', 'Journaux'],
       ['settings', 'Paramètres'],
     ];
-    if (Number(state.user?.Role) === 1) items.push(['users', 'Utilisateurs']);
+    if (Number(state.user?.Role) === 1) {
+      items.splice(items.findIndex(([id]) => id === 'settings'), 0, ['nodes', 'Nœuds']);
+      items.push(['users', 'Utilisateurs']);
+    }
     const nav = items.map(([id, label]) =>
       `<a href="#${id}" class="${state.route === id || state.route.startsWith(id + '/') ? 'active' : ''}"><span class="nav-ico">${ico(id)}</span>${label}</a>`
     ).join('');
     const initial = (state.user?.Username || 'A').slice(0, 2).toUpperCase();
     const username = state.user?.Username || 'admin';
     const engine = state.engineVersion ? `Docker Engine v${state.engineVersion}` : 'Docker Engine';
+    const allMode = Number(state.endpointId) === 0;
+    const currentEp = allMode
+      ? null
+      : ((state.endpoints || []).find((e) => Number(e.Id) === Number(state.endpointId))
+        || { Id: state.endpointId, Name: 'local', Kind: 'local', Status: 1 });
+    const nodeLabel = allMode
+      ? `${(state.endpoints || []).length} nœuds`
+      : (currentEp.NodeName || currentEp.Name || 'local');
+    const nodeKind = allMode ? 'Cluster' : (currentEp.Kind === 'agent' ? 'Agent' : 'Local');
+    const epOnline = allMode
+      ? !!state.dockerOnline
+      : Number(currentEp?.Status) === 1;
+    const epOptions = [
+      ...(state.endpoints || []).length > 1
+        ? [`<option value="0" ${allMode ? 'selected' : ''}>Tous les nœuds</option>`]
+        : [],
+      ...(state.endpoints || []).map((e) =>
+        `<option value="${esc(e.Id)}" ${!allMode && Number(e.Id) === Number(state.endpointId) ? 'selected' : ''}>${esc(e.NodeName || e.Name)} (${e.Kind === 'agent' ? 'agent' : 'local'})</option>`
+      ),
+    ].join('');
 
     return `
       <div class="shell">
@@ -1668,7 +1825,7 @@ CMD ["sh"]
             <div class="brand-mark">${brandMarkImg()}</div>
             <div>
               <div class="brand-title">WharfMaster</div>
-              <div class="brand-ver">v1.0.2</div>
+              <div class="brand-ver">v1.2.0</div>
             </div>
           </div>
           <div class="nav-section">
@@ -1680,8 +1837,8 @@ CMD ["sh"]
               <a href="#logout"><span class="nav-ico">${ico('logout')}</span>Déconnexion</a>
             </nav>
             <div class="engine-pill">
-              <span class="dot"></span>
-              <div><strong>${esc(engine)}</strong>Environnement local</div>
+              <span class="dot ${epOnline ? '' : 'off'}"></span>
+              <div><strong>${esc(allMode ? 'Tous les nœuds' : engine)}</strong>${esc(nodeKind)} · ${esc(nodeLabel)}</div>
             </div>
           </div>
         </aside>
@@ -1692,6 +1849,7 @@ CMD ["sh"]
               ${subtitle ? `<p class="sub">${esc(subtitle)}</p>` : ''}
             </div>
             <div class="topbar-right">
+              ${(state.endpoints || []).length > 1 ? `<label class="node-select-wrap"><span>Nœud</span><select id="endpoint-select">${epOptions}</select></label>` : ''}
               <span class="status-online ${state.dockerOnline ? '' : 'is-offline'}" id="status-online">
                 <span class="dot"></span>${state.dockerOnline ? 'En ligne' : 'Hors ligne'}
               </span>
@@ -1796,71 +1954,109 @@ CMD ["sh"]
     bindAlertDismiss();
   }
 
+  function pushContainerAlerts(alerts, list, nodePrefix = '') {
+    const stopped = list.filter((c) => {
+      const s = String(c.State || '').toLowerCase();
+      return s !== 'running' && s !== 'restarting' && s !== 'removing';
+    });
+    const unhealthy = list.filter((c) => String(c.Status || '').toLowerCase().includes('(unhealthy)'));
+    const prefix = nodePrefix ? `[${nodePrefix}] ` : '';
+
+    if (stopped.length) {
+      const names = stopped.slice(0, 4).map((c) =>
+        (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id))
+      );
+      alerts.push({
+        id: `stopped-${nodePrefix || 'local'}-${stopped.length}-${stopped.map((c) => shortId(c.Id)).join(',')}`,
+        level: 'warn',
+        title: `${prefix}${stopped.length} conteneur${stopped.length > 1 ? 's' : ''} arrêté${stopped.length > 1 ? 's' : ''}`,
+        detail: names.join(', ') + (stopped.length > 4 ? '…' : ''),
+        href: '#containers',
+      });
+    }
+
+    unhealthy.forEach((c) => {
+      const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id);
+      alerts.push({
+        id: `unhealthy-${nodePrefix || 'local'}-${shortId(c.Id)}`,
+        level: 'danger',
+        title: `${prefix}${name} est unhealthy`,
+        detail: c.Status || '',
+        href: `#containers/${c.Id}`,
+      });
+    });
+  }
+
   async function refreshAlerts() {
     const alerts = [];
     let online = true;
+
     try {
-      const [containers, host, info] = await Promise.all([
-        Api.docker('/containers/json?all=true'),
-        Api.host().catch(() => null),
-        Api.docker('/info').catch(() => null),
-      ]);
-
-      if (!info || !info.ServerVersion) {
-        online = false;
-      } else {
-        state.engineVersion = info.ServerVersion;
-      }
-
-      const list = containers || [];
-      const stopped = list.filter((c) => {
-        const s = String(c.State || '').toLowerCase();
-        return s !== 'running' && s !== 'restarting' && s !== 'removing';
-      });
-      const unhealthy = list.filter((c) => String(c.Status || '').toLowerCase().includes('(unhealthy)'));
-
-      if (stopped.length) {
-        const names = stopped.slice(0, 4).map((c) =>
-          (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id))
-        );
-        alerts.push({
-          id: `stopped-${stopped.length}-${stopped.map((c) => shortId(c.Id)).join(',')}`,
-          level: 'warn',
-          title: `${stopped.length} conteneur${stopped.length > 1 ? 's' : ''} arrêté${stopped.length > 1 ? 's' : ''}`,
-          detail: names.join(', ') + (stopped.length > 4 ? '…' : ''),
-          href: '#containers',
-        });
-      }
-
-      unhealthy.forEach((c) => {
-        const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id);
-        alerts.push({
-          id: `unhealthy-${shortId(c.Id)}`,
-          level: 'danger',
-          title: `${name} est unhealthy`,
-          detail: c.Status || '',
-          href: `#containers/${c.Id}`,
-        });
-      });
-
-      if (host && Number(host.DiskTotal) > 0) {
-        const pct = Number(host.DiskUsedPercent) || ((Number(host.DiskUsed) / Number(host.DiskTotal)) * 100);
-        if (pct >= 95) {
+      if (isAllNodes()) {
+        // Fan-out : ne pas appeler Api.docker() (interdit en mode Tous)
+        const eps = activeEndpoints();
+        const probes = await Promise.all(eps.map(async (ep) => {
+          const id = Number(ep.Id);
+          const name = ep.NodeName || ep.Name || String(id);
+          try {
+            const [info, containers] = await Promise.all([
+              Api.dockerOn(id, '/info'),
+              Api.dockerOn(id, '/containers/json?all=true'),
+            ]);
+            return { ok: true, id, name, info, containers: containers || [] };
+          } catch (_) {
+            return { ok: false, id, name };
+          }
+        }));
+        const okNodes = probes.filter((p) => p.ok && p.info?.ServerVersion);
+        online = okNodes.length > 0;
+        if (okNodes[0]?.info?.ServerVersion) {
+          state.engineVersion = okNodes[0].info.ServerVersion;
+        }
+        probes.filter((p) => !p.ok).forEach((p) => {
           alerts.push({
-            id: `disk-critical-${Math.floor(pct)}`,
-            level: 'danger',
-            title: `Disque critique (${pct.toFixed(0)} %)`,
-            detail: `${formatBytes(host.DiskUsed)} utilisés sur ${formatBytes(host.DiskTotal)}`,
-            href: '#dashboard',
-          });
-        } else if (pct >= 85) {
-          alerts.push({
-            id: `disk-warn-${Math.floor(pct)}`,
+            id: `node-offline-${p.id}`,
             level: 'warn',
-            title: `Disque presque plein (${pct.toFixed(0)} %)`,
-            detail: `${formatBytes(host.DiskUsed)} / ${formatBytes(host.DiskTotal)}`,
-            href: '#dashboard',
+            title: `Nœud hors ligne : ${p.name}`,
+            detail: 'Impossible de joindre le moteur Docker de ce nœud',
+            href: '#nodes',
           });
+        });
+        okNodes.forEach((p) => pushContainerAlerts(alerts, p.containers, p.name));
+      } else {
+        const [containers, host, info] = await Promise.all([
+          Api.docker('/containers/json?all=true'),
+          Api.host().catch(() => null),
+          Api.docker('/info').catch(() => null),
+        ]);
+
+        if (!info || !info.ServerVersion) {
+          online = false;
+        } else {
+          state.engineVersion = info.ServerVersion;
+        }
+
+        pushContainerAlerts(alerts, containers || []);
+
+        if (host && Number(host.DiskTotal) > 0) {
+          const pct = Number(host.DiskUsedPercent) || ((Number(host.DiskUsed) / Number(host.DiskTotal)) * 100);
+          if (pct >= 95) {
+            alerts.push({
+              id: `disk-critical-${Math.floor(pct)}`,
+              level: 'danger',
+              title: `Disque critique (${pct.toFixed(0)} %)`,
+              detail: `${formatBytes(host.DiskUsed)} utilisés sur ${formatBytes(host.DiskTotal)}`,
+              href: '#dashboard',
+            });
+          } else if (pct >= 85) {
+            alerts.push({
+              id: `disk-warn-${Math.floor(pct)}`,
+              level: 'warn',
+              title: `Disque presque plein (${pct.toFixed(0)} %)`,
+              detail: `${formatBytes(host.DiskUsed)} / ${formatBytes(host.DiskTotal)}`,
+              href: '#dashboard',
+            });
+          }
         }
       }
     } catch (_) {
@@ -1871,8 +2067,10 @@ CMD ["sh"]
       alerts.unshift({
         id: 'docker-offline',
         level: 'danger',
-        title: 'Docker inaccessible',
-        detail: 'Impossible de joindre le moteur Docker',
+        title: isAllNodes() ? 'Aucun nœud joignable' : 'Docker inaccessible',
+        detail: isAllNodes()
+          ? 'Impossible de joindre les moteurs Docker du cluster'
+          : 'Impossible de joindre le moteur Docker',
         href: '#dashboard',
       });
     }
@@ -2049,6 +2247,10 @@ CMD ["sh"]
   }
 
   async function viewDashboard() {
+    if (isAllNodes()) {
+      await viewDashboardAll();
+      return;
+    }
     const filter = state.dashFilter || 'all';
     root.innerHTML = shell('Tableau de bord', pageLoadingHtml('Chargement du tableau de bord…'), {
       subtitle: 'Vue d’ensemble de votre environnement Docker',
@@ -2258,6 +2460,190 @@ CMD ["sh"]
     document.getElementById('dash-prune')?.addEventListener('click', () => openPruneOrphansModal());
   }
 
+  async function viewDashboardAll() {
+    const filter = state.dashFilter || 'all';
+    root.innerHTML = shell('Tableau de bord', pageLoadingHtml('Agrégation de tous les nœuds…'), {
+      subtitle: 'Vue agrégée — tous les nœuds',
+      hidePageHeader: true,
+    });
+
+    const [cAgg, iAgg, vAgg, nAgg] = await Promise.all([
+      dockerAll('/containers/json?all=true'),
+      dockerAll('/images/json'),
+      dockerAll('/volumes', { pick: (d) => d?.Volumes || [] }),
+      dockerAll('/networks'),
+    ]);
+
+    const list = cAgg.items;
+    const imgs = iAgg.items;
+    const volList = vAgg.items;
+    const nets = nAgg.items;
+    const partial = cAgg.failed + iAgg.failed + vAgg.failed + nAgg.failed > 0;
+    const running = list.filter((c) => String(c.State).toLowerCase() === 'running').length;
+    const stopped = list.length - running;
+    const perNodeHint = (cAgg.perNode || [])
+      .map((n) => `${n.name}: ${n.count}`)
+      .join(' · ');
+
+    const filteredAll = list.filter((c) => {
+      const st = String(c.State).toLowerCase();
+      if (filter === 'running') return st === 'running';
+      if (filter === 'stopped') return st !== 'running';
+      return true;
+    });
+    // Important: ne pas .slice() sur la liste locale-first — échantillonner chaque nœud
+    const filtered = sampleAcrossNodes(filteredAll, 32);
+
+    const containerRows = filtered.map((c) => {
+      const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id));
+      const isRun = String(c.State).toLowerCase() === 'running';
+      return `<tr data-search="${esc(`${name} ${c.Image} ${c.State} ${c._nodeName}`.toLowerCase())}">
+        <td class="muted">${esc(c._nodeName || '—')}</td>
+        <td><a class="name-with-dot" href="#containers/${esc(c.Id)}" data-switch-node="${esc(c._nodeId)}"><span class="sdot ${isRun ? 'on' : ''}"></span>${esc(name)}</a></td>
+        <td class="mono cell-clip" title="${esc(c.Image)}">${esc(c.Image)}</td>
+        <td>${badge(c.State)}</td>
+        <td class="muted cell-nowrap">${esc(formatUptime(c.Status))}</td>
+      </tr>`;
+    }).join('');
+
+    const topImages = sampleAcrossNodes(
+      [...imgs].sort((a, b) => (b.Created || 0) - (a.Created || 0)),
+      12,
+    ).map((img) => {
+      const tags = img.RepoTags && img.RepoTags[0] ? img.RepoTags[0] : '<none>:<none>';
+      const age = img.Created ? relativeTime(img.Created * 1000) : '—';
+      return `<tr>
+        <td class="muted">${esc(img._nodeName || '—')}</td>
+        <td class="mono">${esc(tags)}</td>
+        <td>${esc(formatBytes(img.Size))}</td>
+        <td class="muted">${esc(age)}</td>
+      </tr>`;
+    }).join('');
+
+    const countById = Object.fromEntries((cAgg.perNode || []).map((n) => [n.id, n.count]));
+    const failedSet = new Set(cAgg.failedNames || []);
+    const nodeRows = (state.endpoints || []).map((ep) => {
+      const id = Number(ep.Id ?? ep.id);
+      const st = Number(ep.Status);
+      const cCount = countById[id];
+      let label = st === 1 ? 'En ligne' : (st === 0 ? 'Désactivé' : 'Hors ligne');
+      let cls = st === 1 ? 'badge-success' : (st === 0 ? 'badge-muted' : 'badge-warn');
+      if (failedSet.has(ep.NodeName || ep.Name)) {
+        label = 'Erreur agrégat';
+        cls = 'badge-warn';
+      } else if (cCount != null) {
+        label = `En ligne · ${cCount}`;
+        cls = 'badge-success';
+      }
+      const url = ep.AgentURL || ep.URL || '—';
+      return `<tr>
+        <td title="${esc(ep.NodeName || ep.Name)}"><strong>${esc(ep.NodeName || ep.Name)}</strong></td>
+        <td>${esc(ep.Kind === 'agent' ? 'Agent' : 'Local')}</td>
+        <td><span class="badge ${cls}" title="${esc(label)}">${esc(label)}</span></td>
+        <td class="mono cell-clip" title="${esc(url)}">${esc(url)}</td>
+      </tr>`;
+    }).join('');
+
+    const failMsg = (cAgg.failedNames || []).length
+      ? ` Nœuds sans réponse : ${(cAgg.failedNames || []).map(esc).join(', ')}.`
+      : '';
+
+    root.innerHTML = shell('Tableau de bord', `
+      ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${failMsg}</div>` : ''}
+      ${perNodeHint ? `<div class="muted" style="margin-bottom:10px">Répartition conteneurs — ${esc(perNodeHint)}</div>` : ''}
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-top"><div class="stat-ico blue">${ico('containers')}</div></div>
+          <div class="stat-value">${list.length}</div>
+          <div class="stat-label">Conteneurs</div>
+          ${sparkline('blue')}
+        </div>
+        <div class="stat-card">
+          <div class="stat-top"><div class="stat-ico purple">${ico('images')}</div></div>
+          <div class="stat-value">${imgs.length}</div>
+          <div class="stat-label">Images</div>
+          ${sparkline('purple')}
+        </div>
+        <div class="stat-card">
+          <div class="stat-top"><div class="stat-ico green">${ico('volumes')}</div></div>
+          <div class="stat-value">${volList.length}</div>
+          <div class="stat-label">Volumes</div>
+          ${sparkline('green')}
+        </div>
+        <div class="stat-card">
+          <div class="stat-top"><div class="stat-ico orange">${ico('networks')}</div></div>
+          <div class="stat-value">${nets.length}</div>
+          <div class="stat-label">Réseaux</div>
+          ${sparkline('orange')}
+        </div>
+      </div>
+
+      <div class="dash-layout">
+        <div class="dash-col">
+          <div class="panel-card">
+            <div class="panel-head">
+              <h3>Conteneurs</h3>
+              <a href="#containers">Voir tout →</a>
+              <div class="filter-tabs" id="dash-filters">
+                <button type="button" data-f="all" class="${filter === 'all' ? 'active' : ''}">Tous ${list.length}</button>
+                <button type="button" data-f="running" class="${filter === 'running' ? 'active' : ''}">En cours ${running}</button>
+                <button type="button" data-f="stopped" class="${filter === 'stopped' ? 'active' : ''}">Arrêtés ${stopped}</button>
+              </div>
+              <input class="search mini-search" id="filter" type="search" placeholder="Rechercher…" value="${esc(state.filters.dashboard || '')}">
+            </div>
+            <div class="table-wrap" style="border:0;box-shadow:none;border-radius:0">
+              <table class="data">
+                <thead><tr><th>Nœud</th><th>Nom</th><th>Image</th><th>Statut</th><th>Uptime</th></tr></thead>
+                <tbody>${containerRows || `<tr><td colspan="5" class="empty">Aucun conteneur</td></tr>`}</tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel-card">
+            <div class="panel-head"><h3>Images</h3><a href="#images">Voir tout →</a></div>
+            <div class="table-wrap" style="border:0;box-shadow:none;border-radius:0">
+              <table class="data">
+                <thead><tr><th>Nœud</th><th>Nom</th><th>Taille</th><th>Créée</th></tr></thead>
+                <tbody>${topImages || `<tr><td colspan="4" class="empty">Aucune image</td></tr>`}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="dash-col">
+          <div class="panel-card">
+            <div class="panel-head"><h3>Nœuds</h3></div>
+            <div class="table-wrap" style="border:0;box-shadow:none;border-radius:0">
+              <table class="data">
+                <thead><tr><th>Nom</th><th>Type</th><th>Statut</th><th>URL</th></tr></thead>
+                <tbody>${nodeRows || `<tr><td colspan="4" class="empty">Aucun nœud</td></tr>`}</tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel-card">
+            <div class="panel-head"><h3>Actions</h3></div>
+            <div class="info-box">${esc(requireSingleNodeMsg())}</div>
+          </div>
+        </div>
+      </div>
+    `, { subtitle: 'Vue agrégée — tous les nœuds', hidePageHeader: true });
+
+    bindSearch('dashboard');
+    document.getElementById('dash-filters')?.querySelectorAll('button').forEach((btn) => {
+      btn.onclick = () => {
+        state.dashFilter = btn.dataset.f;
+        route();
+      };
+    });
+    root.querySelectorAll('[data-switch-node]').forEach((a) => {
+      a.addEventListener('click', () => {
+        const id = parseInt(a.getAttribute('data-switch-node'), 10);
+        if (Number.isFinite(id) && id > 0) {
+          Api.setEndpointId(id);
+          state.endpointId = id;
+        }
+      });
+    });
+  }
+
   async function openPruneOrphansModal() {
     closeAppModal();
     const host = modalHost();
@@ -2340,20 +2726,29 @@ CMD ["sh"]
   }
 
   async function viewContainers() {
-    const containers = await Api.docker('/containers/json?all=true');
-    const list = containers || [];
+    const all = isAllNodes();
+    let list = [];
+    let partial = false;
+    let perNodeHint = '';
+    let failMsg = '';
+    if (all) {
+      const agg = await dockerAll('/containers/json?all=true');
+      list = agg.items;
+      partial = agg.failed > 0;
+      perNodeHint = (agg.perNode || []).map((n) => `${n.name}: ${n.count}`).join(' · ');
+      failMsg = (agg.failedNames || []).length
+        ? ` Nœuds sans réponse : ${(agg.failedNames || []).join(', ')}.`
+        : '';
+    } else {
+      list = (await Api.docker('/containers/json?all=true')) || [];
+    }
+
     const rows = list.map((c) => {
       const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id));
-      const search = `${name} ${c.Image} ${c.Id} ${c.State}`.toLowerCase();
-      return `<tr data-search="${esc(search)}">
-        <td class="name-cell">
-          <strong><a href="#containers/${esc(c.Id)}">${esc(name)}</a></strong>
-          <span class="id">${esc(shortId(c.Id))}</span>
-        </td>
-        <td class="mono">${esc(c.Image)}</td>
-        <td>${badge(c.State)}</td>
-        <td>${formatPorts(c.Ports || [])}</td>
-        <td class="actions"><div class="quick-actions">
+      const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ''}`.toLowerCase();
+      const actions = all
+        ? `<span class="muted">—</span>`
+        : `<div class="quick-actions">
           ${iconBtn({ modal: 'logs', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Logs conteneur', icon: 'logs' })}
           ${iconBtn({ modal: 'console', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Console', icon: 'console' })}
           ${iconBtn({ modal: 'inspect', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Inspecter', icon: 'inspect' })}
@@ -2361,32 +2756,64 @@ CMD ["sh"]
           ${iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop' })}
           ${iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
           ${iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
-        </div></td>
+        </div>`;
+      return `<tr data-search="${esc(search)}">
+        ${all ? `<td class="muted">${esc(c._nodeName || '—')}</td>` : ''}
+        <td class="name-cell">
+          <strong><a href="#containers/${esc(c.Id)}" ${all ? `data-switch-node="${esc(c._nodeId)}"` : ''}>${esc(name)}</a></strong>
+          <span class="id">${esc(shortId(c.Id))}</span>
+        </td>
+        <td class="mono">${esc(c.Image)}</td>
+        <td>${badge(c.State)}</td>
+        <td>${formatPorts(c.Ports || [])}</td>
+        <td class="actions">${actions}</td>
       </tr>`;
     }).join('');
 
+    const colSpan = all ? 6 : 5;
     root.innerHTML = shell('Conteneurs', `
-      ${pageHeader('Liste des conteneurs')}
-      ${searchBar('containers', 'Rechercher des conteneurs…', list.length, list.length, createBtn('create-container', 'Créer un conteneur'))}
+      ${pageHeader(all ? 'Conteneurs — tous les nœuds' : 'Liste des conteneurs')}
+      ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${esc(failMsg)}</div>` : ''}
+      ${all && perNodeHint ? `<div class="muted" style="margin-bottom:10px">Répartition — ${esc(perNodeHint)}</div>` : ''}
+      ${all ? pickNodeGuardHtml() : ''}
+      ${searchBar(
+        'containers',
+        'Rechercher des conteneurs…',
+        list.length,
+        list.length,
+        all ? '' : createBtn('create-container', 'Créer un conteneur'),
+      )}
       <div class="table-wrap">
         <table class="data">
-          <thead><tr><th>Nom</th><th>Image</th><th>État</th><th>Ports publiés</th><th>Actions</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="5" class="empty">Aucun conteneur</td></tr>`}</tbody>
+          <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>Image</th><th>État</th><th>Ports publiés</th><th>Actions</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun conteneur</td></tr>`}</tbody>
         </table>
-      </div>`, { subtitle: 'Gérez vos conteneurs Docker' });
+      </div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Gérez vos conteneurs Docker' });
 
     bindRefresh();
     bindSearch('containers');
-    bindModalActions();
-    document.getElementById('create-container').onclick = () => openCreateContainerModal();
-    root.querySelectorAll('[data-act]').forEach((btn) => {
-      onBusyClick(btn, async (el) => {
-        await containerAction(el.dataset.id, el.dataset.act);
-      }, {
-        confirm: btn.dataset.act === 'remove' ? 'Supprimer ce conteneur ?' : null,
-        reload: true,
+    if (!all) {
+      bindModalActions();
+      document.getElementById('create-container').onclick = () => openCreateContainerModal();
+      root.querySelectorAll('[data-act]').forEach((btn) => {
+        onBusyClick(btn, async (el) => {
+          await containerAction(el.dataset.id, el.dataset.act);
+        }, {
+          confirm: btn.dataset.act === 'remove' ? 'Supprimer ce conteneur ?' : null,
+          reload: true,
+        });
       });
-    });
+    } else {
+      root.querySelectorAll('[data-switch-node]').forEach((a) => {
+        a.addEventListener('click', () => {
+          const id = parseInt(a.getAttribute('data-switch-node'), 10);
+          if (Number.isFinite(id) && id > 0) {
+            Api.setEndpointId(id);
+            state.endpointId = id;
+          }
+        });
+      });
+    }
   }
 
   async function viewContainerDetail(id, tab) {
@@ -2744,78 +3171,112 @@ CMD ["sh"]
   }
 
   async function viewImages() {
-    const images = await Api.docker('/images/json');
-    const list = images || [];
+    const all = isAllNodes();
+    let list = [];
+    let partial = false;
+    if (all) {
+      const agg = await dockerAll('/images/json');
+      list = agg.items;
+      partial = agg.failed > 0;
+    } else {
+      list = (await Api.docker('/images/json')) || [];
+    }
     const rows = list.map((img) => {
       const tags = (img.RepoTags && img.RepoTags.length) ? img.RepoTags.join(', ') : '<none>';
       const sizeMb = ((img.Size || 0) / (1024 * 1024)).toFixed(1);
-      const search = `${shortId(img.Id)} ${tags}`.toLowerCase();
+      const search = `${shortId(img.Id)} ${tags} ${img._nodeName || ''}`.toLowerCase();
       return `<tr data-search="${esc(search)}">
+        ${all ? `<td class="muted">${esc(img._nodeName || '—')}</td>` : ''}
         <td class="mono">${esc(shortId(img.Id))}</td>
         <td>${esc(tags)}</td>
         <td>${esc(sizeMb)} MB</td>
-        <td class="actions"><div class="quick-actions">${iconBtn({ id: img.Id, title: 'Supprimer', icon: 'remove', danger: true })}</div></td>
+        <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">${iconBtn({ id: img.Id, title: 'Supprimer', icon: 'remove', danger: true })}</div>`}</td>
       </tr>`;
     }).join('');
+    const colSpan = all ? 5 : 4;
     root.innerHTML = shell('Images', `
-      ${pageHeader('Images')}
+      ${pageHeader(all ? 'Images — tous les nœuds' : 'Images')}
+      ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
+      ${all ? pickNodeGuardHtml() : ''}
       ${searchBar(
         'images',
         'Rechercher des images…',
         list.length,
         list.length,
-        `${createBtn('build-image', 'Dockerfile / Build')}${createBtn('pull-image', 'Pull une image')}`
+        all ? '' : `${createBtn('build-image', 'Dockerfile / Build')}${createBtn('pull-image', 'Pull une image')}`,
       )}
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>ID</th><th>Tags</th><th>Taille</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="4" class="empty">Aucune image</td></tr>`}</tbody>
-      </table></div>`, { subtitle: 'Images Docker locales' });
+        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Tags</th><th>Taille</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune image</td></tr>`}</tbody>
+      </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Images Docker locales' });
     bindRefresh();
     bindSearch('images');
-    document.getElementById('build-image').onclick = () => { location.hash = '#images/build'; };
-    document.getElementById('pull-image').onclick = () => openPullImageModal();
-    root.querySelectorAll('button[data-id]').forEach((btn) => {
-      onBusyClick(btn, async (el) => {
-        await Api.docker(`/images/${encodeURIComponent(el.dataset.id)}?force=true`, { method: 'DELETE' });
-      }, { confirm: 'Supprimer cette image ?', reload: true });
-    });
+    if (!all) {
+      document.getElementById('build-image').onclick = () => { location.hash = '#images/build'; };
+      document.getElementById('pull-image').onclick = () => openPullImageModal();
+      root.querySelectorAll('button[data-id]').forEach((btn) => {
+        onBusyClick(btn, async (el) => {
+          await Api.docker(`/images/${encodeURIComponent(el.dataset.id)}?force=true`, { method: 'DELETE' });
+        }, { confirm: 'Supprimer cette image ?', reload: true });
+      });
+    }
   }
 
   async function viewVolumes() {
-    const data = await Api.docker('/volumes');
-    const volumes = data.Volumes || [];
+    const all = isAllNodes();
+    let volumes = [];
+    let partial = false;
+    if (all) {
+      const agg = await dockerAll('/volumes', { pick: (d) => d?.Volumes || [] });
+      volumes = agg.items;
+      partial = agg.failed > 0;
+    } else {
+      const data = await Api.docker('/volumes');
+      volumes = data.Volumes || [];
+    }
     const rows = volumes.map((v) => {
-      const search = `${v.Name} ${v.Driver} ${v.Mountpoint || ''}`.toLowerCase();
-      return `<tr data-search="${esc(search)}">
-      <td><a href="#volumes/${encodeURIComponent(v.Name)}">${esc(v.Name)}</a></td>
-      <td>${esc(v.Driver)}</td>
-      <td class="mono">${esc(v.Mountpoint || '')}</td>
-      <td class="actions"><div class="quick-actions">
+      const search = `${v.Name} ${v.Driver} ${v.Mountpoint || ''} ${v._nodeName || ''}`.toLowerCase();
+      const actions = all
+        ? '<span class="muted">—</span>'
+        : `<div class="quick-actions">
         ${iconBtn({ tag: 'a', href: `#volumes/${encodeURIComponent(v.Name)}`, title: 'Explorer', icon: 'search' })}
         ${iconBtn({ name: v.Name, title: 'Supprimer', icon: 'remove', danger: true })}
-      </div></td>
+      </div>`;
+      return `<tr data-search="${esc(search)}">
+      ${all ? `<td class="muted">${esc(v._nodeName || '—')}</td>` : ''}
+      <td>${all
+        ? esc(v.Name)
+        : `<a href="#volumes/${encodeURIComponent(v.Name)}">${esc(v.Name)}</a>`}</td>
+      <td>${esc(v.Driver)}</td>
+      <td class="mono">${esc(v.Mountpoint || '')}</td>
+      <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
+    const colSpan = all ? 5 : 4;
     root.innerHTML = shell('Volumes', `
-      ${pageHeader('Volumes')}
+      ${pageHeader(all ? 'Volumes — tous les nœuds' : 'Volumes')}
+      ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
+      ${all ? pickNodeGuardHtml() : ''}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des volumes…" value="${esc(state.filters.volumes || '')}">
-        ${createBtn('create', 'Créer un volume')}
+        ${all ? '' : createBtn('create', 'Créer un volume')}
         <div class="spacer"></div>
         <span class="muted mono" id="filter-count">${volumes.length} / ${volumes.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>Nom</th><th>Pilote</th><th>Point de montage</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="4" class="empty">Aucun volume</td></tr>`}</tbody>
-      </table></div>`, { subtitle: 'Volumes Docker' });
+        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>Pilote</th><th>Point de montage</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>
+      </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Volumes Docker' });
     bindRefresh();
     bindSearch('volumes');
-    document.getElementById('create').onclick = () => openCreateVolumeModal();
-    root.querySelectorAll('button[data-name]').forEach((btn) => {
-      onBusyClick(btn, async (el) => {
-        await Api.docker(`/volumes/${encodeURIComponent(el.dataset.name)}`, { method: 'DELETE' });
-      }, { confirm: 'Supprimer ce volume ?', reload: true });
-    });
+    if (!all) {
+      document.getElementById('create').onclick = () => openCreateVolumeModal();
+      root.querySelectorAll('button[data-name]').forEach((btn) => {
+        onBusyClick(btn, async (el) => {
+          await Api.docker(`/volumes/${encodeURIComponent(el.dataset.name)}`, { method: 'DELETE' });
+        }, { confirm: 'Supprimer ce volume ?', reload: true });
+      });
+    }
   }
 
   function volumeBreadcrumbs(volumeName, path) {
@@ -3125,44 +3586,66 @@ CMD ["sh"]
   }
 
   async function viewNetworks() {
-    const networks = await Api.docker('/networks');
-    const list = networks || [];
+    const all = isAllNodes();
+    let list = [];
+    let partial = false;
+    if (all) {
+      const agg = await dockerAll('/networks');
+      list = agg.items;
+      partial = agg.failed > 0;
+    } else {
+      list = (await Api.docker('/networks')) || [];
+    }
     const rows = list.map((n) => {
-      const search = `${n.Id} ${n.Name} ${n.Driver} ${n.Scope}`.toLowerCase();
+      const search = `${n.Id} ${n.Name} ${n.Driver} ${n.Scope} ${n._nodeName || ''}`.toLowerCase();
       return `<tr data-search="${esc(search)}">
+      ${all ? `<td class="muted">${esc(n._nodeName || '—')}</td>` : ''}
       <td class="mono">${esc(shortId(n.Id))}</td>
       <td>${esc(n.Name)}</td>
       <td>${esc(n.Driver)}</td>
       <td>${esc(n.Scope)}</td>
-      <td class="actions"><div class="quick-actions">
+      <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">
         ${['bridge', 'host', 'none'].includes(n.Name) ? '' :
           iconBtn({ id: n.Id, title: 'Supprimer', icon: 'remove', danger: true })}
-      </div></td>
+      </div>`}</td>
     </tr>`;
     }).join('');
+    const colSpan = all ? 6 : 5;
     root.innerHTML = shell('Réseaux', `
-      ${pageHeader('Réseaux')}
+      ${pageHeader(all ? 'Réseaux — tous les nœuds' : 'Réseaux')}
+      ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
+      ${all ? pickNodeGuardHtml() : ''}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des réseaux…" value="${esc(state.filters.networks || '')}">
-        ${createBtn('create', 'Créer un réseau')}
+        ${all ? '' : createBtn('create', 'Créer un réseau')}
         <div class="spacer"></div>
         <span class="muted mono" id="filter-count">${list.length} / ${list.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>ID</th><th>Nom</th><th>Pilote</th><th>Portée</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="5" class="empty">Aucun réseau</td></tr>`}</tbody>
-      </table></div>`, { subtitle: 'Réseaux Docker' });
+        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Nom</th><th>Pilote</th><th>Portée</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun réseau</td></tr>`}</tbody>
+      </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Réseaux Docker' });
     bindRefresh();
     bindSearch('networks');
-    document.getElementById('create').onclick = () => openCreateNetworkModal();
-    root.querySelectorAll('button[data-id]').forEach((btn) => {
-      onBusyClick(btn, async (el) => {
-        await Api.docker(`/networks/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' });
-      }, { confirm: 'Supprimer ce réseau ?', reload: true });
-    });
+    if (!all) {
+      document.getElementById('create').onclick = () => openCreateNetworkModal();
+      root.querySelectorAll('button[data-id]').forEach((btn) => {
+        onBusyClick(btn, async (el) => {
+          await Api.docker(`/networks/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' });
+        }, { confirm: 'Supprimer ce réseau ?', reload: true });
+      });
+    }
   }
 
   async function viewStacks() {
+    if (isAllNodes()) {
+      root.innerHTML = shell('Stacks', `
+        ${pageHeader('Stacks')}
+        ${pickNodeGuardHtml()}
+        <div class="info-box">Les stacks Compose restent sur un nœud précis (local).</div>
+      `, { subtitle: 'Projets Compose' });
+      return;
+    }
     if (state.route === 'stacks/new') {
       showStackEditor();
       return;
@@ -3697,6 +4180,243 @@ CMD ["sh"]
     return `<span class="audit-action tone-${tone}">${esc(a)}</span>`;
   }
 
+  function nodeStatusLabel(status) {
+    const s = Number(status);
+    if (s === 0) return '<span class="badge badge-muted">Désactivé</span>';
+    if (s === 1) return '<span class="badge badge-success">En ligne</span>';
+    return '<span class="badge badge-warn">Hors ligne</span>';
+  }
+
+  async function viewNodes() {
+    let nodes = [];
+    let tokenMeta = null;
+    let errMsg = '';
+    try {
+      const [n, t] = await Promise.all([Api.nodes(), Api.joinTokenMeta()]);
+      nodes = n?.Items || [];
+      tokenMeta = t?.Active || null;
+      state.endpoints = nodes;
+    } catch (err) {
+      errMsg = err.message || String(err);
+    }
+
+    const tlsCell = (n) => {
+      if (n.Kind !== 'agent') return '<span class="muted">—</span>';
+      if (!n.TlsExpiresAt) {
+        return '<span class="muted" title="HTTPS autosigné — date inconnue tant que le nœud n’a pas répondu">HTTPS · ?</span>';
+      }
+      const days = Number(n.TlsDaysLeft);
+      const renew = n.TlsRenewBy || '';
+      const exp = formatAuditTime(n.TlsExpiresAt);
+      let cls = 'badge-success';
+      let label = `Expire ${esc(exp)}`;
+      if (Number.isFinite(days) && days <= 0) {
+        cls = 'badge-danger';
+        label = `Expiré (${esc(exp)})`;
+      } else if (Number.isFinite(days) && days <= 30) {
+        cls = 'badge-warn';
+        label = `Renouveler avant ${esc(renew || exp)} · ${days} j`;
+      } else if (renew) {
+        label = `Valide · renouveler ~${esc(renew)}`;
+      }
+      return `<span class="badge ${cls}" title="Certificat TLS autosigné — renouvellement auto agent ~30 j avant expiry">${label}</span>`;
+    };
+
+    const rows = nodes.map((n) => {
+      const isLocal = n.Kind !== 'agent';
+      const actions = isLocal
+        ? '<span class="muted">—</span>'
+        : `<div class="quick-actions">
+            <button type="button" class="btn btn-sm" data-ping="${esc(n.Id)}">Ping</button>
+            ${Number(n.Status) === 0
+              ? `<button type="button" class="btn btn-sm btn-success" data-enable="${esc(n.Id)}">Activer</button>`
+              : `<button type="button" class="btn btn-sm" data-disable="${esc(n.Id)}">Désactiver</button>`}
+            <button type="button" class="btn btn-sm btn-danger" data-unlink="${esc(n.Id)}">Délier</button>
+          </div>`;
+      return `<tr>
+        <td><strong>${esc(n.NodeName || n.Name)}</strong><div class="muted mono">#${esc(n.Id)}</div></td>
+        <td>${esc(n.Kind === 'agent' ? 'Agent' : 'Local')}</td>
+        <td class="mono cell-clip" title="${esc(n.AgentURL || n.URL)}">${esc(n.AgentURL || n.URL || '—')}</td>
+        <td>${nodeStatusLabel(n.Status)}</td>
+        <td>${tlsCell(n)}</td>
+        <td class="muted">${n.LastSeenAt ? esc(formatAuditTime(n.LastSeenAt)) : '—'}</td>
+        <td class="actions">${actions}</td>
+      </tr>`;
+    }).join('');
+
+    const tokenBox = tokenMeta
+      ? `<div class="info-box">
+          Token actif : <code>${esc(tokenMeta.Hint)}</code>
+          · expire ${esc(formatAuditTime(tokenMeta.ExpiresAt))}
+          · utilisations ${esc(tokenMeta.UseCount)}${tokenMeta.MaxUses != null ? ' / ' + esc(tokenMeta.MaxUses) : ''}
+          <div class="muted" style="margin-top:6px">Le secret complet n’est affiché qu’à la génération / rotation.</div>
+        </div>`
+      : `<div class="info-box">Aucun token de jointure actif — générez-en un pour enrôler un nœud.</div>`;
+
+    const draft = state._joinDraft || { host: '', name: '', port: '9001' };
+
+    root.innerHTML = shell('Nœuds', `
+      ${pageHeader('Infrastructure multi-nœuds', false)}
+      ${errMsg ? `<div class="error-box">${esc(errMsg)}</div>` : ''}
+      <div class="panel" style="margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">Ajouter un nœud</div>
+        <p class="muted">Indiquez l’IP (ou hostname) de la machine distante et le nom du nœud, puis générez le token : la commande d’install HTTPS sera prête à copier-coller.</p>
+        ${tokenBox}
+        <div class="form-row-2" style="margin-top:12px;align-items:end">
+          <div class="form-group" style="margin:0">
+            <label class="field-label" for="join-node-host">IP / hostname de la machine</label>
+            <input type="text" id="join-node-host" placeholder="192.168.1.5" value="${esc(draft.host)}" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="field-label" for="join-node-name">Nom du nœud</label>
+            <input type="text" id="join-node-name" placeholder="serveur-atelier" value="${esc(draft.name)}" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:12px;max-width:140px">
+          <label class="field-label" for="join-node-port">Port agent</label>
+          <input type="number" id="join-node-port" min="1" max="65535" value="${esc(draft.port || '9001')}">
+        </div>
+        <div id="join-form-err" class="error-box" style="display:none;margin-top:10px"></div>
+        <div class="toolbar" style="margin-top:12px">
+          <button type="button" class="btn btn-primary" id="gen-join-token">Générer la commande</button>
+        </div>
+        <div id="join-token-out" style="margin-top:12px"></div>
+      </div>
+      <div class="panel-card">
+        <div class="panel-head"><h3>Nœuds enregistrés</h3></div>
+        <div class="table-wrap" style="border:0;box-shadow:none">
+          <table class="data">
+            <thead><tr><th>Nom</th><th>Type</th><th>URL</th><th>Statut</th><th>TLS</th><th>Vu</th><th></th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="7" class="empty">Aucun nœud</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    `, { subtitle: 'Joindre, surveiller et délier les agents Docker' });
+
+    const readJoinDraft = () => {
+      const host = (document.getElementById('join-node-host')?.value || '').trim();
+      const name = (document.getElementById('join-node-name')?.value || '').trim();
+      const portRaw = (document.getElementById('join-node-port')?.value || '9001').trim();
+      const port = Number(portRaw) || 9001;
+      state._joinDraft = { host, name, port: String(port) };
+      return { host, name, port };
+    };
+
+    const validateJoinDraft = () => {
+      const errEl = document.getElementById('join-form-err');
+      const { host, name, port } = readJoinDraft();
+      let msg = '';
+      if (!host) msg = 'Indiquez l’IP ou le hostname de la machine distante.';
+      else if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name)) {
+        msg = 'Nom de nœud invalide (lettres, chiffres, . _ - ; 1–64 caractères).';
+      } else if (port < 1 || port > 65535) msg = 'Port agent invalide.';
+      if (errEl) {
+        if (msg) {
+          errEl.style.display = '';
+          errEl.textContent = msg;
+        } else {
+          errEl.style.display = 'none';
+          errEl.textContent = '';
+        }
+      }
+      return msg ? null : { host, name, port };
+    };
+
+    const showToken = (data) => {
+      const out = document.getElementById('join-token-out');
+      if (!out || !data?.Token) return;
+      const cmd = data.InstallCommand || '';
+      const adv = data.AdvertiseURL || '';
+      out.innerHTML = `
+        <div class="info-box">
+          <div class="muted" style="margin-bottom:8px">
+            Nœud <strong>${esc(data.NodeName || '—')}</strong>
+            · advertise <code>${esc(adv)}</code>
+            · expire ${esc(formatAuditTime(data.ExpiresAt))}
+          </div>
+          <strong>Commande à exécuter sur la machine distante</strong>
+          <pre class="mono" id="join-cmd" style="white-space:pre-wrap;margin:8px 0;user-select:all">${esc(cmd)}</pre>
+          <div class="toolbar" style="gap:8px">
+            <button type="button" class="btn btn-sm btn-primary" id="copy-join-cmd">Copier la commande</button>
+            <button type="button" class="btn btn-sm" id="show-join-token">Afficher le token</button>
+          </div>
+          <pre class="mono" id="join-token-raw" style="display:none;white-space:pre-wrap;margin:8px 0 0">${esc(data.Token)}</pre>
+        </div>`;
+      document.getElementById('copy-join-cmd')?.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(cmd || data.Token);
+          const btn = document.getElementById('copy-join-cmd');
+          if (btn) {
+            const prev = btn.textContent;
+            btn.textContent = 'Copié';
+            setTimeout(() => { btn.textContent = prev; }, 1400);
+          }
+        } catch (_) {}
+      });
+      document.getElementById('show-join-token')?.addEventListener('click', () => {
+        const el = document.getElementById('join-token-raw');
+        if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
+      });
+    };
+
+    const afterToken = async (data) => {
+      state._lastJoinToken = data;
+      await viewNodes();
+    };
+
+    onBusyClick(document.getElementById('gen-join-token'), async () => {
+      const draftOk = validateJoinDraft();
+      if (!draftOk) return 'cancelled';
+      const data = await Api.createJoinToken({
+        ttlSeconds: 86400,
+        nodeHost: draftOk.host,
+        nodeName: draftOk.name,
+        nodePort: draftOk.port,
+      });
+      await afterToken(data);
+    }, { disableSiblings: false, minMs: 200 });
+
+    ['join-node-host', 'join-node-name', 'join-node-port'].forEach((id) => {
+      document.getElementById(id)?.addEventListener('change', readJoinDraft);
+      document.getElementById(id)?.addEventListener('input', readJoinDraft);
+    });
+
+    if (state._lastJoinToken?.Token) {
+      showToken(state._lastJoinToken);
+      state._lastJoinToken = null;
+    }
+
+    root.querySelectorAll('[data-ping]').forEach((btn) => {
+      onBusyClick(btn, async (el) => {
+        await Api.pingNode(el.dataset.ping);
+        await viewNodes();
+      }, { disableSiblings: false, minMs: 150 });
+    });
+    root.querySelectorAll('[data-disable]').forEach((btn) => {
+      onBusyClick(btn, async (el) => {
+        await Api.disableNode(el.dataset.disable);
+        await viewNodes();
+      }, { disableSiblings: false, minMs: 150 });
+    });
+    root.querySelectorAll('[data-enable]').forEach((btn) => {
+      onBusyClick(btn, async (el) => {
+        await Api.enableNode(el.dataset.enable);
+        await viewNodes();
+      }, { disableSiblings: false, minMs: 150 });
+    });
+    root.querySelectorAll('[data-unlink]').forEach((btn) => {
+      onBusyClick(btn, async (el) => {
+        if (!confirm('Délier ce nœud ? L’agent devra rejoindre avec un nouveau token.')) return 'cancelled';
+        await Api.unlinkNode(el.dataset.unlink);
+        if (Number(Api.getEndpointId()) === Number(el.dataset.unlink)) {
+          Api.setEndpointId(1);
+          state.endpointId = 1;
+        }
+        await viewNodes();
+      }, { disableSiblings: false, minMs: 150 });
+    });
+  }
+
   async function viewActivity() {
     const actionFilter = state.filters.activityAction || '';
     let data;
@@ -3993,7 +4713,12 @@ CMD ["sh"]
         await loadPublicUrl();
         state._settingsLoaded = true;
       }
+      await loadEndpoints();
       if (state.route === 'users' && Number(state.user?.Role) !== 1) {
+        location.hash = '#dashboard';
+        return;
+      }
+      if (state.route === 'nodes' && Number(state.user?.Role) !== 1) {
         location.hash = '#dashboard';
         return;
       }
@@ -4003,33 +4728,62 @@ CMD ["sh"]
       if (state.route === 'dashboard') await viewDashboard();
       else if (state.route === 'containers' || state.route === 'containers/new') {
         await viewContainers();
-        if (state.route === 'containers/new') await openCreateContainerModal();
+        if (state.route === 'containers/new' && !isAllNodes()) {
+          await openCreateContainerModal();
+        }
       }
       else if (state.route.startsWith('containers/')) {
-        const parts = state.route.split('/');
-        const id = parts[1];
-        const tab = parts[2] || 'overview';
-        await viewContainerDetail(id, tab);
+        if (isAllNodes()) {
+          root.innerHTML = shell('Conteneur', `${pageHeader('Détail')} ${pickNodeGuardHtml()}`);
+        } else {
+          const parts = state.route.split('/');
+          const id = parts[1];
+          const tab = parts[2] || 'overview';
+          await viewContainerDetail(id, tab);
+        }
       }
       else if (state.route === 'images/build' || state.route.startsWith('images/build/')) {
-        const name = state.route.startsWith('images/build/')
-          ? decodeURIComponent(state.route.slice('images/build/'.length))
-          : '';
-        await openBuildImageView(name);
+        if (isAllNodes()) {
+          root.innerHTML = shell('Build', `${pageHeader('Dockerfile / Build')} ${pickNodeGuardHtml()}`);
+        } else {
+          const name = state.route.startsWith('images/build/')
+            ? decodeURIComponent(state.route.slice('images/build/'.length))
+            : '';
+          await openBuildImageView(name);
+        }
       }
       else if (state.route === 'images' || state.route === 'images/pull') {
         await viewImages();
-        if (state.route === 'images/pull') await openPullImageModal();
+        if (state.route === 'images/pull' && !isAllNodes()) {
+          await openPullImageModal();
+        }
       }
       else if (state.route === 'volumes') await viewVolumes();
       else if (state.route.startsWith('volumes/')) {
-        const name = decodeURIComponent(state.route.slice('volumes/'.length).split('?')[0]);
-        await viewVolumeBrowse(name);
+        if (isAllNodes()) {
+          root.innerHTML = shell('Volume', `${pageHeader('Explorer')} ${pickNodeGuardHtml()}`);
+        } else {
+          const name = decodeURIComponent(state.route.slice('volumes/'.length).split('?')[0]);
+          await viewVolumeBrowse(name);
+        }
       }
       else if (state.route === 'networks') await viewNetworks();
       else if (state.route === 'stacks' || state.route === 'stacks/new') await viewStacks();
-      else if (state.route.startsWith('stacks/')) await viewStackDetail(state.route.split('/')[1]);
+      else if (state.route.startsWith('stacks/')) {
+        if (isAllNodes()) {
+          root.innerHTML = shell('Stack', `${pageHeader('Stack')} ${pickNodeGuardHtml()}`);
+        } else {
+          await viewStackDetail(state.route.split('/')[1]);
+        }
+      }
       else if (state.route === 'activity') await viewActivity();
+      else if (state.route === 'nodes') {
+        if (Number(state.user?.Role) !== 1) {
+          location.hash = '#dashboard';
+          return;
+        }
+        await viewNodes();
+      }
       else if (state.route === 'settings') await viewSettings();
       else if (state.route === 'users') await viewUsers();
       else if (state.route === 'registries') await viewRegistries();
@@ -4038,7 +4792,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.0.2</strong> — interface de gestion Docker locale.</p>
+          <p class="muted">Version <strong>1.2.0</strong> — gestion Docker multi-nœuds (agents, vue Tous les nœuds).</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
           <p class="muted">Socket : <code>unix:///var/run/docker.so</code></p>

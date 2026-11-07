@@ -114,6 +114,11 @@ final class App
             return $this->authenticate($request);
         }
 
+        // Agent enrollment — authenticated by join token only (no JWT)
+        if ($path === '/api/nodes/join' && $method === 'POST') {
+            return $this->joinNode($request);
+        }
+
         $user = $this->authenticateRequest($request);
         if ($user instanceof Response) {
             return $user;
@@ -164,7 +169,7 @@ final class App
         }
 
         if ($path === '/api/endpoints' && $method === 'POST') {
-            return Response::error('Seul l\'environnement Docker local est pris en charge', 400);
+            return Response::error('Utilisez /api/nodes/join pour enrôler un nœud agent', 400);
         }
 
         if (preg_match('#^/api/endpoints/(\d+)$#', $path, $m) && $method === 'GET') {
@@ -173,6 +178,32 @@ final class App
                 return Response::error('Environnement introuvable', 404);
             }
             return Response::json($this->formatEndpoint($ep));
+        }
+
+        // --- Multinode / agents (admin) ---
+        if ($path === '/api/nodes' && $method === 'GET') {
+            return $this->listNodes($user);
+        }
+        if ($path === '/api/nodes/join-token' && $method === 'GET') {
+            return $this->getJoinTokenMeta($user);
+        }
+        if ($path === '/api/nodes/join-token' && $method === 'POST') {
+            return $this->createJoinToken($request, $user);
+        }
+        if ($path === '/api/nodes/join-token/rotate' && $method === 'POST') {
+            return $this->rotateJoinToken($request, $user);
+        }
+        if (preg_match('#^/api/nodes/(\d+)/disable$#', $path, $m) && $method === 'POST') {
+            return $this->setNodeEnabled((int) $m[1], false, $request, $user);
+        }
+        if (preg_match('#^/api/nodes/(\d+)/enable$#', $path, $m) && $method === 'POST') {
+            return $this->setNodeEnabled((int) $m[1], true, $request, $user);
+        }
+        if (preg_match('#^/api/nodes/(\d+)/ping$#', $path, $m) && $method === 'POST') {
+            return $this->pingNode((int) $m[1], $user);
+        }
+        if (preg_match('#^/api/nodes/(\d+)$#', $path, $m) && $method === 'DELETE') {
+            return $this->unlinkNode((int) $m[1], $request, $user);
         }
 
         if (preg_match('#^/api/endpoints/(\d+)/docker(/.*)?$#', $path, $m)) {
@@ -508,6 +539,9 @@ final class App
         if (!$ep) {
             return Response::error('Environnement introuvable', 404);
         }
+        if ($deny = $this->assertEndpointUsable($ep)) {
+            return $deny;
+        }
 
         $dockerPath = $dockerPath === '' ? '/' : $dockerPath;
         $forwardHeaders = [];
@@ -516,7 +550,8 @@ final class App
             $forwardHeaders['Content-Type'] = $contentType;
         }
 
-        $response = $this->dockerScope->handle(
+        $scope = $this->scopeForEndpoint($ep);
+        $response = $scope->handle(
             $user,
             $request->method,
             $dockerPath,
@@ -525,6 +560,7 @@ final class App
             $request->query,
         );
         if ($response->status < 400) {
+            $this->repo->updateEndpointLastSeen((int) $ep['id'], 1);
             $this->auditDockerMutation($user, $request->method, $dockerPath, $request);
         }
         return $response;
@@ -533,10 +569,15 @@ final class App
     /** @param array{id:int,username:string,role:int} $user */
     private function containerLogs(int $endpointId, string $containerId, Request $request, array $user): Response
     {
-        if (!$this->repo->getEndpoint($endpointId)) {
+        $ep = $this->repo->getEndpoint($endpointId);
+        if (!$ep) {
             return Response::error('Environnement introuvable', 404);
         }
-        if (!$this->dockerScope->canAccessContainer($containerId, $user)) {
+        if ($deny = $this->assertEndpointUsable($ep)) {
+            return $deny;
+        }
+        $scope = $this->scopeForEndpoint($ep);
+        if (!$scope->canAccessContainer($containerId, $user)) {
             return Response::error('Accès refusé à ce conteneur', 403);
         }
 
@@ -550,7 +591,7 @@ final class App
         $since = ($sinceRaw !== null && $sinceRaw !== '' && (int) $sinceRaw > 0) ? (int) $sinceRaw : null;
 
         try {
-            $exec = new \App\Docker\Exec($this->docker);
+            $exec = new \App\Docker\Exec($this->dockerForEndpoint($ep));
             $text = $exec->logs($containerId, [
                 'tail' => $tail,
                 'timestamps' => $timestamps,
@@ -563,19 +604,25 @@ final class App
             $status = $e->getCode() >= 400 && $e->getCode() < 600 ? (int) $e->getCode() : 500;
             return Response::error($e->getMessage(), $status);
         }
+        $this->repo->updateEndpointLastSeen((int) $ep['id'], 1);
         return Response::text($text, 200, ['Content-Type' => 'text/plain; charset=utf-8']);
     }
 
     /** @param array{id:int,username:string,role:int} $user */
     private function containerExec(int $endpointId, string $containerId, Request $request, array $user): Response
     {
-        if (!$this->dockerScope->canAccessContainer($containerId, $user)) {
-            return Response::error('Accès refusé à ce conteneur', 403);
-        }
-
-        if (!$this->repo->getEndpoint($endpointId)) {
+        $ep = $this->repo->getEndpoint($endpointId);
+        if (!$ep) {
             return Response::error('Environnement introuvable', 404);
         }
+        if ($deny = $this->assertEndpointUsable($ep)) {
+            return $deny;
+        }
+        $scope = $this->scopeForEndpoint($ep);
+        if (!$scope->canAccessContainer($containerId, $user)) {
+            return Response::error('Accès refusé à ce conteneur', 403);
+        }
+        $docker = $this->dockerForEndpoint($ep);
         $body = $request->json();
         $command = trim((string) ($body['command'] ?? $body['Command'] ?? ''));
         $userShell = (string) ($body['shell'] ?? '/bin/sh');
@@ -595,13 +642,13 @@ final class App
         $script = $cwd !== '' ? 'cd ' . escapeshellarg($cwd) . ' && ' . $command : $command;
         $cmd = [$userShell, '-lc', $script];
         try {
-            $exec = new \App\Docker\Exec($this->docker);
+            $exec = new \App\Docker\Exec($docker);
             $result = $exec->run($containerId, $cmd, false);
         } catch (\Throwable $e) {
             // Retry with /bin/sh if bash missing
             if ($userShell !== '/bin/sh') {
                 try {
-                    $exec = new \App\Docker\Exec($this->docker);
+                    $exec = new \App\Docker\Exec($docker);
                     $result = $exec->run($containerId, ['/bin/sh', '-lc', $script], false);
                 } catch (\Throwable $e2) {
                     $status = $e2->getCode() >= 400 && $e2->getCode() < 600 ? (int) $e2->getCode() : 500;
@@ -656,8 +703,12 @@ final class App
     private function createStack(Request $request, array $user): Response
     {
         $endpointId = (int) ($request->query('endpointId') ?? 1);
-        if (!$this->repo->getEndpoint($endpointId)) {
+        $ep = $this->repo->getEndpoint($endpointId);
+        if (!$ep) {
             return Response::error('Environnement introuvable', 404);
+        }
+        if (($ep['kind'] ?? 'local') === 'agent') {
+            return Response::error('Les stacks Compose sur un nœud agent ne sont pas encore supportées — utilisez le nœud local', 400);
         }
         $body = $request->json();
         $name = trim((string) ($body['Name'] ?? $body['name'] ?? ''));
@@ -1316,7 +1367,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.0.2',
+                'User-Agent: WharfMaster/1.2.0',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1565,18 +1616,41 @@ final class App
     /** @param array<string, mixed> $ep */
     private function formatEndpoint(array $ep): array
     {
-        $status = 1;
-        try {
-            $status = $this->docker->ping() ? 1 : 2;
-        } catch (\Throwable) {
-            $status = 2;
+        $stored = (int) ($ep['status'] ?? 1);
+        $status = $stored === 0 ? 0 : 2;
+        $tlsExpiresAt = isset($ep['tls_expires_at']) && $ep['tls_expires_at'] !== null
+            ? (int) $ep['tls_expires_at']
+            : null;
+        if ($stored !== 0) {
+            try {
+                $status = $this->dockerForEndpoint($ep)->ping() ? 1 : 2;
+                if ($status === 1) {
+                    $this->repo->updateEndpointLastSeen((int) $ep['id'], 1);
+                    if (($ep['kind'] ?? '') === 'agent') {
+                        $probed = $this->probeAgentTls($ep);
+                        if ($probed !== null) {
+                            $tlsExpiresAt = $probed;
+                            $this->repo->updateEndpointTlsExpires((int) $ep['id'], $probed);
+                        }
+                    }
+                } elseif (($ep['kind'] ?? '') === 'agent') {
+                    $this->repo->updateEndpointLastSeen((int) $ep['id'], 2);
+                }
+            } catch (\Throwable) {
+                $status = 2;
+            }
         }
 
+        $kind = (string) ($ep['kind'] ?? 'local');
+        $tlsDaysLeft = null;
+        if ($tlsExpiresAt !== null && $tlsExpiresAt > 0) {
+            $tlsDaysLeft = (int) floor(($tlsExpiresAt - time()) / 86400);
+        }
         return [
             'Id' => (int) $ep['id'],
             'Name' => $ep['name'],
             'Type' => (int) $ep['type'],
-            'URL' => $ep['url'],
+            'URL' => $kind === 'agent' ? (string) ($ep['agent_url'] ?? $ep['url']) : $ep['url'],
             'GroupId' => (int) $ep['group_id'],
             'PublicURL' => $ep['public_url'] !== ''
                 ? $ep['public_url']
@@ -1588,7 +1662,95 @@ final class App
             'TeamAccessPolicies' => (object) [],
             'TagIds' => [],
             'Kubernetes' => (object) [],
+            'Kind' => $kind,
+            'NodeName' => (string) ($ep['node_name'] ?? $ep['name']),
+            'AgentURL' => (string) ($ep['agent_url'] ?? ''),
+            'LastSeenAt' => isset($ep['last_seen_at']) ? (int) $ep['last_seen_at'] : null,
+            'JoinedAt' => isset($ep['joined_at']) ? (int) $ep['joined_at'] : null,
+            'Tls' => $kind === 'agent',
+            'TlsExpiresAt' => $tlsExpiresAt,
+            'TlsDaysLeft' => $tlsDaysLeft,
+            'TlsRenewBy' => $tlsExpiresAt ? date('Y-m-d', max(0, $tlsExpiresAt - 30 * 86400)) : null,
         ];
+    }
+
+    /**
+     * Read peer certificate expiry from agent HTTPS endpoint (self-signed OK).
+     *
+     * @param array<string, mixed> $ep
+     */
+    private function probeAgentTls(array $ep): ?int
+    {
+        $url = (string) ($ep['agent_url'] ?? '');
+        $secret = (string) ($ep['agent_secret'] ?? '');
+        if ($url === '' || !str_starts_with(strtolower($url), 'https://')) {
+            return null;
+        }
+
+        // Prefer health JSON from agent
+        try {
+            $ch = curl_init(rtrim($url, '/') . '/health');
+            if ($ch) {
+                $headers = [];
+                if ($secret !== '') {
+                    $headers[] = 'Authorization: Bearer ' . $secret;
+                }
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_TIMEOUT => 5,
+                    CURLOPT_HTTPHEADER => $headers,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => 0,
+                ]);
+                $body = curl_exec($ch);
+                curl_close($ch);
+                if (is_string($body) && $body !== '') {
+                    $json = json_decode($body, true);
+                    if (is_array($json) && !empty($json['tlsExpiresAt'])) {
+                        return (int) $json['tlsExpiresAt'];
+                    }
+                }
+            }
+        } catch (\Throwable) {
+            // fall through to cert probe
+        }
+
+        $parts = parse_url($url);
+        $host = $parts['host'] ?? '';
+        $port = (int) ($parts['port'] ?? 443);
+        if ($host === '') {
+            return null;
+        }
+        $ctx = stream_context_create([
+            'ssl' => [
+                'capture_peer_cert' => true,
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true,
+            ],
+        ]);
+        $client = @stream_socket_client(
+            'ssl://' . $host . ':' . $port,
+            $errno,
+            $errstr,
+            5,
+            STREAM_CLIENT_CONNECT,
+            $ctx,
+        );
+        if ($client === false) {
+            return null;
+        }
+        $params = stream_context_get_params($ctx);
+        fclose($client);
+        $peer = $params['options']['ssl']['peer_certificate'] ?? null;
+        if (!$peer) {
+            return null;
+        }
+        $parsed = @openssl_x509_parse($peer);
+        if (!is_array($parsed) || empty($parsed['validTo_time_t'])) {
+            return null;
+        }
+        return (int) $parsed['validTo_time_t'];
     }
 
     /** @param array<string, mixed> $stack */
@@ -1627,6 +1789,385 @@ final class App
         $id = bin2hex(random_bytes(16));
         $this->repo->setSetting('instance_id', $id);
         return $id;
+    }
+
+    /** @param array<string, mixed> $ep */
+    private function dockerForEndpoint(array $ep): DockerClient
+    {
+        $kind = (string) ($ep['kind'] ?? 'local');
+        $api = (string) ($this->config['docker_api_version'] ?? 'v1.45');
+        if ($kind === 'agent') {
+            $url = (string) ($ep['agent_url'] ?? '');
+            $secret = (string) ($ep['agent_secret'] ?? '');
+            if ($url === '' || $secret === '') {
+                throw new \RuntimeException('Nœud agent mal configuré', 503);
+            }
+            return DockerClient::httpAgent($url, $secret, $api);
+        }
+        return $this->docker;
+    }
+
+    /** @param array<string, mixed> $ep */
+    private function scopeForEndpoint(array $ep): DockerScope
+    {
+        return new DockerScope($this->dockerForEndpoint($ep), $this->repo);
+    }
+
+    /** @param array<string, mixed> $ep */
+    private function assertEndpointUsable(array $ep): ?Response
+    {
+        if ((int) ($ep['status'] ?? 1) === 0) {
+            return Response::error('Nœud désactivé', 503);
+        }
+        if (($ep['kind'] ?? 'local') === 'agent' && trim((string) ($ep['agent_secret'] ?? '')) === '') {
+            return Response::error('Nœud délié ou secret manquant', 503);
+        }
+        return null;
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listNodes(array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $items = [];
+        foreach ($this->repo->listEndpoints() as $ep) {
+            $items[] = $this->formatEndpoint($ep);
+        }
+        return Response::json(['Items' => $items]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function getJoinTokenMeta(array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $row = $this->repo->getActiveJoinToken();
+        if (!$row) {
+            return Response::json(['Active' => null]);
+        }
+        return Response::json([
+            'Active' => [
+                'Id' => (int) $row['id'],
+                'Hint' => '…' . (string) $row['token_hint'],
+                'Label' => (string) $row['label'],
+                'CreatedAt' => (int) $row['created_at'],
+                'CreatedBy' => (string) $row['created_by'],
+                'ExpiresAt' => (int) $row['expires_at'],
+                'MaxUses' => $row['max_uses'] !== null ? (int) $row['max_uses'] : null,
+                'UseCount' => (int) $row['use_count'],
+            ],
+        ]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function createJoinToken(Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $body = $request->json();
+        $ttl = (int) ($body['ttlSeconds'] ?? $body['TtlSeconds'] ?? 86400);
+        $ttl = max(300, min(86400 * 30, $ttl));
+        $label = trim((string) ($body['label'] ?? $body['Label'] ?? ''));
+        $maxUses = $body['maxUses'] ?? $body['MaxUses'] ?? null;
+        $maxUses = $maxUses === null || $maxUses === '' ? null : max(1, (int) $maxUses);
+        $nodeHost = trim((string) ($body['nodeHost'] ?? $body['NodeHost'] ?? $body['ip'] ?? $body['Ip'] ?? ''));
+        $nodeName = trim((string) ($body['nodeName'] ?? $body['NodeName'] ?? $body['name'] ?? $body['Name'] ?? ''));
+        $nodePort = (int) ($body['nodePort'] ?? $body['NodePort'] ?? $body['port'] ?? $body['Port'] ?? 9001);
+
+        $this->repo->revokeAllJoinTokens();
+        $created = $this->repo->createJoinToken((string) $user['username'], $label, $ttl, $maxUses);
+        $this->audit($user, 'node.token.create', 'Génération d’un token de jointure', $request, [
+            'hint' => $created['row']['token_hint'] ?? '',
+            'expiresAt' => $created['row']['expires_at'] ?? null,
+            'nodeHost' => $nodeHost,
+            'nodeName' => $nodeName,
+        ]);
+        return Response::json($this->formatJoinTokenResponse(
+            $created['token'],
+            $created['row'],
+            $request,
+            $nodeHost,
+            $nodeName,
+            $nodePort,
+        ));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function rotateJoinToken(Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $body = $request->json();
+        $ttl = (int) ($body['ttlSeconds'] ?? $body['TtlSeconds'] ?? 86400);
+        $ttl = max(300, min(86400 * 30, $ttl));
+        $nodeHost = trim((string) ($body['nodeHost'] ?? $body['NodeHost'] ?? $body['ip'] ?? $body['Ip'] ?? ''));
+        $nodeName = trim((string) ($body['nodeName'] ?? $body['NodeName'] ?? $body['name'] ?? $body['Name'] ?? ''));
+        $nodePort = (int) ($body['nodePort'] ?? $body['NodePort'] ?? $body['port'] ?? $body['Port'] ?? 9001);
+        $this->repo->revokeAllJoinTokens();
+        $created = $this->repo->createJoinToken((string) $user['username'], 'rotated', $ttl, null);
+        $this->audit($user, 'node.token.rotate', 'Rotation du token de jointure', $request, [
+            'nodeHost' => $nodeHost,
+            'nodeName' => $nodeName,
+        ]);
+        return Response::json($this->formatJoinTokenResponse(
+            $created['token'],
+            $created['row'],
+            $request,
+            $nodeHost,
+            $nodeName,
+            $nodePort,
+        ));
+    }
+
+    /** @param array<string, mixed> $row */
+    private function formatJoinTokenResponse(
+        string $rawToken,
+        array $row,
+        ?Request $request = null,
+        string $nodeHost = '',
+        string $nodeName = '',
+        int $nodePort = 9001,
+    ): array {
+        $public = $this->resolvePublicBaseUrl($request);
+        $cmd = $this->buildInstallCommand($public, $rawToken, $nodeHost, $nodeName, $nodePort);
+        return [
+            'Token' => $rawToken,
+            'Hint' => '…' . (string) ($row['token_hint'] ?? ''),
+            'ExpiresAt' => (int) ($row['expires_at'] ?? 0),
+            'MaxUses' => isset($row['max_uses']) && $row['max_uses'] !== null ? (int) $row['max_uses'] : null,
+            'NodeHost' => $nodeHost,
+            'NodeName' => $nodeName,
+            'NodePort' => $nodePort > 0 ? $nodePort : 9001,
+            'PublicURL' => $public,
+            'AdvertiseURL' => $this->buildAdvertiseUrl($nodeHost, $nodePort),
+            'InstallCommand' => $cmd,
+        ];
+    }
+
+    /** URL publique configurée, sinon origine de la requête courante. */
+    private function resolvePublicBaseUrl(?Request $request = null): string
+    {
+        $public = trim((string) ($this->repo->getSetting('public_url', '') ?? ''));
+        if ($public === '') {
+            $ep = $this->repo->getEndpoint(1);
+            if ($ep && !empty($ep['public_url'])) {
+                $public = trim((string) $ep['public_url']);
+            }
+        }
+        if ($public === '' && $request !== null) {
+            $host = trim((string) ($request->header('X-Forwarded-Host')
+                ?? $request->header('Host')
+                ?? ''));
+            // first value if comma-separated
+            if (str_contains($host, ',')) {
+                $host = trim(explode(',', $host, 2)[0]);
+            }
+            if ($host !== '') {
+                $proto = strtolower(trim((string) ($request->header('X-Forwarded-Proto') ?? '')));
+                if ($proto === '' || !in_array($proto, ['http', 'https'], true)) {
+                    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+                        || ((int) ($_SERVER['SERVER_PORT'] ?? 0) === 443);
+                    $proto = $https ? 'https' : 'http';
+                }
+                $public = $proto . '://' . $host;
+            }
+        }
+        return rtrim($public !== '' ? $public : 'https://VOTRE-SERVEUR', '/');
+    }
+
+    private function buildAdvertiseUrl(string $nodeHost, int $nodePort = 9001): string
+    {
+        $host = trim($nodeHost);
+        $host = preg_replace('#^https?://#i', '', $host) ?? $host;
+        $host = rtrim($host, '/');
+        if ($host === '') {
+            return 'https://IP_DU_NOEUD:9001';
+        }
+        // host:port already provided
+        if (preg_match('#^\[.+\]:\d+$#', $host) || preg_match('#^[^/]+:\d+$#', $host)) {
+            return 'https://' . $host;
+        }
+        $port = $nodePort > 0 && $nodePort <= 65535 ? $nodePort : 9001;
+        return 'https://' . $host . ':' . $port;
+    }
+
+    private function buildInstallCommand(
+        string $publicUrl,
+        string $token,
+        string $nodeHost = '',
+        string $nodeName = '',
+        int $nodePort = 9001,
+    ): string {
+        $base = rtrim($publicUrl !== '' ? $publicUrl : 'https://VOTRE-SERVEUR', '/');
+        $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
+        $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
+        // Single-line, ready to paste — uses configured Public URL / host
+        return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
+            . ' | sh -s --'
+            . ' --url ' . escapeshellarg($base)
+            . ' --token ' . escapeshellarg($token)
+            . ' --advertise ' . escapeshellarg($advertise)
+            . ' --name ' . escapeshellarg($name);
+    }
+
+    private function joinNode(Request $request): Response
+    {
+        $ip = $this->clientIp($request);
+        $bucket = 'node-join:' . $ip;
+        if ($this->rateLimiter->tooMany($bucket)) {
+            return Response::error('Trop de tentatives', 429);
+        }
+        $this->rateLimiter->hit($bucket);
+
+        $body = $request->json();
+        $token = trim((string) ($body['token'] ?? $body['Token'] ?? ''));
+        $name = trim((string) ($body['name'] ?? $body['Name'] ?? ''));
+        $agentUrl = rtrim(trim((string) ($body['agentUrl'] ?? $body['AgentURL'] ?? $body['advertise'] ?? '')), '/');
+
+        if ($token === '' || !str_starts_with($token, 'wmj_')) {
+            return Response::error('Token de jointure invalide', 422);
+        }
+        if ($name === '' || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/', $name)) {
+            return Response::error('Nom de nœud invalide', 400);
+        }
+        if ($agentUrl === '' || !preg_match('#^https://#i', $agentUrl)) {
+            return Response::error('URL agent (advertise) invalide — HTTPS obligatoire (ex. https://192.168.1.5:9001)', 400);
+        }
+
+        $row = $this->repo->findValidJoinToken($token);
+        if (!$row) {
+            $this->audit(null, 'node.join.fail', 'Échec de jointure (token invalide)', $request, [
+                'name' => $name,
+                'agentUrl' => $agentUrl,
+            ]);
+            return Response::error('Token de jointure invalide ou expiré', 403);
+        }
+
+        $existing = $this->repo->findEndpointByAgentUrl($agentUrl);
+        $nodeSecret = 'wmn_' . bin2hex(random_bytes(24));
+        $rejoined = false;
+        if ($existing && (int) $existing['id'] > 1 && ($existing['kind'] ?? '') === 'agent') {
+            $ep = $this->repo->rejoinAgentEndpoint((int) $existing['id'], $name, $nodeSecret);
+            $rejoined = true;
+        } else {
+            $ep = $this->repo->createAgentEndpoint($name, $agentUrl, $nodeSecret);
+        }
+        $this->repo->incrementJoinTokenUse((int) $row['id']);
+        $this->rateLimiter->clear($bucket);
+
+        $tlsExpiresAt = $this->probeAgentTls([
+            'agent_url' => $agentUrl,
+            'agent_secret' => $nodeSecret,
+        ]);
+        if ($tlsExpiresAt !== null && !empty($ep['id'])) {
+            $this->repo->updateEndpointTlsExpires((int) $ep['id'], $tlsExpiresAt);
+        }
+
+        $this->audit(null, $rejoined ? 'node.rejoin' : 'node.join', 'Nœud « ' . $name . ' » ' . ($rejoined ? 'rejoint' : 'joint') . ' à l’infra', $request, [
+            'endpointId' => (int) ($ep['id'] ?? 0),
+            'agentUrl' => $agentUrl,
+            'tlsExpiresAt' => $tlsExpiresAt,
+            'rejoined' => $rejoined,
+        ]);
+
+        return Response::json([
+            'NodeId' => (int) ($ep['id'] ?? 0),
+            'TlsExpiresAt' => $tlsExpiresAt,
+            'Name' => $name,
+            'AgentURL' => $agentUrl,
+            'NodeSecret' => $nodeSecret,
+            'Rejoined' => $rejoined,
+            'Message' => $rejoined
+                ? 'Nœud déjà connu — secret renouvelé, redémarrez l’agent'
+                : 'Nœud enregistré — démarrez l’agent avec ce NodeSecret',
+        ], $rejoined ? 200 : 201);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function unlinkNode(int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        if ($id <= 1) {
+            return Response::error('Le nœud local ne peut pas être délié', 400);
+        }
+        $ep = $this->repo->getEndpoint($id);
+        if (!$ep || ($ep['kind'] ?? '') !== 'agent') {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $name = (string) ($ep['node_name'] ?? $ep['name']);
+        $this->repo->deleteEndpoint($id);
+        $this->audit($user, 'node.unlink', 'Déliaison du nœud « ' . $name . ' »', $request, [
+            'endpointId' => $id,
+        ]);
+        return Response::empty(204);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function setNodeEnabled(int $id, bool $enabled, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        if ($id <= 1) {
+            return Response::error('Le nœud local ne peut pas être désactivé', 400);
+        }
+        $ep = $this->repo->getEndpoint($id);
+        if (!$ep || ($ep['kind'] ?? '') !== 'agent') {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $this->repo->setEndpointStatus($id, $enabled ? 1 : 0);
+        $this->audit(
+            $user,
+            $enabled ? 'node.enable' : 'node.disable',
+            ($enabled ? 'Activation' : 'Désactivation') . ' du nœud « ' . ($ep['node_name'] ?? $ep['name']) . ' »',
+            $request,
+            ['endpointId' => $id],
+        );
+        $fresh = $this->repo->getEndpoint($id);
+        return Response::json($this->formatEndpoint($fresh ?? $ep));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function pingNode(int $id, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $ep = $this->repo->getEndpoint($id);
+        if (!$ep) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        if ((int) ($ep['status'] ?? 1) === 0) {
+            return Response::json(['Ok' => false, 'Status' => 0, 'Message' => 'Nœud désactivé']);
+        }
+        try {
+            $ok = $this->dockerForEndpoint($ep)->ping();
+        } catch (\Throwable $e) {
+            $ok = false;
+        }
+        $this->repo->updateEndpointLastSeen($id, $ok ? 1 : 2);
+        $tlsExpiresAt = null;
+        if ($ok && ($ep['kind'] ?? '') === 'agent') {
+            $tlsExpiresAt = $this->probeAgentTls($ep);
+            if ($tlsExpiresAt !== null) {
+                $this->repo->updateEndpointTlsExpires($id, $tlsExpiresAt);
+            }
+        }
+        return Response::json([
+            'Ok' => $ok,
+            'Status' => $ok ? 1 : 2,
+            'LastSeenAt' => time(),
+            'TlsExpiresAt' => $tlsExpiresAt,
+            'TlsDaysLeft' => $tlsExpiresAt ? (int) floor(($tlsExpiresAt - time()) / 86400) : null,
+            'TlsRenewBy' => $tlsExpiresAt ? date('Y-m-d', max(0, $tlsExpiresAt - 30 * 86400)) : null,
+        ]);
     }
 
     /**

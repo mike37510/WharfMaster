@@ -1,6 +1,6 @@
 const Api = (() => {
   const TOKEN_KEY = 'dm_jwt';
-  const ENDPOINT_ID = 1;
+  const ENDPOINT_KEY = 'dm_endpoint_id';
 
   function getToken() {
     return localStorage.getItem(TOKEN_KEY) || '';
@@ -9,6 +9,22 @@ const Api = (() => {
   function setToken(token) {
     if (token) localStorage.setItem(TOKEN_KEY, token);
     else localStorage.removeItem(TOKEN_KEY);
+  }
+
+  function getEndpointId() {
+    const n = parseInt(localStorage.getItem(ENDPOINT_KEY) || '1', 10);
+    // 0 = « Tous les nœuds » (vue agrégée lecture seule)
+    if (Number.isFinite(n) && n >= 0) return n;
+    return 1;
+  }
+
+  function setEndpointId(id) {
+    const n = parseInt(String(id), 10);
+    if (Number.isFinite(n) && n >= 0) localStorage.setItem(ENDPOINT_KEY, String(n));
+  }
+
+  function isAllEndpoints() {
+    return getEndpointId() === 0;
   }
 
   async function request(path, options = {}) {
@@ -36,15 +52,31 @@ const Api = (() => {
     return data;
   }
 
-  const docker = (path, options = {}) =>
-    request(`/api/endpoints/${ENDPOINT_ID}/docker${path}`, options);
+  const dockerOn = (endpointId, path, options = {}) => {
+    const id = parseInt(String(endpointId), 10);
+    if (!Number.isFinite(id) || id < 1) {
+      return Promise.reject(new Error('Choisissez un nœud pour cette action'));
+    }
+    return request(`/api/endpoints/${id}/docker${path}`, options);
+  };
+
+  const docker = (path, options = {}) => {
+    if (isAllEndpoints()) {
+      return Promise.reject(new Error('Choisissez un nœud pour cette action'));
+    }
+    return dockerOn(getEndpointId(), path, options);
+  };
 
   return {
-    ENDPOINT_ID,
+    get ENDPOINT_ID() { return getEndpointId(); },
+    getEndpointId,
+    setEndpointId,
+    isAllEndpoints,
     getToken,
     setToken,
     request,
     docker,
+    dockerOn,
     status: () => request('/api/status'),
     host: () => request('/api/system/host'),
     adminCheck: () => request('/api/users/admin/check'),
@@ -63,6 +95,16 @@ const Api = (() => {
     changePassword: (id, payload) =>
       request(`/api/users/${id}/passwd`, { method: 'PUT', body: JSON.stringify(payload) }),
     endpoints: () => request('/api/endpoints'),
+    nodes: () => request('/api/nodes'),
+    joinTokenMeta: () => request('/api/nodes/join-token'),
+    createJoinToken: (payload = {}) =>
+      request('/api/nodes/join-token', { method: 'POST', body: JSON.stringify(payload) }),
+    rotateJoinToken: (payload = {}) =>
+      request('/api/nodes/join-token/rotate', { method: 'POST', body: JSON.stringify(payload) }),
+    unlinkNode: (id) => request(`/api/nodes/${id}`, { method: 'DELETE' }),
+    disableNode: (id) => request(`/api/nodes/${id}/disable`, { method: 'POST', body: '{}' }),
+    enableNode: (id) => request(`/api/nodes/${id}/enable`, { method: 'POST', body: '{}' }),
+    pingNode: (id) => request(`/api/nodes/${id}/ping`, { method: 'POST', body: '{}' }),
     audit: (opts = {}) => {
       const q = new URLSearchParams();
       q.set('limit', String(opts.limit ?? 100));
@@ -80,12 +122,12 @@ const Api = (() => {
       q.set('annotate', opts.annotate === false ? 'false' : 'true');
       if (opts.since != null && Number(opts.since) > 0) q.set('since', String(Math.floor(Number(opts.since))));
       return request(
-        `/api/endpoints/${ENDPOINT_ID}/containers/${encodeURIComponent(id)}/logs?${q.toString()}`,
+        `/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/logs?${q.toString()}`,
         { text: true },
       );
     },
     containerExec: (id, command, shell = '/bin/sh', cwd = '') =>
-      request(`/api/endpoints/${ENDPOINT_ID}/containers/${encodeURIComponent(id)}/exec`, {
+      request(`/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/exec`, {
         method: 'POST',
         body: JSON.stringify({ command, shell, cwd }),
       }),
@@ -101,21 +143,21 @@ const Api = (() => {
       request('/api/dockerfiles', { method: 'POST', body: JSON.stringify({ Name, Content }) }),
     deleteDockerfile: (name) =>
       request(`/api/dockerfiles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-    stacks: () => request(`/api/stacks?endpointId=${ENDPOINT_ID}`),
+    stacks: () => request(`/api/stacks?endpointId=${getEndpointId()}`),
     stack: (id) => request(`/api/stacks/${id}`),
     stackFile: (id) => request(`/api/stacks/${id}/file`),
     createStack: (Name, StackFileContent, Env = []) =>
-      request(`/api/stacks/create/standalone/string?endpointId=${ENDPOINT_ID}`, {
+      request(`/api/stacks/create/standalone/string?endpointId=${getEndpointId()}`, {
         method: 'POST',
         body: JSON.stringify({ Name, StackFileContent, Env }),
       }),
     updateStack: (id, StackFileContent, Env = []) =>
-      request(`/api/stacks/${id}?endpointId=${ENDPOINT_ID}`, {
+      request(`/api/stacks/${id}?endpointId=${getEndpointId()}`, {
         method: 'PUT',
         body: JSON.stringify({ StackFileContent, Env, prune: true }),
       }),
     deleteStack: (id) =>
-      request(`/api/stacks/${id}?endpointId=${ENDPOINT_ID}`, { method: 'DELETE' }),
+      request(`/api/stacks/${id}?endpointId=${getEndpointId()}`, { method: 'DELETE' }),
     registries: () => request('/api/registries'),
     registry: (id) => request(`/api/registries/${id}`),
     createRegistry: (payload) =>

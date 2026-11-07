@@ -199,6 +199,7 @@ a:hover { color: var(--link-hover); text-decoration: underline; }
 input[type="text"],
 input[type="password"],
 input[type="search"],
+input[type="number"],
 input:not([type]),
 textarea,
 select {
@@ -1230,8 +1231,27 @@ table.data tr:last-child td { border-bottom: 0; }
   flex-wrap: wrap;
 }
 .panel-card .table-wrap {
-  margin: 0 -4px;
-  padding: 0 4px;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden; /* évite l’ascenseur horizontal inutile dans les colonnes étroites */
+  overflow-y: visible;
+  max-width: 100%;
+}
+.panel-card table.data {
+  table-layout: fixed;
+  width: 100%;
+}
+.panel-card table.data th,
+.panel-card table.data td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.panel-card table.data .badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
 }
 .panel-card .panel-head h3 {
   margin: 0;
@@ -2108,6 +2128,46 @@ td.actions {
   color: var(--danger);
   background: rgba(239, 68, 68, 0.12);
   border-color: rgba(239, 68, 68, 0.35);
+}
+.node-select-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+.node-select-wrap select {
+  width: auto;
+  min-width: 140px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.engine-pill .dot.off {
+  background: var(--danger);
+  box-shadow: none;
+}
+.badge-success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.badge-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.badge-danger {
+  background: var(--danger-soft, rgba(220, 38, 38, 0.12));
+  color: var(--danger);
+}
+.badge-muted {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--muted);
 }
 .btn-icon .btn-ico {
   display: inline-flex;

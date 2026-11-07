@@ -166,6 +166,7 @@ final class DockerScope
             isset($body['Labels']) && is_array($body['Labels']) ? $body['Labels'] : [],
             $user,
         );
+        $body = self::normalizeDockerCreateMaps($body);
         return $this->forward(
             'POST',
             '/containers/create',
@@ -173,6 +174,46 @@ final class DockerScope
             array_merge($headers, ['Content-Type' => 'application/json']),
             $query,
         );
+    }
+
+    /**
+     * json_decode(…, true) turns JSON {} into []. Docker HostConfig.PortBindings
+     * and ExposedPorts must be objects (maps), never arrays.
+     *
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>
+     */
+    private static function normalizeDockerCreateMaps(array $body): array
+    {
+        if (isset($body['ExposedPorts'])) {
+            if (!is_array($body['ExposedPorts']) || $body['ExposedPorts'] === []) {
+                unset($body['ExposedPorts']);
+            } else {
+                foreach ($body['ExposedPorts'] as $port => $spec) {
+                    if ($spec === [] || $spec === null || !is_array($spec)) {
+                        $body['ExposedPorts'][$port] = new \stdClass();
+                    }
+                }
+            }
+        }
+
+        if (isset($body['HostConfig']) && is_array($body['HostConfig'])) {
+            $hc = &$body['HostConfig'];
+            if (isset($hc['PortBindings'])) {
+                if (!is_array($hc['PortBindings']) || $hc['PortBindings'] === [] || array_is_list($hc['PortBindings'])) {
+                    unset($hc['PortBindings']);
+                }
+            }
+            // RestartPolicy Name-only maps are fine; empty Volumes/etc. maps → drop
+            foreach (['StorageOpt', 'Sysctls', 'Tmpfs'] as $mapKey) {
+                if (isset($hc[$mapKey]) && is_array($hc[$mapKey]) && $hc[$mapKey] === []) {
+                    unset($hc[$mapKey]);
+                }
+            }
+            unset($hc);
+        }
+
+        return $body;
     }
 
     /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
