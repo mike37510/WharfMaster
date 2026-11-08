@@ -381,9 +381,9 @@
       const proto = (m[3] || 'tcp').toLowerCase();
       const containerPort = `${m[2]}/${proto}`;
       ExposedPorts[containerPort] = {};
-      // Uniquement si un port hôte est fourni — sinon Docker reçoit [{}] qui
-      // devient [[]] via PHP json_decode et casse l’API (PortBinding).
-      if (m[1]) {
+      // Port hôte fourni (y compris 0 = dynamique) → publier.
+      // Port seul (80) → ExposedPorts seulement, pas de PortBindings.
+      if (m[1] !== undefined && m[1] !== '') {
         PortBindings[containerPort] = [{ HostPort: String(m[1]) }];
       }
     });
@@ -629,7 +629,7 @@
           <div class="form-group">
             <label class="field-label">Ports</label>
             <input id="c-ports" placeholder="8080:80 (publié) ou 80 (interne) — ligne / virgule" autocomplete="off">
-            <p class="field-hint muted" style="margin-top:6px"><code>hôte:conteneur</code> publie ; <code>80</code> ou <code>80/tcp</code> expose seulement en interne.</p>
+            <p class="field-hint muted" style="margin-top:6px"><code>8080:80</code> fixe · <code>0:80</code> port hôte aléatoire · <code>80</code> / <code>80,443</code> interne seulement.</p>
           </div>
           <div class="form-group">
             <div class="field-label-row">
@@ -753,10 +753,12 @@
         Image: image,
         HostConfig: {
           RestartPolicy: { Name: 'unless-stopped' },
+          PublishAllPorts: false,
         },
       };
-      // Ne pas envoyer PortBindings/ExposedPorts vides : PHP les ré-encode en []
-      // et Docker attend des maps (objets), pas des tableaux.
+      // PortBindings seulement si hôte:conteneur (publié).
+      // Port seul (80) → ExposedPorts uniquement, jamais de binding vide (sinon Docker
+      // assigne un port hôte aléatoire genre 32804:80).
       if (Object.keys(PortBindings).length) payload.HostConfig.PortBindings = PortBindings;
       if (Object.keys(ExposedPorts).length) payload.ExposedPorts = ExposedPorts;
       if (binds.length) payload.HostConfig.Binds = binds;
@@ -1744,11 +1746,13 @@ CMD ["sh"]
     const seen = new Set();
     const chips = [];
     for (const p of ports) {
-      const pub = p.PublicPort || p.publicPort;
+      const pubRaw = p.PublicPort ?? p.publicPort;
+      const pub = Number(pubRaw) || 0;
       const priv = p.PrivatePort || p.privatePort;
       const type = (p.Type || p.type || 'tcp').toLowerCase();
       if (!priv) continue;
-      if (pub) {
+      // Port hôte 0 / absent = interne uniquement (pas de lien public)
+      if (pub > 0) {
         const key = `${pub}:${priv}/${type}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -1757,10 +1761,10 @@ CMD ["sh"]
           `<a class="port-link" href="${esc(href)}" target="_blank" rel="noopener" title="${esc(href)}">${esc(pub)}:${esc(priv)}/${esc(type)} ↗</a>`
         );
       } else {
-        const key = `${priv}/${type}`;
+        const key = `int:${priv}/${type}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        chips.push(`<span class="port-chip">${esc(priv)}/${esc(type)}</span>`);
+        chips.push(`<span class="port-chip" title="Port interne (non publié)">${esc(priv)}/${esc(type)}</span>`);
       }
     }
     return chips.length ? `<div class="ports">${chips.join('')}</div>` : '<span class="muted">—</span>';
@@ -2430,7 +2434,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.6</div>
+            <div class="brand-ver">v1.4.7</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -5275,7 +5279,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.6', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.7', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -6308,7 +6312,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.6</strong> — édition registres, ports internes, install Docker Compose.</p>
+          <p class="muted">Version <strong>1.4.7</strong> — édition registres, ports internes, install Docker Compose.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

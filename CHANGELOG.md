@@ -2,6 +2,14 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.4.7] — 2026-11-08
+
+### Corrigé
+- Ports à la création de conteneur :
+  - `80` / `80,443` → **interne uniquement** (plus de publication aléatoire type `32804:80`)
+  - `0:80` → publication sur **port hôte dynamique** (volontaire)
+  - `8080:80` → port hôte fixe
+
 ## [1.4.6] — 2026-11-08
 
 ### Ajouté

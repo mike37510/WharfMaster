@@ -200,7 +200,8 @@ final class DockerScope
                 if (!is_array($hc['PortBindings']) || $hc['PortBindings'] === [] || array_is_list($hc['PortBindings'])) {
                     unset($hc['PortBindings']);
                 } else {
-                    // json_decode(true) turns each binding {} into [] → Docker rejects as PortBinding
+                    // Empty {} / [] bindings = publish on random host port — drop them.
+                    // Internal-only ports must use ExposedPorts without PortBindings.
                     foreach ($hc['PortBindings'] as $port => $bindings) {
                         if (!is_array($bindings)) {
                             unset($hc['PortBindings'][$port]);
@@ -208,23 +209,16 @@ final class DockerScope
                         }
                         $fixed = [];
                         foreach ($bindings as $b) {
-                            if ($b === null || $b === [] || (is_array($b) && $b === [])) {
-                                $fixed[] = new \stdClass();
+                            if (!is_array($b) || $b === [] || !self::isAssocPortBinding($b)) {
                                 continue;
                             }
-                            if (!is_array($b)) {
-                                continue;
-                            }
-                            // Skip nested empty-array junk ([[]])
-                            if (array_is_list($b) && $b !== [] && !self::isAssocPortBinding($b)) {
-                                $fixed[] = new \stdClass();
+                            // Binding sans HostPort (objet vide) = publication aléatoire implicite → drop
+                            // HostPort "0" explicite (saisie 0:80) = dynamique volontaire → garder
+                            if (!array_key_exists('HostPort', $b) && !array_key_exists('HostIp', $b)) {
                                 continue;
                             }
                             $obj = new \stdClass();
                             foreach ($b as $k => $v) {
-                                if (!is_int($k) && !is_string($k)) {
-                                    continue;
-                                }
                                 if (is_string($k)) {
                                     $obj->{$k} = $v;
                                 }
@@ -241,6 +235,10 @@ final class DockerScope
                         unset($hc['PortBindings']);
                     }
                 }
+            }
+            // Never publish all image EXPOSE ports by accident
+            if (!array_key_exists('PublishAllPorts', $hc)) {
+                $hc['PublishAllPorts'] = false;
             }
             // RestartPolicy Name-only maps are fine; empty Volumes/etc. maps → drop
             foreach (['StorageOpt', 'Sysctls', 'Tmpfs'] as $mapKey) {
