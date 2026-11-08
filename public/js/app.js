@@ -5546,6 +5546,205 @@ CMD ["sh"]
     }, { disableSiblings: false, minMs: 400 });
   }
 
+  function schedActionLabel(action) {
+    const map = { start: 'Démarrer', stop: 'Arrêter', restart: 'Redémarrer' };
+    return map[action] || action || '—';
+  }
+
+  const DOW_LABELS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+
+  function pad2(n) {
+    return String(Number(n) || 0).padStart(2, '0');
+  }
+
+  /** Build a 5-field UTC cron from the friendly schedule form. */
+  function buildFriendlyCron({ preset, hour, minute, dow, custom }) {
+    const h = Math.max(0, Math.min(23, Number(hour) || 0));
+    const m = Math.max(0, Math.min(59, Number(minute) || 0));
+    const d = Math.max(0, Math.min(6, Number(dow) || 0));
+    switch (preset) {
+      case 'hourly':
+        return `${m} * * * *`;
+      case 'daily':
+        return `${m} ${h} * * *`;
+      case 'weekdays':
+        return `${m} ${h} * * 1-5`;
+      case 'weekly':
+        return `${m} ${h} * * ${d}`;
+      case 'custom':
+        return String(custom || '').trim();
+      default:
+        return `${m} ${h} * * *`;
+    }
+  }
+
+  function describeCron(cron) {
+    const parts = String(cron || '').trim().split(/\s+/);
+    if (parts.length !== 5) return cron || '—';
+    const [mi, hh, dom, mon, dow] = parts;
+    const hm = (h, m) => `${pad2(h)}:${pad2(m)} UTC`;
+    if (mi !== '*' && hh === '*' && dom === '*' && mon === '*' && dow === '*') {
+      return `Toutes les heures à xx:${pad2(mi)} UTC`;
+    }
+    if (/^\d+$/.test(mi) && /^\d+$/.test(hh) && dom === '*' && mon === '*' && dow === '*') {
+      return `Tous les jours à ${hm(hh, mi)}`;
+    }
+    if (/^\d+$/.test(mi) && /^\d+$/.test(hh) && dom === '*' && mon === '*' && dow === '1-5') {
+      return `Lun–Ven à ${hm(hh, mi)}`;
+    }
+    if (/^\d+$/.test(mi) && /^\d+$/.test(hh) && dom === '*' && mon === '*' && /^\d+$/.test(dow)) {
+      return `Chaque ${DOW_LABELS[Number(dow)] || dow} à ${hm(hh, mi)}`;
+    }
+    return cron;
+  }
+
+  function openScheduleModal(stack, onSaved) {
+    const slot = document.getElementById('sched-modal');
+    if (!slot) return;
+    const hourOpts = Array.from({ length: 24 }, (_, h) =>
+      `<option value="${h}" ${h === 22 ? 'selected' : ''}>${pad2(h)} h</option>`
+    ).join('');
+    const minOpts = [0, 5, 10, 15, 20, 30, 45].map((m) =>
+      `<option value="${m}">:${pad2(m)}</option>`
+    ).join('');
+    const dowOpts = DOW_LABELS.map((label, i) =>
+      `<option value="${i}" ${i === 1 ? 'selected' : ''}>${label}</option>`
+    ).join('');
+
+    slot.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form" style="max-width:520px" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Nouvelle planification</h3>
+              <div class="modal-sub">Stack · ${esc(stack.Name || '')}</div>
+            </div>
+            <button type="button" class="icon-btn" id="cancel-sched" title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div id="sched-form-err"></div>
+          <div class="form-group">
+            <label class="field-label">Nom</label>
+            <input id="sched-name" placeholder="Ex. Arrêt le soir" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="field-label">Action</label>
+            <select id="sched-action" class="select-block">
+              <option value="stop">Arrêter la stack</option>
+              <option value="start">Démarrer la stack</option>
+              <option value="restart">Redémarrer la stack</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="field-label">Quand ?</label>
+            <select id="sched-preset" class="select-block">
+              <option value="daily" selected>Tous les jours</option>
+              <option value="weekdays">Jours ouvrés (lun–ven)</option>
+              <option value="weekly">Une fois par semaine</option>
+              <option value="hourly">Toutes les heures</option>
+              <option value="custom">Personnalisé (cron)</option>
+            </select>
+          </div>
+          <div class="form-row-2" id="sched-time-row" style="align-items:end;gap:10px">
+            <div class="form-group" style="margin:0;flex:1" id="sched-hour-wrap">
+              <label class="field-label">Heure (UTC)</label>
+              <select id="sched-hour" class="select-block">${hourOpts}</select>
+            </div>
+            <div class="form-group" style="margin:0;flex:1">
+              <label class="field-label">Minute</label>
+              <select id="sched-minute" class="select-block">${minOpts}</select>
+            </div>
+          </div>
+          <div class="form-group" id="sched-dow-wrap" hidden>
+            <label class="field-label">Jour de la semaine</label>
+            <select id="sched-dow" class="select-block">${dowOpts}</select>
+          </div>
+          <div class="form-group" id="sched-custom-wrap" hidden>
+            <label class="field-label">Expression cron (UTC)</label>
+            <input id="sched-cron" class="mono" placeholder="0 22 * * *" autocomplete="off" spellcheck="false">
+            <p class="field-hint muted">5 champs : minute heure jour mois jour-semaine</p>
+          </div>
+          <div class="info-box" id="sched-summary" style="margin-top:4px">—</div>
+          <div class="actions-bar">
+            <button class="btn btn-primary" id="save-sched">Créer</button>
+            <button class="btn" id="cancel-sched-2" style="margin-left:8px">Annuler</button>
+          </div>
+        </div>
+      </div>`;
+
+    const syncUi = () => {
+      const preset = document.getElementById('sched-preset')?.value || 'daily';
+      const hourWrap = document.getElementById('sched-hour-wrap');
+      const timeRow = document.getElementById('sched-time-row');
+      const dowWrap = document.getElementById('sched-dow-wrap');
+      const customWrap = document.getElementById('sched-custom-wrap');
+      const isCustom = preset === 'custom';
+      const isHourly = preset === 'hourly';
+      if (customWrap) customWrap.hidden = !isCustom;
+      if (timeRow) timeRow.hidden = isCustom;
+      if (hourWrap) hourWrap.hidden = isHourly || isCustom;
+      if (dowWrap) dowWrap.hidden = preset !== 'weekly';
+      const cron = buildFriendlyCron({
+        preset,
+        hour: document.getElementById('sched-hour')?.value,
+        minute: document.getElementById('sched-minute')?.value,
+        dow: document.getElementById('sched-dow')?.value,
+        custom: document.getElementById('sched-cron')?.value,
+      });
+      const action = schedActionLabel(document.getElementById('sched-action')?.value);
+      const sum = document.getElementById('sched-summary');
+      if (sum) {
+        sum.innerHTML = isCustom && !cron
+          ? '<span class="muted">Saisissez une expression cron.</span>'
+          : `<strong>${esc(action)}</strong> — ${esc(describeCron(cron))}`
+            + (isCustom ? '' : ` <span class="muted mono">(${esc(cron)})</span>`);
+      }
+    };
+
+    ['sched-preset', 'sched-hour', 'sched-minute', 'sched-dow', 'sched-action'].forEach((id) => {
+      document.getElementById(id)?.addEventListener('change', syncUi);
+    });
+    document.getElementById('sched-cron')?.addEventListener('input', syncUi);
+    syncUi();
+
+    const close = () => { slot.innerHTML = ''; };
+    document.getElementById('cancel-sched').onclick = close;
+    document.getElementById('cancel-sched-2').onclick = close;
+
+    onBusyClick(document.getElementById('save-sched'), async () => {
+      const errBox = document.getElementById('sched-form-err');
+      errBox.innerHTML = '';
+      const name = document.getElementById('sched-name').value.trim();
+      const action = document.getElementById('sched-action').value;
+      const cron = buildFriendlyCron({
+        preset: document.getElementById('sched-preset').value,
+        hour: document.getElementById('sched-hour').value,
+        minute: document.getElementById('sched-minute').value,
+        dow: document.getElementById('sched-dow').value,
+        custom: document.getElementById('sched-cron').value,
+      });
+      if (!name) {
+        errBox.innerHTML = `<div class="error-box">Indiquez un nom.</div>`;
+        return;
+      }
+      if (!cron) {
+        errBox.innerHTML = `<div class="error-box">Indiquez quand exécuter l’action.</div>`;
+        return;
+      }
+      try {
+        await Api.createSchedule({
+          StackId: stack.Id,
+          Name: name,
+          Action: action,
+          Cron: cron,
+        });
+        close();
+        if (typeof onSaved === 'function') await onSaved();
+      } catch (err) {
+        errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      }
+    }, { disableSiblings: false, minMs: 250 });
+  }
+
   async function viewStackDetail(id) {
     if (id === 'new') {
       showStackEditor();
@@ -5588,7 +5787,7 @@ CMD ["sh"]
       </div>
       <div class="table-wrap" style="margin-bottom:1rem">
         <table class="data" id="stack-sched-table">
-          <thead><tr><th>Nom</th><th>Action</th><th>Cron</th><th>Prochain</th><th>Dernier</th><th></th></tr></thead>
+          <thead><tr><th>Nom</th><th>Action</th><th>Quand</th><th>Prochain</th><th>Dernier</th><th></th></tr></thead>
           <tbody><tr><td colspan="6" class="muted">Chargement…</td></tr></tbody>
         </table>
       </div>
@@ -5645,8 +5844,8 @@ CMD ["sh"]
         }
         tb.innerHTML = items.map((s) => `<tr>
           <td>${esc(s.Name)}${s.Enabled ? '' : ' <span class="muted">(off)</span>'}</td>
-          <td class="mono">${esc(s.Action)}</td>
-          <td class="mono">${esc(s.Cron)}</td>
+          <td>${esc(schedActionLabel(s.Action))}</td>
+          <td><span title="${esc(s.Cron)}">${esc(describeCron(s.Cron))}</span></td>
           <td class="muted">${esc(fmtTs(s.NextRunAt))}</td>
           <td class="muted">${esc(s.LastStatus || '—')} ${s.LastRunAt ? '· ' + fmtTs(s.LastRunAt) : ''}</td>
           <td class="actions"><div class="quick-actions">
@@ -5670,54 +5869,7 @@ CMD ["sh"]
         tb.innerHTML = `<tr><td colspan="6" class="error-box">${esc(err.message)}</td></tr>`;
       }
     };
-    document.getElementById('add-schedule').onclick = () => {
-      const slot = document.getElementById('sched-modal');
-      slot.innerHTML = `
-        <div class="modal-backdrop">
-          <div class="modal modal-form" style="max-width:480px">
-            <h3>Planifier start / stop / restart</h3>
-            <div id="sched-form-err"></div>
-            <div class="form-group">
-              <label class="field-label">Nom</label>
-              <input id="sched-name" placeholder="Stop nuit">
-            </div>
-            <div class="form-group">
-              <label class="field-label">Action</label>
-              <select id="sched-action">
-                <option value="stop">stop</option>
-                <option value="start">start</option>
-                <option value="restart">restart</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="field-label">Cron (UTC, 5 champs)</label>
-              <input id="sched-cron" placeholder="0 22 * * *" value="0 22 * * *">
-              <p class="field-hint muted">Ex. <code>0 22 * * *</code> = tous les jours à 22:00 UTC</p>
-            </div>
-            <div class="actions-bar">
-              <button class="btn btn-primary" id="save-sched">Créer</button>
-              <button class="btn" id="cancel-sched" style="margin-left:8px">Annuler</button>
-            </div>
-          </div>
-        </div>`;
-      document.getElementById('cancel-sched').onclick = () => { slot.innerHTML = ''; };
-      onBusyClick(document.getElementById('save-sched'), async () => {
-        const errBox = document.getElementById('sched-form-err');
-        errBox.innerHTML = '';
-        try {
-          await Api.createSchedule({
-            StackId: stack.Id,
-            Name: document.getElementById('sched-name').value.trim(),
-            Action: document.getElementById('sched-action').value,
-            Cron: document.getElementById('sched-cron').value.trim(),
-          });
-          slot.innerHTML = '';
-          await renderSchedules();
-        } catch (err) {
-          errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
-        }
-      }, { disableSiblings: false, minMs: 250 });
-    };
+    document.getElementById('add-schedule').onclick = () => openScheduleModal(stack, renderSchedules);
     renderSchedules();
     try {
       const upd = await Api.stackUpdate(id);
