@@ -135,10 +135,17 @@ const Api = (() => {
         { text: true },
       );
     },
-    containerExec: (id, command, shell = '/bin/sh', cwd = '') =>
+    containerExec: (id, command, shell = '/bin/sh', cwd = '', opts = {}) =>
       request(`/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/exec`, {
         method: 'POST',
-        body: JSON.stringify({ command, shell, cwd }),
+        body: JSON.stringify({
+          command,
+          shell,
+          cwd,
+          cols: opts.cols || 120,
+          rows: opts.rows || 40,
+          tty: opts.tty !== false,
+        }),
       }),
     buildImage: (payload) =>
       request('/api/images/build', { method: 'POST', body: JSON.stringify(payload) }),

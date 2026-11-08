@@ -2,6 +2,18 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.4.4] — 2026-11-08
+
+### Ajouté
+- **Console conteneur** : exec en TTY avec `TERM` / `COLUMNS` / couleurs (ex. `ls` en colonnes colorées)
+- **Éditeur Compose** colorisé (CodeMirror YAML) + lint temps réel (indentation, tabs, parse js-yaml) ; déploiement bloqué si invalide
+- Colonne **Usage** sur images, volumes et réseaux (Inutilisé / N conteneurs) + modal listant les conteneurs liés
+- **Pagination** (20 / page) sur conteneurs, images, volumes, réseaux et stacks
+- Lignes des conteneurs **arrêtés** teintées en rouge léger
+
+### Modifié
+- Thème xterm / police console ; aperçu YAML colorisé sur le détail d’une stack
+
 ## [1.4.3] — 2026-11-08
 
 ### Ajouté

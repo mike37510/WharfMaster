@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.4.3 |
+| **Version** | 1.4.4 |
 | **Console** | `/app` |
 | **Site public** | `/` |
 | **API** | `/api` |
@@ -198,7 +198,7 @@ export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
 export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.3
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.4
 ```
 
 ### Backup / restauration

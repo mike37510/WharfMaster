@@ -31,6 +31,14 @@
       users: '',
       dashboard: '',
     },
+    pages: {
+      containers: 1,
+      images: 1,
+      volumes: 1,
+      networks: 1,
+      stacks: 1,
+    },
+    pageSize: 20,
     theme: readTheme(),
     containerTab: 'overview',
     logTimer: null,
@@ -1112,50 +1120,160 @@ CMD ["sh"]
     }, { disableSiblings: false, minMs: 250 });
   }
 
-  function bindSearch(key) {
+  function ensureTablePager() {
+    let el = document.getElementById('table-pager');
+    if (el) return el;
+    const wrap = root.querySelector('.table-wrap');
+    if (!wrap) return null;
+    el = document.createElement('div');
+    el.id = 'table-pager';
+    el.className = 'table-pager';
+    el.hidden = true;
+    wrap.insertAdjacentElement('afterend', el);
+    return el;
+  }
+
+  function renderTablePager(pager, { page, pageCount, matched, pageSize }) {
+    if (!pager) return;
+    if (matched <= pageSize) {
+      pager.hidden = true;
+      pager.innerHTML = '';
+      return;
+    }
+    pager.hidden = false;
+    const prevDisabled = page <= 1 ? ' disabled' : '';
+    const nextDisabled = page >= pageCount ? ' disabled' : '';
+    // Compact page buttons: window around current
+    const buttons = [];
+    const windowSize = 5;
+    let start = Math.max(1, page - Math.floor(windowSize / 2));
+    let end = Math.min(pageCount, start + windowSize - 1);
+    start = Math.max(1, end - windowSize + 1);
+    if (start > 1) {
+      buttons.push(`<button type="button" class="btn btn-sm table-pager-num" data-page="1">1</button>`);
+      if (start > 2) buttons.push(`<span class="table-pager-ellipsis">…</span>`);
+    }
+    for (let p = start; p <= end; p++) {
+      buttons.push(
+        `<button type="button" class="btn btn-sm table-pager-num${p === page ? ' is-active' : ''}" data-page="${p}">${p}</button>`
+      );
+    }
+    if (end < pageCount) {
+      if (end < pageCount - 1) buttons.push(`<span class="table-pager-ellipsis">…</span>`);
+      buttons.push(`<button type="button" class="btn btn-sm table-pager-num" data-page="${pageCount}">${pageCount}</button>`);
+    }
+    pager.innerHTML = `
+      <button type="button" class="btn btn-sm" data-page-nav="prev"${prevDisabled} title="Page précédente" aria-label="Page précédente">←</button>
+      <div class="table-pager-pages">${buttons.join('')}</div>
+      <button type="button" class="btn btn-sm" data-page-nav="next"${nextDisabled} title="Page suivante" aria-label="Page suivante">→</button>
+      <span class="muted table-pager-meta">${esc(String(pageSize))} / page</span>`;
+  }
+
+  /**
+   * Filter table rows by search; optional client-side pagination.
+   * @param {string} key
+   * @param {{ pageSize?: number }} [opts]  pageSize>0 enables pagination (default state.pageSize when true via bindPagedSearch)
+   */
+  function bindSearch(key, opts = {}) {
     const input = document.getElementById('filter');
     const table = root.querySelector('table.data tbody');
     if (!input || !table) return;
-    const total = table.querySelectorAll('tr[data-search]').length;
+    const pageSize = Number(opts.pageSize) > 0 ? Number(opts.pageSize) : 0;
+    const pager = pageSize > 0 ? ensureTablePager() : null;
+    const allRows = () => [...table.querySelectorAll('tr[data-search]')];
+    const allTotal = allRows().length;
 
-    const run = () => {
+    const run = ({ resetPage = false } = {}) => {
       const q = input.value.trim().toLowerCase();
       state.filters[key] = input.value;
-      let shown = 0;
-      table.querySelectorAll('tr[data-search]').forEach((tr) => {
-        const ok = !q || tr.getAttribute('data-search').includes(q);
-        tr.style.display = ok ? '' : 'none';
-        if (ok) shown += 1;
+      if (resetPage && pageSize > 0) state.pages[key] = 1;
+
+      const rows = allRows();
+      const matched = [];
+      rows.forEach((tr) => {
+        const ok = !q || (tr.getAttribute('data-search') || '').includes(q);
+        if (ok) matched.push(tr);
+        else tr.style.display = 'none';
       });
-      updateFilterCount(shown, total);
+
+      let page = 1;
+      let pageCount = 1;
+      let visible = matched;
+      if (pageSize > 0) {
+        pageCount = Math.max(1, Math.ceil(matched.length / pageSize) || 1);
+        page = Math.min(Math.max(1, Number(state.pages[key]) || 1), pageCount);
+        state.pages[key] = page;
+        const start = (page - 1) * pageSize;
+        const end = start + pageSize;
+        matched.forEach((tr, i) => {
+          tr.style.display = (i >= start && i < end) ? '' : 'none';
+        });
+        visible = matched.slice(start, end);
+        const from = matched.length === 0 ? 0 : start + 1;
+        const to = Math.min(end, matched.length);
+        updateFilterCount(matched.length === 0 ? '0' : `${from}–${to}`, matched.length, allTotal);
+        renderTablePager(pager, { page, pageCount, matched: matched.length, pageSize });
+      } else {
+        matched.forEach((tr) => { tr.style.display = ''; });
+        updateFilterCount(matched.length, allTotal);
+      }
+
       const empty = table.querySelector('tr.filter-empty');
       if (empty) empty.remove();
-      if (shown === 0) {
+      if (matched.length === 0 && rows.length > 0) {
         const cols = table.parentElement?.querySelectorAll('thead th').length || 4;
         const tr = document.createElement('tr');
         tr.className = 'filter-empty';
         tr.innerHTML = `<td colspan="${cols}" class="empty">Aucun résultat pour “${esc(input.value)}”</td>`;
         table.appendChild(tr);
       }
+      void visible;
     };
 
     let timer = null;
     input.addEventListener('input', () => {
       clearTimeout(timer);
-      timer = setTimeout(run, 80);
+      timer = setTimeout(() => run({ resetPage: true }), 80);
     });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         input.value = '';
-        run();
+        run({ resetPage: true });
       }
     });
-    if ((state.filters[key] || '').trim()) run();
+
+    if (pager) {
+      pager.onclick = (e) => {
+        const nav = e.target.closest('[data-page-nav]');
+        const num = e.target.closest('[data-page]');
+        if (!nav && !num) return;
+        e.preventDefault();
+        const cur = Number(state.pages[key]) || 1;
+        if (nav) {
+          const dir = nav.getAttribute('data-page-nav');
+          state.pages[key] = dir === 'prev' ? cur - 1 : cur + 1;
+        } else if (num) {
+          state.pages[key] = parseInt(num.getAttribute('data-page'), 10) || 1;
+        }
+        run();
+      };
+    }
+
+    run({ resetPage: false });
   }
 
-  function updateFilterCount(shown, total) {
+  function bindPagedSearch(key) {
+    bindSearch(key, { pageSize: state.pageSize || 20 });
+  }
+
+  function updateFilterCount(shown, total, allTotal) {
     const el = document.getElementById('filter-count');
-    if (el) el.textContent = `${shown} / ${total}`;
+    if (!el) return;
+    if (allTotal != null && allTotal !== total) {
+      el.textContent = `${shown} / ${total} (${allTotal})`;
+    } else {
+      el.textContent = `${shown} / ${total}`;
+    }
   }
 
   function toggleTheme() {
@@ -1309,6 +1427,164 @@ CMD ["sh"]
 
   function shortId(id) {
     return String(id || '').replace(/^sha256:/, '').slice(0, 12);
+  }
+
+  function normalizeImageRef(id) {
+    return String(id || '').replace(/^sha256:/i, '').toLowerCase();
+  }
+
+  /** True if container was created from this image (ImageID / tags / digests). */
+  function imageMatchesContainer(img, container) {
+    const imgId = normalizeImageRef(img?.Id);
+    const cImgId = normalizeImageRef(container?.ImageID);
+    if (imgId && cImgId && (imgId === cImgId || imgId.startsWith(cImgId) || cImgId.startsWith(imgId))) {
+      return true;
+    }
+    const refs = [...(img?.RepoTags || []), ...(img?.RepoDigests || [])].filter((t) => t && t !== '<none>:<none>');
+    const cref = String(container?.Image || '');
+    if (cref && refs.includes(cref)) return true;
+    const short = normalizeImageRef(cref);
+    if (imgId && short && /^[a-f0-9]{12,}$/.test(short) && imgId.startsWith(short)) return true;
+    return false;
+  }
+
+  function containersUsingImage(img, containers) {
+    return (containers || []).filter((c) => {
+      if (img?._nodeId != null && c?._nodeId != null && Number(img._nodeId) !== Number(c._nodeId)) {
+        return false;
+      }
+      return imageMatchesContainer(img, c);
+    });
+  }
+
+  function imageTagsLabel(img) {
+    const tags = (img?.RepoTags || []).filter((t) => t && t !== '<none>:<none>');
+    return tags.length ? tags.join(', ') : '<none>';
+  }
+
+  function openResourceUsersModal({ title, subtitle, users, extraCol }) {
+    closeAppModal();
+    const host = modalHost();
+    const showNode = (users || []).some((c) => c._nodeName);
+    const rows = (users || []).map((c) => {
+      const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id));
+      const node = c._nodeName ? `<td class="muted">${esc(c._nodeName)}</td>` : '';
+      const extra = extraCol ? `<td class="mono cell-clip" title="${esc(extraCol(c) || '')}">${esc(extraCol(c) || '—')}</td>` : '';
+      return `<tr>
+        ${node}
+        <td><a class="res-user-link" href="#containers/${esc(c.Id)}">${esc(name)}</a></td>
+        ${extra}
+        <td>${badge(c.State)}</td>
+        <td class="muted cell-nowrap">${esc(formatUptime(c.Status))}</td>
+      </tr>`;
+    }).join('');
+    const colCount = (showNode ? 1 : 0) + 1 + (extraCol ? 1 : 0) + 2;
+    host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>${esc(title)}</h3>
+              <p class="modal-sub mono">${esc(subtitle || '')}</p>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div class="table-wrap" style="margin:0">
+            <table class="data">
+              <thead><tr>${showNode ? '<th>Nœud</th>' : ''}<th>Nom</th>${extraCol ? '<th>Détail</th>' : ''}<th>État</th><th>Statut</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="${colCount}" class="empty">Aucun conteneur</td></tr>`}</tbody>
+            </table>
+          </div>
+          <div class="actions-bar" style="margin-top:14px">
+            <button type="button" class="btn" data-close-modal>Fermer</button>
+          </div>
+        </div>
+      </div>`;
+    bindAppModalChrome();
+    host.querySelectorAll('a.res-user-link').forEach((a) => {
+      a.addEventListener('click', () => closeAppModal());
+    });
+  }
+
+  function openImageUsersModal(img, users) {
+    openResourceUsersModal({
+      title: 'Conteneurs utilisant cette image',
+      subtitle: `${imageTagsLabel(img)} · ${shortId(img.Id)}`,
+      users,
+      extraCol: (c) => c.Image || '',
+    });
+  }
+
+  function containersUsingVolume(vol, containers) {
+    const volName = String(vol?.Name || '');
+    if (!volName) return [];
+    return (containers || []).filter((c) => {
+      if (vol?._nodeId != null && c?._nodeId != null && Number(vol._nodeId) !== Number(c._nodeId)) {
+        return false;
+      }
+      const mounts = Array.isArray(c.Mounts) ? c.Mounts : [];
+      return mounts.some((m) => {
+        const type = String(m.Type || '').toLowerCase();
+        if (type && type !== 'volume') return false;
+        return m.Name === volName;
+      });
+    });
+  }
+
+  function openVolumeUsersModal(vol, users) {
+    openResourceUsersModal({
+      title: 'Conteneurs utilisant ce volume',
+      subtitle: vol?.Name || '',
+      users,
+      extraCol: (c) => {
+        const mounts = (c.Mounts || []).filter((m) => m.Name === vol?.Name);
+        return mounts.map((m) => m.Destination || m.Target || '').filter(Boolean).join(', ') || c.Image || '';
+      },
+    });
+  }
+
+  function containerNetworkEntries(container) {
+    const nets = container?.NetworkSettings?.Networks;
+    if (!nets || typeof nets !== 'object') return [];
+    return Object.entries(nets).map(([name, conf]) => ({
+      name,
+      id: conf?.NetworkID || conf?.NetworkId || '',
+      ip: conf?.IPAddress || '',
+    }));
+  }
+
+  function containersUsingNetwork(net, containers) {
+    const netId = normalizeImageRef(net?.Id); // strip nothing harmful; ids are hex
+    const netName = String(net?.Name || '');
+    if (!netId && !netName) return [];
+    return (containers || []).filter((c) => {
+      if (net?._nodeId != null && c?._nodeId != null && Number(net._nodeId) !== Number(c._nodeId)) {
+        return false;
+      }
+      return containerNetworkEntries(c).some((e) => {
+        if (netName && e.name === netName) return true;
+        const eid = normalizeImageRef(e.id);
+        if (netId && eid && (netId === eid || netId.startsWith(eid) || eid.startsWith(netId))) return true;
+        return false;
+      });
+    });
+  }
+
+  function openNetworkUsersModal(net, users) {
+    openResourceUsersModal({
+      title: 'Conteneurs utilisant ce réseau',
+      subtitle: `${net?.Name || ''} · ${shortId(net?.Id)}`,
+      users,
+      extraCol: (c) => {
+        const entry = containerNetworkEntries(c).find((e) => {
+          if (e.name === net?.Name) return true;
+          const eid = normalizeImageRef(e.id);
+          const nid = normalizeImageRef(net?.Id);
+          return nid && eid && (nid === eid || nid.startsWith(eid) || eid.startsWith(nid));
+        });
+        return entry?.ip || c.Image || '';
+      },
+    });
   }
 
   function stopTimers() {
@@ -2153,7 +2429,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.3</div>
+            <div class="brand-ver">v1.4.4</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -3037,19 +3313,22 @@ CMD ["sh"]
 
     const rows = list.map((c) => {
       const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id));
+      const st = String(c.State || '').toLowerCase();
+      const isRunning = st === 'running' || st === 'restarting';
+      const rowCls = isRunning ? '' : 'row-stopped';
       const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ''}`.toLowerCase();
       const actions = all
         ? `<span class="muted">—</span>`
         : `<div class="quick-actions">
-          ${iconBtn({ modal: 'logs', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Logs conteneur', icon: 'logs' })}
-          ${iconBtn({ modal: 'console', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Console', icon: 'console' })}
-          ${iconBtn({ modal: 'inspect', id: c.Id, name, running: String(c.State).toLowerCase() === 'running', title: 'Inspecter', icon: 'inspect' })}
+          ${iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs conteneur', icon: 'logs' })}
+          ${iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
+          ${iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
           ${iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: true })}
           ${iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop' })}
           ${iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
           ${iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div>`;
-      return `<tr data-search="${esc(search)}">
+      return `<tr class="${rowCls}" data-search="${esc(search)}">
         ${all ? `<td class="muted">${esc(c._nodeName || '—')}</td>` : ''}
         <td class="name-cell">
           <strong><a href="#containers/${esc(c.Id)}" ${all ? `data-switch-node="${esc(c._nodeId)}"` : ''}>${esc(name)}</a></strong>
@@ -3083,7 +3362,7 @@ CMD ["sh"]
       </div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Gérez vos conteneurs Docker' });
 
     bindRefresh();
-    bindSearch('containers');
+    bindPagedSearch('containers');
     if (!all) {
       bindModalActions();
       document.getElementById('create-container').onclick = () => openCreateContainerModal();
@@ -3258,37 +3537,38 @@ CMD ["sh"]
 
     const term = new Terminal({
       cursorBlink: true,
-      cursorStyle: 'block',
-      fontFamily: 'Menlo, Monaco, Consolas, "Courier New", monospace',
-      fontSize: 13,
-      lineHeight: 1.35,
-      letterSpacing: 0,
+      cursorStyle: 'bar',
+      cursorWidth: 2,
+      fontFamily: '"IBM Plex Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace',
+      fontSize: 14,
+      lineHeight: 1.4,
+      letterSpacing: 0.3,
       theme: {
-        background: '#0c0c0c',
-        foreground: '#cccccc',
-        cursor: '#cccccc',
-        cursorAccent: '#0c0c0c',
-        selectionBackground: '#264f78',
-        black: '#0c0c0c',
-        red: '#cd3131',
-        green: '#0dbc79',
-        yellow: '#e5e510',
-        blue: '#2472c8',
-        magenta: '#bc3fbc',
-        cyan: '#11a8cd',
-        white: '#e5e5e5',
-        brightBlack: '#666666',
-        brightRed: '#f14c4c',
-        brightGreen: '#23d18b',
-        brightYellow: '#f5f543',
-        brightBlue: '#3b8eea',
-        brightMagenta: '#d670d6',
-        brightCyan: '#29b8db',
-        brightWhite: '#e5e5e5',
+        background: '#0b1220',
+        foreground: '#e2e8f0',
+        cursor: '#38bdf8',
+        cursorAccent: '#0b1220',
+        selectionBackground: '#1e3a5f',
+        black: '#0b1220',
+        red: '#f87171',
+        green: '#4ade80',
+        yellow: '#fbbf24',
+        blue: '#60a5fa',
+        magenta: '#c084fc',
+        cyan: '#22d3ee',
+        white: '#e2e8f0',
+        brightBlack: '#64748b',
+        brightRed: '#fca5a5',
+        brightGreen: '#86efac',
+        brightYellow: '#fde68a',
+        brightBlue: '#93c5fd',
+        brightMagenta: '#d8b4fe',
+        brightCyan: '#67e8f9',
+        brightWhite: '#f8fafc',
       },
       convertEol: true,
       allowTransparency: false,
-      scrollback: 5000,
+      scrollback: 8000,
     });
 
     let fit = null;
@@ -3316,13 +3596,28 @@ CMD ["sh"]
     let history = [];
     let historyIdx = -1;
 
+    const termSize = () => ({
+      cols: Math.max(40, term.cols || 120),
+      rows: Math.max(10, term.rows || 40),
+    });
+
+    /** Write command output preserving ANSI colors / column layout from TTY. */
+    const writeOut = (raw) => {
+      if (!raw) return;
+      let text = String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      // Strip trailing single newline — writeln adds one; keep internal layout intact
+      if (text.endsWith('\n')) text = text.slice(0, -1);
+      if (!text) return;
+      term.write(text.replace(/\n/g, '\r\n') + '\r\n');
+    };
+
     // Probe identity / cwd
     setConsoleStatus('is-busy', 'Connexion…');
     try {
-      const who = await Api.containerExec(containerId, 'whoami; pwd', shellSelect.value, '');
+      const who = await Api.containerExec(containerId, 'whoami; pwd', shellSelect.value, '', termSize());
       const lines = ((who.Stdout || '') + (who.Stderr || '')).trim().split('\n').map((l) => l.trim()).filter(Boolean);
-      if (lines[0]) user = lines[0];
-      if (lines[1]) cwd = lines[1];
+      if (lines[0]) user = lines[0].replace(/\x1b\[[0-9;]*m/g, '');
+      if (lines[1]) cwd = lines[1].replace(/\x1b\[[0-9;]*m/g, '');
     } catch (_) {}
 
     const promptStr = () => {
@@ -3365,8 +3660,9 @@ CMD ["sh"]
             `cd ${shellQuote(cwd)} && cd ${shellQuote(target)} && pwd`,
             shellSelect.value,
             '',
+            termSize(),
           );
-          const out = (res.Stdout || '').trim();
+          const out = (res.Stdout || '').trim().replace(/\x1b\[[0-9;]*m/g, '');
           if (res.ExitCode === 0 && out) cwd = out.split('\n').pop().trim();
           else {
             const err = (res.Stderr || res.Stdout || 'cd: no such file or directory').trim();
@@ -3384,12 +3680,8 @@ CMD ["sh"]
       busy = true;
       setConsoleStatus('is-busy', 'Exécution…');
       try {
-        const res = await Api.containerExec(containerId, trimmed, shellSelect.value, cwd);
-        const out = (res.Stdout || '') + (res.Stderr || '');
-        if (out) {
-          const parts = out.replace(/\n$/, '').split('\n');
-          for (const l of parts) term.writeln(l);
-        }
+        const res = await Api.containerExec(containerId, trimmed, shellSelect.value, cwd, termSize());
+        writeOut((res.Stdout || '') + (res.Stderr || ''));
       } catch (err) {
         term.writeln(`\x1b[31m${err.message}\x1b[0m`);
       }
@@ -3465,27 +3757,46 @@ CMD ["sh"]
   async function viewImages() {
     const all = isAllNodes();
     let list = [];
+    let containers = [];
     let partial = false;
     if (all) {
-      const agg = await dockerAll('/images/json');
-      list = agg.items;
-      partial = agg.failed > 0;
+      const [aggImg, aggCtr] = await Promise.all([
+        dockerAll('/images/json'),
+        dockerAll('/containers/json?all=true'),
+      ]);
+      list = aggImg.items;
+      containers = aggCtr.items;
+      partial = aggImg.failed > 0 || aggCtr.failed > 0;
     } else {
-      list = (await Api.docker('/images/json')) || [];
+      const [imgs, ctrs] = await Promise.all([
+        Api.docker('/images/json'),
+        Api.docker('/containers/json?all=true'),
+      ]);
+      list = imgs || [];
+      containers = ctrs || [];
     }
-    const rows = list.map((img) => {
-      const tags = (img.RepoTags && img.RepoTags.length) ? img.RepoTags.join(', ') : '<none>';
+
+    const usageByKey = new Map();
+    const rows = list.map((img, idx) => {
+      const tags = imageTagsLabel(img);
       const sizeMb = ((img.Size || 0) / (1024 * 1024)).toFixed(1);
-      const search = `${shortId(img.Id)} ${tags} ${img._nodeName || ''}`.toLowerCase();
+      const users = containersUsingImage(img, containers);
+      const key = `${img._nodeId || 0}:${img.Id || idx}`;
+      usageByKey.set(key, { img, users });
+      const usageCell = users.length
+        ? `<button type="button" class="badge badge-inuse img-usage-btn" data-img-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
+        : `<span class="badge badge-unused">Inutilisé</span>`;
+      const search = `${shortId(img.Id)} ${tags} ${img._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
       return `<tr data-search="${esc(search)}">
         ${all ? `<td class="muted">${esc(img._nodeName || '—')}</td>` : ''}
         <td class="mono">${esc(shortId(img.Id))}</td>
         <td>${esc(tags)}</td>
+        <td>${usageCell}</td>
         <td>${esc(sizeMb)} MB</td>
         <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">${iconBtn({ id: img.Id, title: 'Supprimer', icon: 'remove', danger: true })}</div>`}</td>
       </tr>`;
     }).join('');
-    const colSpan = all ? 5 : 4;
+    const colSpan = all ? 6 : 5;
     root.innerHTML = shell('Images', `
       ${pageHeader(all ? 'Images — tous les nœuds' : 'Images')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
@@ -3498,18 +3809,31 @@ CMD ["sh"]
         all ? '' : `${createBtn('build-image', 'Dockerfile / Build')}${createBtn('pull-image', 'Pull une image')}`,
       )}
       <div class="table-wrap"><table class="data">
-        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Tags</th><th>Taille</th><th></th></tr></thead>
+        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Tags</th><th>Usage</th><th>Taille</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune image</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Images Docker locales' });
     bindRefresh();
-    bindSearch('images');
+    bindPagedSearch('images');
+    root.querySelectorAll('.img-usage-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const entry = usageByKey.get(btn.dataset.imgKey);
+        if (entry) openImageUsersModal(entry.img, entry.users);
+      });
+    });
     if (!all) {
       document.getElementById('build-image').onclick = () => { location.hash = '#images/build'; };
       document.getElementById('pull-image').onclick = () => openPullImageModal();
-      root.querySelectorAll('button[data-id]').forEach((btn) => {
+      root.querySelectorAll('.quick-actions button[data-id]').forEach((btn) => {
+        const entry = [...usageByKey.values()].find((e) => e.img.Id === btn.dataset.id);
+        const used = !!(entry && entry.users.length);
         onBusyClick(btn, async (el) => {
           await Api.docker(`/images/${encodeURIComponent(el.dataset.id)}?force=true`, { method: 'DELETE' });
-        }, { confirm: 'Supprimer cette image ?', reload: true });
+        }, {
+          confirm: used
+            ? 'Cette image est utilisée par des conteneurs. Forcer la suppression ?'
+            : 'Supprimer cette image ?',
+          reload: true,
+        });
       });
     }
   }
@@ -3517,17 +3841,34 @@ CMD ["sh"]
   async function viewVolumes() {
     const all = isAllNodes();
     let volumes = [];
+    let containers = [];
     let partial = false;
     if (all) {
-      const agg = await dockerAll('/volumes', { pick: (d) => d?.Volumes || [] });
-      volumes = agg.items;
-      partial = agg.failed > 0;
+      const [aggVol, aggCtr] = await Promise.all([
+        dockerAll('/volumes', { pick: (d) => d?.Volumes || [] }),
+        dockerAll('/containers/json?all=true'),
+      ]);
+      volumes = aggVol.items;
+      containers = aggCtr.items;
+      partial = aggVol.failed > 0 || aggCtr.failed > 0;
     } else {
-      const data = await Api.docker('/volumes');
+      const [data, ctrs] = await Promise.all([
+        Api.docker('/volumes'),
+        Api.docker('/containers/json?all=true'),
+      ]);
       volumes = data.Volumes || [];
+      containers = ctrs || [];
     }
-    const rows = volumes.map((v) => {
-      const search = `${v.Name} ${v.Driver} ${v.Mountpoint || ''} ${v._nodeName || ''}`.toLowerCase();
+
+    const usageByKey = new Map();
+    const rows = volumes.map((v, idx) => {
+      const users = containersUsingVolume(v, containers);
+      const key = `${v._nodeId || 0}:${v.Name || idx}`;
+      usageByKey.set(key, { vol: v, users });
+      const usageCell = users.length
+        ? `<button type="button" class="badge badge-inuse img-usage-btn" data-vol-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
+        : `<span class="badge badge-unused">Inutilisé</span>`;
+      const search = `${v.Name} ${v.Driver} ${v.Mountpoint || ''} ${v._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
       const actions = all
         ? '<span class="muted">—</span>'
         : `<div class="quick-actions">
@@ -3540,11 +3881,12 @@ CMD ["sh"]
         ? esc(v.Name)
         : `<a href="#volumes/${encodeURIComponent(v.Name)}">${esc(v.Name)}</a>`}</td>
       <td>${esc(v.Driver)}</td>
-      <td class="mono">${esc(v.Mountpoint || '')}</td>
+      <td>${usageCell}</td>
+      <td class="mono cell-clip" title="${esc(v.Mountpoint || '')}">${esc(v.Mountpoint || '')}</td>
       <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 5 : 4;
+    const colSpan = all ? 6 : 5;
     root.innerHTML = shell('Volumes', `
       ${pageHeader(all ? 'Volumes — tous les nœuds' : 'Volumes')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
@@ -3556,17 +3898,30 @@ CMD ["sh"]
         <span class="muted mono" id="filter-count">${volumes.length} / ${volumes.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>Pilote</th><th>Point de montage</th><th></th></tr></thead>
+        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>Pilote</th><th>Usage</th><th>Point de montage</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Volumes Docker' });
     bindRefresh();
-    bindSearch('volumes');
+    bindPagedSearch('volumes');
+    root.querySelectorAll('[data-vol-key]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const entry = usageByKey.get(btn.dataset.volKey);
+        if (entry) openVolumeUsersModal(entry.vol, entry.users);
+      });
+    });
     if (!all) {
       document.getElementById('create').onclick = () => openCreateVolumeModal();
-      root.querySelectorAll('button[data-name]').forEach((btn) => {
+      root.querySelectorAll('.quick-actions button[data-name]').forEach((btn) => {
+        const entry = [...usageByKey.values()].find((e) => e.vol.Name === btn.dataset.name);
+        const used = !!(entry && entry.users.length);
         onBusyClick(btn, async (el) => {
           await Api.docker(`/volumes/${encodeURIComponent(el.dataset.name)}`, { method: 'DELETE' });
-        }, { confirm: 'Supprimer ce volume ?', reload: true });
+        }, {
+          confirm: used
+            ? 'Ce volume est utilisé par des conteneurs. Supprimer quand même ?'
+            : 'Supprimer ce volume ?',
+          reload: true,
+        });
       });
     }
   }
@@ -4175,29 +4530,48 @@ CMD ["sh"]
   async function viewNetworks() {
     const all = isAllNodes();
     let list = [];
+    let containers = [];
     let partial = false;
     if (all) {
-      const agg = await dockerAll('/networks');
-      list = agg.items;
-      partial = agg.failed > 0;
+      const [aggNet, aggCtr] = await Promise.all([
+        dockerAll('/networks'),
+        dockerAll('/containers/json?all=true'),
+      ]);
+      list = aggNet.items;
+      containers = aggCtr.items;
+      partial = aggNet.failed > 0 || aggCtr.failed > 0;
     } else {
-      list = (await Api.docker('/networks')) || [];
+      const [nets, ctrs] = await Promise.all([
+        Api.docker('/networks'),
+        Api.docker('/containers/json?all=true'),
+      ]);
+      list = nets || [];
+      containers = ctrs || [];
     }
-    const rows = list.map((n) => {
-      const search = `${n.Id} ${n.Name} ${n.Driver} ${n.Scope} ${n._nodeName || ''}`.toLowerCase();
+
+    const usageByKey = new Map();
+    const rows = list.map((n, idx) => {
+      const users = containersUsingNetwork(n, containers);
+      const key = `${n._nodeId || 0}:${n.Id || idx}`;
+      usageByKey.set(key, { net: n, users });
+      const usageCell = users.length
+        ? `<button type="button" class="badge badge-inuse img-usage-btn" data-net-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
+        : `<span class="badge badge-unused">Inutilisé</span>`;
+      const search = `${n.Id} ${n.Name} ${n.Driver} ${n.Scope} ${n._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
+      const isBuiltin = ['bridge', 'host', 'none'].includes(n.Name);
       return `<tr data-search="${esc(search)}">
       ${all ? `<td class="muted">${esc(n._nodeName || '—')}</td>` : ''}
       <td class="mono">${esc(shortId(n.Id))}</td>
       <td>${esc(n.Name)}</td>
       <td>${esc(n.Driver)}</td>
+      <td>${usageCell}</td>
       <td>${esc(n.Scope)}</td>
       <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">
-        ${['bridge', 'host', 'none'].includes(n.Name) ? '' :
-          iconBtn({ id: n.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+        ${isBuiltin ? '' : iconBtn({ id: n.Id, title: 'Supprimer', icon: 'remove', danger: true })}
       </div>`}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 6 : 5;
+    const colSpan = all ? 7 : 6;
     root.innerHTML = shell('Réseaux', `
       ${pageHeader(all ? 'Réseaux — tous les nœuds' : 'Réseaux')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
@@ -4209,17 +4583,30 @@ CMD ["sh"]
         <span class="muted mono" id="filter-count">${list.length} / ${list.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Nom</th><th>Pilote</th><th>Portée</th><th></th></tr></thead>
+        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Nom</th><th>Pilote</th><th>Usage</th><th>Portée</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun réseau</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Réseaux Docker' });
     bindRefresh();
-    bindSearch('networks');
+    bindPagedSearch('networks');
+    root.querySelectorAll('[data-net-key]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const entry = usageByKey.get(btn.dataset.netKey);
+        if (entry) openNetworkUsersModal(entry.net, entry.users);
+      });
+    });
     if (!all) {
       document.getElementById('create').onclick = () => openCreateNetworkModal();
-      root.querySelectorAll('button[data-id]').forEach((btn) => {
+      root.querySelectorAll('.quick-actions button[data-id]').forEach((btn) => {
+        const entry = [...usageByKey.values()].find((e) => e.net.Id === btn.dataset.id);
+        const used = !!(entry && entry.users.length);
         onBusyClick(btn, async (el) => {
           await Api.docker(`/networks/${encodeURIComponent(el.dataset.id)}`, { method: 'DELETE' });
-        }, { confirm: 'Supprimer ce réseau ?', reload: true });
+        }, {
+          confirm: used
+            ? 'Ce réseau est utilisé par des conteneurs. Supprimer quand même ?'
+            : 'Supprimer ce réseau ?',
+          reload: true,
+        });
       });
     }
   }
@@ -4286,7 +4673,7 @@ CMD ["sh"]
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée' : 'Projets Compose' });
     bindRefresh();
-    bindSearch('stacks');
+    bindPagedSearch('stacks');
     root.querySelectorAll('[data-act]').forEach((btn) => {
       const act = btn.dataset.act;
       const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;
@@ -4322,6 +4709,172 @@ CMD ["sh"]
     return pairs;
   }
 
+  /** Lint Compose YAML: indentation rules + js-yaml parse. */
+  function lintComposeYaml(text) {
+    const found = [];
+    if (typeof CodeMirror === 'undefined') return found;
+    const Pos = CodeMirror.Pos;
+    const lines = String(text || '').split(/\r?\n/);
+    const unit = 2;
+    const stack = [0];
+    let inBlock = false;
+    let blockBase = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      const leadMatch = line.match(/^[ \t]*/);
+      const lead = leadMatch ? leadMatch[0] : '';
+      if (lead.includes('\t')) {
+        found.push({
+          from: Pos(i, 0),
+          to: Pos(i, lead.length || 1),
+          message: 'Tabulation interdite dans l’indentation — utilisez des espaces',
+          severity: 'error',
+        });
+        continue;
+      }
+
+      const indent = lead.length;
+
+      // Content of | or > block scalars: any deeper indent is allowed
+      if (inBlock) {
+        if (indent > blockBase) continue;
+        inBlock = false;
+      }
+
+      if (trimmed.startsWith('#')) continue;
+      if (trimmed === '---' || trimmed === '...') continue;
+
+      if (indent % unit !== 0) {
+        found.push({
+          from: Pos(i, 0),
+          to: Pos(i, Math.max(indent, 1)),
+          message: `Indentation invalide : ${indent} espace${indent > 1 ? 's' : ''} (attendu un multiple de ${unit})`,
+          severity: 'error',
+        });
+      }
+
+      const prev = stack[stack.length - 1];
+      if (indent > prev) {
+        if (indent !== prev + unit) {
+          found.push({
+            from: Pos(i, 0),
+            to: Pos(i, Math.max(indent, 1)),
+            message: `Saut d’indentation : ${prev} → ${indent} (attendu ${prev + unit})`,
+            severity: 'error',
+          });
+        }
+        stack.push(indent);
+      } else if (indent < prev) {
+        while (stack.length > 1 && stack[stack.length - 1] > indent) stack.pop();
+        if (stack[stack.length - 1] !== indent) {
+          found.push({
+            from: Pos(i, 0),
+            to: Pos(i, Math.max(indent, 1)),
+            message: `Niveau d’indentation incohérent (${indent} espaces)`,
+            severity: 'error',
+          });
+          stack.push(indent);
+        }
+      }
+
+      // Enter block scalar after key: | or key: >
+      if (/:\s*[|>][-+0-9]*\s*(#.*)?$/.test(trimmed) || /^[|>][-+0-9]*\s*(#.*)?$/.test(trimmed)) {
+        inBlock = true;
+        blockBase = indent;
+      }
+    }
+
+    const yaml = window.jsyaml;
+    if (yaml && typeof yaml.load === 'function' && String(text || '').trim()) {
+      try {
+        yaml.load(text);
+      } catch (e) {
+        const mark = e && e.mark;
+        const line = mark && Number.isFinite(mark.line) ? mark.line : 0;
+        const col = mark && Number.isFinite(mark.column) ? mark.column : 0;
+        const msg = (e && (e.reason || e.message)) || 'YAML invalide';
+        const already = found.some((f) => f.from.line === line && f.severity === 'error');
+        if (!already) {
+          found.push({
+            from: Pos(line, col),
+            to: Pos(line, col + 1),
+            message: msg,
+            severity: 'error',
+          });
+        }
+      }
+    }
+    return found;
+  }
+
+  function updateYamlStatus(el, annotations) {
+    if (!el) return;
+    const errs = (annotations || []).filter((a) => a.severity !== 'warning');
+    if (!errs.length) {
+      el.className = 'yaml-status is-ok';
+      el.innerHTML = `<span class="yaml-dot"></span>YAML valide`;
+      return;
+    }
+    const first = errs[0];
+    const line = (first.from && first.from.line != null) ? first.from.line + 1 : '?';
+    el.className = 'yaml-status is-err';
+    el.innerHTML = `<span class="yaml-dot"></span><strong>${errs.length} erreur${errs.length > 1 ? 's' : ''}</strong>
+      — ligne ${esc(String(line))} : ${esc(first.message || 'invalide')}${errs.length > 1 ? '…' : ''}`;
+  }
+
+  /**
+   * Replace a textarea with a CodeMirror YAML editor.
+   * @returns {{ getValue: () => string, setValue: (v: string) => void, hasErrors: () => boolean, focus: () => void } | null}
+   */
+  function mountYamlEditor(textarea, statusEl) {
+    if (!textarea || typeof CodeMirror === 'undefined') return null;
+    if (!CodeMirror._wharfYamlLint) {
+      CodeMirror.registerHelper('lint', 'yaml', (text) => lintComposeYaml(text));
+      CodeMirror._wharfYamlLint = true;
+    }
+    const cm = CodeMirror.fromTextArea(textarea, {
+      mode: 'yaml',
+      theme: 'wharf',
+      lineNumbers: true,
+      lineWrapping: true,
+      indentUnit: 2,
+      tabSize: 2,
+      indentWithTabs: false,
+      smartIndent: true,
+      matchBrackets: true,
+      styleActiveLine: true,
+      gutters: ['CodeMirror-linenumbers', 'CodeMirror-lint-markers'],
+      lint: {
+        getAnnotations: (text, updateLinting, opts, editor) => {
+          const anns = lintComposeYaml(text);
+          updateLinting(editor, anns);
+          updateYamlStatus(statusEl, anns);
+        },
+        async: true,
+      },
+      extraKeys: {
+        Tab: (cmInst) => {
+          if (cmInst.somethingSelected()) cmInst.indentSelection('add');
+          else cmInst.replaceSelection('  ', 'end');
+        },
+      },
+    });
+    // Initial status
+    updateYamlStatus(statusEl, lintComposeYaml(cm.getValue()));
+    requestAnimationFrame(() => { try { cm.refresh(); } catch (_) {} });
+    return {
+      getValue: () => cm.getValue(),
+      setValue: (v) => cm.setValue(v),
+      hasErrors: () => lintComposeYaml(cm.getValue()).some((a) => a.severity !== 'warning'),
+      focus: () => cm.focus(),
+      cm,
+    };
+  }
+
   function showStackEditor(existing) {
     const isEdit = !!existing;
     const defaultCompose = `services:
@@ -4341,11 +4894,13 @@ CMD ["sh"]
 
       <div class="form-group">
         <label class="field-label">Fichier Compose <span class="req">*</span></label>
-        <div class="code-editor">
+        <div class="code-editor code-editor-yaml">
           <div class="code-editor-bar">
+            <span class="yaml-hint muted">YAML · indentation 2 espaces</span>
             ${iconBtn({ elId: 'copy-compose', title: 'Copier', icon: 'copy' })}
           </div>
           <textarea id="stack-file">${esc(existing?.content || defaultCompose)}</textarea>
+          <div class="yaml-status" id="yaml-status" aria-live="polite"></div>
         </div>
       </div>
 
@@ -4457,15 +5012,29 @@ CMD ["sh"]
       }
     });
 
+    const yamlStatus = document.getElementById('yaml-status');
+    const yamlEditor = mountYamlEditor(document.getElementById('stack-file'), yamlStatus);
+    const readCompose = () => (yamlEditor ? yamlEditor.getValue() : (document.getElementById('stack-file')?.value || ''));
+
     document.getElementById('copy-compose').onclick = async () => {
-      const text = document.getElementById('stack-file').value;
-      try { await navigator.clipboard.writeText(text); } catch (_) {}
+      try { await navigator.clipboard.writeText(readCompose()); } catch (_) {}
     };
     onBusyClick(document.getElementById('stack-save'), async () => {
       const name = document.getElementById('stack-name').value.trim();
-      const content = document.getElementById('stack-file').value;
+      const content = readCompose();
       const errBox = document.getElementById('stack-err');
       if (errBox) errBox.innerHTML = '';
+      if (yamlEditor?.hasErrors()) {
+        const anns = lintComposeYaml(content);
+        updateYamlStatus(yamlStatus, anns);
+        const first = anns.find((a) => a.severity !== 'warning') || anns[0];
+        const line = first?.from?.line != null ? first.from.line + 1 : '?';
+        if (errBox) {
+          errBox.innerHTML = `<div class="error-box">Compose YAML invalide (ligne ${esc(String(line))}) : ${esc(first?.message || 'corrigez l’indentation')}</div>`;
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+        return;
+      }
       const { Env, errors } = collectEnv();
       if (errors.length) {
         if (errBox) errBox.innerHTML = `<div class="error-box">${esc(errors.join('\n'))}</div>`;
@@ -4512,7 +5081,16 @@ CMD ["sh"]
         </dl>
       </div>
       <div class="section-title">Fichier Compose</div>
-      <pre class="logs">${esc(file.StackFileContent || '')}</pre>`);
+      <pre class="compose-preview cm-s-wharf" id="compose-preview"></pre>`);
+    const preview = document.getElementById('compose-preview');
+    const composeText = file.StackFileContent || '';
+    if (preview) {
+      if (typeof CodeMirror !== 'undefined' && CodeMirror.runMode) {
+        CodeMirror.runMode(composeText, 'yaml', preview);
+      } else {
+        preview.textContent = composeText;
+      }
+    }
     document.getElementById('edit').onclick = () =>
       showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
     root.querySelectorAll('[data-act]').forEach((btn) => {
@@ -4696,7 +5274,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.3', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.4', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -5656,7 +6234,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.3</strong> — historique dashboard, volumes agents, TLS pin.</p>
+          <p class="muted">Version <strong>1.4.4</strong> — console TTY, Compose colorisé, usage images/volumes/réseaux, pagination.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

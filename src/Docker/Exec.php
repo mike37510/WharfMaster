@@ -13,17 +13,22 @@ final class Exec
      * Run a one-shot command inside a container (console helper).
      *
      * @param list<string> $cmd
+     * @param list<string> $env  e.g. TERM=xterm-256color, COLUMNS=120
      * @return array{Stdout:string,Stderr:string,ExitCode:int}
      */
-    public function run(string $containerId, array $cmd, bool $tty = false, int $timeout = 60): array
+    public function run(string $containerId, array $cmd, bool $tty = false, int $timeout = 60, array $env = []): array
     {
-        $create = $this->docker->json('POST', '/containers/' . rawurlencode($containerId) . '/exec', [
+        $payload = [
             'AttachStdin' => false,
             'AttachStdout' => true,
             'AttachStderr' => true,
             'Tty' => $tty,
             'Cmd' => $cmd,
-        ]);
+        ];
+        if ($env !== []) {
+            $payload['Env'] = array_values($env);
+        }
+        $create = $this->docker->json('POST', '/containers/' . rawurlencode($containerId) . '/exec', $payload);
 
         $execId = (string) ($create['Id'] ?? '');
         if ($execId === '') {

@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **1.4.3**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **1.4.4**.
 
 | | |
 |---|---|
@@ -109,7 +109,7 @@ Variables utiles :
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.3
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.4
 ```
 
 Backup admin :
@@ -196,7 +196,7 @@ Content-Type: application/json
 ```json
 {
   "ok": true,
-  "version": "1.4.3",
+  "version": "1.4.4",
   "checks": {
     "docker": true,
     "dockerSocket": true,
@@ -373,7 +373,7 @@ Les mots de passe sont stockés chiffrés (`enc:v1:…`) ; l’API de liste n’
 
 ## 12. Agent distant (référence)
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:1.4.3` (ou build local).
+Image : `ghcr.io/mike37510/wharfmaster-agent:1.4.4` (ou build local).
 
 | Chemin agent | Description |
 |--------------|-------------|
@@ -390,7 +390,7 @@ curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:1.4.3
+  --image ghcr.io/mike37510/wharfmaster-agent:1.4.4
 ```
 
 ---

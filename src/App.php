@@ -693,17 +693,30 @@ final class App
         if ($cwd !== '' && (str_contains($cwd, "\0") || strlen($cwd) > 512)) {
             return Response::error('Répertoire de travail invalide', 400);
         }
+        $cols = max(40, min(250, (int) ($body['cols'] ?? $body['Cols'] ?? 120)));
+        $rows = max(8, min(100, (int) ($body['rows'] ?? $body['Rows'] ?? 40)));
+        // TTY so tools like `ls` use columns + colors (like a real shell)
+        $tty = !array_key_exists('tty', $body) || !empty($body['tty']);
+        $env = [
+            'TERM=xterm-256color',
+            'COLORTERM=truecolor',
+            'COLUMNS=' . $cols,
+            'LINES=' . $rows,
+            'FORCE_COLOR=1',
+            'CLICOLOR=1',
+            'CLICOLOR_FORCE=1',
+        ];
         $script = $cwd !== '' ? 'cd ' . escapeshellarg($cwd) . ' && ' . $command : $command;
         $cmd = [$userShell, '-lc', $script];
         try {
             $exec = new \App\Docker\Exec($docker);
-            $result = $exec->run($containerId, $cmd, false);
+            $result = $exec->run($containerId, $cmd, $tty, 60, $env);
         } catch (\Throwable $e) {
             // Retry with /bin/sh if bash missing
             if ($userShell !== '/bin/sh') {
                 try {
                     $exec = new \App\Docker\Exec($docker);
-                    $result = $exec->run($containerId, ['/bin/sh', '-lc', $script], false);
+                    $result = $exec->run($containerId, ['/bin/sh', '-lc', $script], $tty, 60, $env);
                 } catch (\Throwable $e2) {
                     $status = $e2->getCode() >= 400 && $e2->getCode() < 600 ? (int) $e2->getCode() : 500;
                     return Response::error($e2->getMessage(), $status);
@@ -1611,7 +1624,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.4.3',
+                'User-Agent: WharfMaster/1.4.4',
             ],
         ]);
         $body = curl_exec($ch);
@@ -2402,7 +2415,7 @@ final class App
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.3');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.4');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)
