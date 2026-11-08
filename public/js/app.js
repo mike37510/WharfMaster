@@ -29,6 +29,7 @@
       stacks: '',
       registries: '',
       users: '',
+      teams: '',
       dashboard: '',
     },
     pages: {
@@ -53,6 +54,7 @@
     publicUrl: '',
     metricsChartHours: 24,
     metricsRetentionDays: 90,
+    trivyEnabled: true,
     dashFilter: 'all',
     engineVersion: '',
     endpoints: [],
@@ -362,6 +364,108 @@
     return `<button type="button" class="btn btn-info btn-create" id="${esc(elId)}" title="${esc(title)}">
       <span class="btn-ico">${ico('plus')}</span><span>${esc(label)}</span>
     </button>`;
+  }
+
+  function bulkSelectTh(enabled) {
+    if (!enabled) return '';
+    return `<th class="col-check">
+      <input type="checkbox" class="bulk-check-all" title="Tout sélectionner (page / filtre)" aria-label="Tout sélectionner">
+    </th>`;
+  }
+
+  function bulkSelectTd(value, { disabled = false, title = '' } = {}) {
+    if (disabled) {
+      return `<td class="col-check"><input type="checkbox" disabled title="${esc(title || 'Non sélectionnable')}" aria-label="Non sélectionnable"></td>`;
+    }
+    return `<td class="col-check"><input type="checkbox" class="bulk-check" value="${esc(String(value))}" aria-label="Sélectionner"></td>`;
+  }
+
+  function bulkDeleteBtnHtml() {
+    return `<button type="button" class="btn btn-danger btn-sm bulk-delete-btn" id="bulk-delete" hidden disabled>
+      <span class="btn-ico">${ico('remove')}</span>
+      <span>Supprimer (<span class="bulk-count">0</span>)</span>
+    </button>`;
+  }
+
+  /**
+   * Multi-select + mass delete for list tables.
+   * @param {{
+   *   enabled: boolean,
+   *   confirmOne?: (id: string) => string,
+   *   confirmMany?: (n: number) => string,
+   *   deleteOne: (id: string) => Promise<void>,
+   *   reload: () => (void|Promise<void>),
+   * }} opts
+   */
+  function bindBulkDelete(opts) {
+    if (!opts?.enabled) return;
+    const table = root.querySelector('table.data');
+    const btn = document.getElementById('bulk-delete');
+    const checkAll = root.querySelector('.bulk-check-all');
+    if (!table || !btn) return;
+
+    const visibleChecks = () => [...table.querySelectorAll('tbody tr[data-search]')]
+      .filter((tr) => tr.style.display !== 'none')
+      .map((tr) => tr.querySelector('input.bulk-check'))
+      .filter((c) => c && !c.disabled);
+
+    const selected = () => [...table.querySelectorAll('input.bulk-check:checked:not(:disabled)')]
+      .map((c) => c.value)
+      .filter(Boolean);
+
+    const sync = () => {
+      const ids = selected();
+      const n = ids.length;
+      const countEl = btn.querySelector('.bulk-count');
+      if (countEl) countEl.textContent = String(n);
+      btn.hidden = n === 0;
+      btn.disabled = n === 0;
+      const vis = visibleChecks();
+      if (checkAll) {
+        const allOn = vis.length > 0 && vis.every((c) => c.checked);
+        const someOn = vis.some((c) => c.checked);
+        checkAll.checked = allOn;
+        checkAll.indeterminate = someOn && !allOn;
+      }
+    };
+
+    table.addEventListener('change', (e) => {
+      const t = e.target;
+      if (!(t instanceof HTMLInputElement)) return;
+      if (t.classList.contains('bulk-check-all')) {
+        const on = t.checked;
+        visibleChecks().forEach((c) => { c.checked = on; });
+      }
+      if (t.classList.contains('bulk-check') || t.classList.contains('bulk-check-all')) sync();
+    });
+
+    document.getElementById('filter')?.addEventListener('input', () => setTimeout(sync, 120));
+    root.querySelector('.table-pager')?.addEventListener('click', () => setTimeout(sync, 60));
+
+    onBusyClick(btn, async () => {
+      const ids = selected();
+      if (!ids.length) return;
+      const msg = ids.length === 1
+        ? (opts.confirmOne ? opts.confirmOne(ids[0]) : 'Supprimer cet élément ?')
+        : (opts.confirmMany ? opts.confirmMany(ids.length) : `Supprimer ${ids.length} éléments ?`);
+      if (!window.confirm(msg)) return;
+      const errors = [];
+      for (const id of ids) {
+        try {
+          await opts.deleteOne(id);
+        } catch (err) {
+          errors.push(`${id}: ${err.message || err}`);
+        }
+      }
+      if (errors.length) {
+        window.alert(
+          `Certaines suppressions ont échoué :\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? '\n…' : ''}`,
+        );
+      }
+      await opts.reload();
+    }, { disableSiblings: false, minMs: 300 });
+
+    sync();
   }
 
   function parseImageRef(ref) {
@@ -777,6 +881,13 @@
             const { fromImage, tag } = parseImageRef(image);
             await Api.docker(`/images/create?fromImage=${encodeURIComponent(fromImage)}&tag=${encodeURIComponent(tag.replace(/^@/, ''))}`, { method: 'POST' });
           } catch (_) {}
+        }
+        const gate = await cveAdviseBeforeDeploy({ Image: image }, errBox);
+        if (!gate.proceed) {
+          if (errBox && !errBox.innerHTML) {
+            errBox.innerHTML = `<div class="info-box">Création annulée.</div>`;
+          }
+          return;
         }
         const created = await Api.docker(`/containers/create${q}`, {
           method: 'POST',
@@ -1481,6 +1592,15 @@ CMD ["sh"]
     }
   }
 
+  /** Portainer CE Type is int (6=hub, 3=custom); WharfMaster also sends RegistryKind. */
+  function registryKind(reg) {
+    if (!reg) return 'v2';
+    if (reg.RegistryKind) return String(reg.RegistryKind);
+    if (reg.Type === 'hub' || Number(reg.Type) === 6) return 'hub';
+    if (reg.Type === 'v2' || Number(reg.Type) === 3) return 'v2';
+    return String(reg.Type || 'v2');
+  }
+
   function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -1877,6 +1997,7 @@ CMD ["sh"]
       volumes: '<svg viewBox="0 0 16 16"><path d="M3 2h10v12H3V2zm2 2v8h6V4H5z"/></svg>',
       settings: '<svg viewBox="0 0 16 16"><path d="M6.5 1h3l.4 2.1a5 5 0 011.4.8L13.5 3l1.5 2.6-1.7 1.2a5 5 0 010 1.6l1.7 1.2L13.5 13l-2.2-.9a5 5 0 01-1.4.8L9.5 15h-3l-.4-2.1a5 5 0 01-1.4-.8L2.5 13 1 10.4l1.7-1.2a5 5 0 010-1.6L1 6.4 2.5 3.8l2.2.9a5 5 0 011.4-.8L6.5 1zM8 6a2 2 0 100 4 2 2 0 000-4z"/></svg>',
       users: '<svg viewBox="0 0 16 16"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6v-1a4 4 0 014-4h2a4 4 0 014 4v1H3zm10-7a2 2 0 100-4 2 2 0 000 4zm1 7v-1a4.9 4.9 0 00-1.5-3.5A4 4 0 0115 13v1h-1z"/></svg>',
+      teams: '<svg viewBox="0 0 16 16"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6v-1a4 4 0 014-4h2a4 4 0 014 4v1H3zm10-7a2 2 0 100-4 2 2 0 000 4zm1 7v-1a4.9 4.9 0 00-1.5-3.5A4 4 0 0115 13v1h-1z"/><path d="M1 5.5A1.5 1.5 0 012.5 4h1a.5.5 0 010 1h-1a.5.5 0 00-.5.5v1a.5.5 0 01-1 0v-1z"/></svg>',
       registries: '<svg viewBox="0 0 16 16"><path d="M2 2h12v3H2V2zm0 4.5h12V10H2V6.5zM2 11h12v3H2v-3z"/></svg>',
       about: '<svg viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7.25 5h1.5v1.5h-1.5V5zM7.25 7.5h1.5V11h-1.5V7.5z"/></svg>',
       docs: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h6.5L13 5v8.5H4V2.5z"/><path d="M10.5 2.5V5H13"/><path d="M6 8h4M6 10.5h4M6 13h2.5"/></svg>',
@@ -1911,6 +2032,7 @@ CMD ["sh"]
     tag = 'button', href, act, id, title, icon,
     danger = false, info = false, success = false,
     modal, name, running, del, reset, elId, label,
+    editTeam, delTeam, delAcl, scanImg, runSched, delSched,
   }) {
     const withLabel = !!(label && String(label).trim());
     const cls = `btn btn-icon btn-sm${withLabel ? ' btn-icon-label' : ''}${danger ? ' btn-danger' : ''}${info ? ' btn-info' : ''}${success ? ' btn-success' : ''}`;
@@ -1927,6 +2049,12 @@ CMD ["sh"]
       running != null ? `data-running="${running ? '1' : '0'}"` : '',
       del != null ? `data-del="${esc(del)}"` : '',
       reset != null ? `data-reset="${esc(reset)}"` : '',
+      editTeam != null ? `data-edit-team="${esc(editTeam)}"` : '',
+      delTeam != null ? `data-del-team="${esc(delTeam)}"` : '',
+      delAcl != null ? `data-del-acl="${esc(delAcl)}"` : '',
+      scanImg != null ? `data-scan-img="${esc(scanImg)}"` : '',
+      runSched != null ? `data-run-sched="${esc(runSched)}"` : '',
+      delSched != null ? `data-del-sched="${esc(delSched)}"` : '',
       tag === 'button' ? 'type="button"' : '',
     ].filter(Boolean).join(' ');
     const labelHtml = withLabel ? `<span class="btn-label">${esc(label)}</span>` : '';
@@ -2443,6 +2571,33 @@ CMD ["sh"]
     </div>`;
   }
 
+  function isSettingsSection(route) {
+    const r = route || state.route || '';
+    return r === 'settings' || r.startsWith('settings/')
+      || r === 'users' || r.startsWith('users/')
+      || r === 'teams' || r.startsWith('teams/')
+      || r === 'nodes' || r.startsWith('nodes/')
+      || r === 'registries' || r.startsWith('registries/');
+  }
+
+  /** Sub-nav shared by Paramètres + Authentification / Registres / Nœuds / Users / Équipes. */
+  function settingsSubnav(active) {
+    const isAdmin = Number(state.user?.Role) === 1;
+    const tabs = [
+      ['settings', 'Général', true, '#settings'],
+      ['settings/auth', 'Authentification', isAdmin, '#settings/auth'],
+      ['registries', 'Registres', true, '#registries'],
+      ['nodes', 'Nœuds', isAdmin, '#nodes'],
+      ['users', 'Utilisateurs', isAdmin, '#users'],
+      ['teams', 'Équipes', isAdmin, '#teams'],
+    ].filter((row) => row[2]);
+    return `<nav class="settings-subnav" aria-label="Sections paramètres">
+      ${tabs.map(([id, label, , href]) =>
+        `<a href="${href}" class="settings-subnav-link${active === id ? ' active' : ''}"><span class="nav-ico">${ico(id === 'settings/auth' ? 'users' : id.split('/')[0])}</span>${esc(label)}</a>`
+      ).join('')}
+    </nav>`;
+  }
+
   function shell(title, bodyHtml, opts = {}) {
     const subtitle = opts.subtitle || '';
     const hidePageHeader = !!opts.hidePageHeader;
@@ -2453,17 +2608,15 @@ CMD ["sh"]
       ['volumes', 'Volumes'],
       ['networks', 'Réseaux'],
       ['stacks', 'Stacks'],
-      ['registries', 'Registres'],
       ['activity', 'Journaux'],
       ['settings', 'Paramètres'],
     ];
-    if (Number(state.user?.Role) === 1) {
-      items.splice(items.findIndex(([id]) => id === 'settings'), 0, ['nodes', 'Nœuds']);
-      items.push(['users', 'Utilisateurs']);
-    }
-    const nav = items.map(([id, label]) =>
-      `<a href="#${id}" class="${state.route === id || state.route.startsWith(id + '/') ? 'active' : ''}"><span class="nav-ico">${ico(id)}</span>${label}</a>`
-    ).join('');
+    const nav = items.map(([id, label]) => {
+      const active = id === 'settings'
+        ? isSettingsSection(state.route)
+        : (state.route === id || state.route.startsWith(id + '/'));
+      return `<a href="#${id}" class="${active ? 'active' : ''}"><span class="nav-ico">${ico(id)}</span>${label}</a>`;
+    }).join('');
     const initial = (state.user?.Username || 'A').slice(0, 2).toUpperCase();
     const username = state.user?.Username || 'admin';
     const engine = state.engineVersion ? `Docker Engine v${state.engineVersion}` : 'Docker Engine';
@@ -2493,7 +2646,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.5.0</div>
+            <div class="brand-ver">v2.0.0</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -3402,6 +3555,7 @@ CMD ["sh"]
           ${iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div>`;
       return `<tr class="${rowCls}" data-search="${esc(search)}">
+        ${all ? '' : bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${esc(c._nodeName || '—')}</td>` : ''}
         <td class="name-cell">
           <strong><a href="#containers/${esc(c.Id)}" ${all ? `data-switch-node="${esc(c._nodeId)}"` : ''}>${esc(name)}</a></strong>
@@ -3414,7 +3568,7 @@ CMD ["sh"]
       </tr>`;
     }).join('');
 
-    const colSpan = all ? 6 : 5;
+    const colSpan = all ? 6 : 7;
     root.innerHTML = shell('Conteneurs', `
       ${pageHeader(all ? 'Conteneurs — tous les nœuds' : 'Liste des conteneurs')}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${esc(failMsg)}</div>` : ''}
@@ -3425,11 +3579,12 @@ CMD ["sh"]
         'Rechercher des conteneurs…',
         list.length,
         list.length,
-        all ? '' : createBtn('create-container', 'Créer un conteneur'),
+        all ? '' : `${createBtn('create-container', 'Créer un conteneur')}${bulkDeleteBtnHtml()}`,
       )}
       <div class="table-wrap">
         <table class="data">
           <thead><tr>
+            ${bulkSelectTh(!all)}
             ${all ? sortTh('Nœud', 'node', 'containers') : ''}
             ${sortTh('Nom', 'name', 'containers')}
             ${sortTh('Image', 'image', 'containers')}
@@ -3454,6 +3609,13 @@ CMD ["sh"]
           confirm: btn.dataset.act === 'remove' ? 'Supprimer ce conteneur ?' : null,
           reload: true,
         });
+      });
+      bindBulkDelete({
+        enabled: true,
+        confirmOne: () => 'Supprimer ce conteneur ?',
+        confirmMany: (n) => `Supprimer ${n} conteneurs ?`,
+        deleteOne: (id) => containerAction(id, 'remove'),
+        reload: () => viewContainers(),
       });
     } else {
       root.querySelectorAll('[data-switch-node]').forEach((a) => {
@@ -3840,6 +4002,8 @@ CMD ["sh"]
     let list = [];
     let containers = [];
     let partial = false;
+    let scanByRef = new Map();
+    const cveOn = trivyOn();
     if (all) {
       const [aggImg, aggCtr] = await Promise.all([
         dockerAll('/images/json'),
@@ -3849,12 +4013,20 @@ CMD ["sh"]
       containers = aggCtr.items;
       partial = aggImg.failed > 0 || aggCtr.failed > 0;
     } else {
-      const [imgs, ctrs] = await Promise.all([
+      const tasks = [
         Api.docker('/images/json'),
         Api.docker('/containers/json?all=true'),
-      ]);
+      ];
+      if (cveOn) tasks.push(Api.imageScans(Api.getEndpointId()).catch(() => ({ Items: [] })));
+      const [imgs, ctrs, scans] = await Promise.all(tasks);
       list = imgs || [];
       containers = ctrs || [];
+      if (cveOn) {
+        (scans?.Items || []).forEach((s) => {
+          if (s.ImageRef) scanByRef.set(s.ImageRef, s);
+          if (s.Digest) scanByRef.set(s.Digest, s);
+        });
+      }
     }
 
     const usageByKey = new Map();
@@ -3865,6 +4037,11 @@ CMD ["sh"]
       img._usageCount = users.length;
       img._tagsLabel = imageTagsLabel(img);
       img._sortKey = key;
+      const tags = (img.RepoTags || []).filter((t) => t && t !== '<none>:<none>');
+      img._primaryTag = tags[0] || '';
+      const dig = (img.RepoDigests || [])[0] || '';
+      const digestOnly = dig.includes('@') ? dig.split('@')[1] : '';
+      img._scan = scanByRef.get(img._primaryTag) || scanByRef.get(digestOnly) || null;
     });
     list = sortItems(list, 'images', {
       name: (img) => img._tagsLabel || '',
@@ -3882,17 +4059,26 @@ CMD ["sh"]
       const usageCell = users.length
         ? `<button type="button" class="badge badge-inuse img-usage-btn" data-img-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
         : `<span class="badge badge-unused">Inutilisé</span>`;
+      const cveCell = !cveOn || all
+        ? ''
+        : `<td>${img._scan ? cveBadge(img._scan.Summary) : '<span class="muted">—</span>'}</td>`;
+      const scanRef = img._primaryTag || img.Id;
       const search = `${shortId(img.Id)} ${tags} ${img._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
       return `<tr data-search="${esc(search)}">
+        ${all ? '' : bulkSelectTd(img.Id)}
         ${all ? `<td class="muted">${esc(img._nodeName || '—')}</td>` : ''}
         <td class="mono">${esc(shortId(img.Id))}</td>
         <td>${esc(tags)}</td>
         <td>${usageCell}</td>
+        ${cveCell}
         <td>${esc(sizeMb)} MB</td>
-        <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">${iconBtn({ id: img.Id, title: 'Supprimer', icon: 'remove', danger: true })}</div>`}</td>
+        <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">
+          ${cveOn && img._primaryTag ? iconBtn({ scanImg: scanRef, title: 'Scan CVE (Trivy)', icon: 'activity', info: true }) : ''}
+          ${iconBtn({ id: img.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+        </div>`}</td>
       </tr>`;
     }).join('');
-    const colSpan = all ? 6 : 5;
+    const colSpan = (all ? 6 : 7) + (cveOn && !all ? 1 : 0);
     root.innerHTML = shell('Images', `
       ${pageHeader(all ? 'Images — tous les nœuds' : 'Images')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
@@ -3902,19 +4088,22 @@ CMD ["sh"]
         'Rechercher des images…',
         list.length,
         list.length,
-        all ? '' : `${createBtn('build-image', 'Dockerfile / Build')}${createBtn('pull-image', 'Pull une image')}`,
+        all ? '' : `${createBtn('build-image', 'Dockerfile / Build')}${createBtn('pull-image', 'Pull une image')}${bulkDeleteBtnHtml()}`,
       )}
       <div class="table-wrap"><table class="data">
         <thead><tr>
+          ${bulkSelectTh(!all)}
           ${all ? sortTh('Nœud', 'node', 'images') : ''}
           ${sortTh('ID', 'id', 'images')}
           ${sortTh('Tags', 'name', 'images')}
           ${sortTh('Usage', 'usage', 'images')}
+          ${cveOn && !all ? '<th>CVE</th>' : ''}
           ${sortTh('Taille', 'size', 'images')}
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune image</td></tr>`}</tbody>
-      </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Images Docker locales' });
+      </table></div>
+      <div id="scan-modal"></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Images Docker locales' });
     bindRefresh();
     bindPagedSearch('images');
     bindTableSort('images', () => viewImages());
@@ -3927,6 +4116,40 @@ CMD ["sh"]
     if (!all) {
       document.getElementById('build-image').onclick = () => { location.hash = '#images/build'; };
       document.getElementById('pull-image').onclick = () => openPullImageModal();
+      root.querySelectorAll('[data-scan-img]').forEach((btn) => {
+        onBusyClick(btn, async (el) => {
+          const ref = el.dataset.scanImg;
+          const host = document.getElementById('scan-modal');
+          if (host) host.innerHTML = `<div class="info-box">Scan Trivy de <code>${esc(ref)}</code> en cours…</div>`;
+          try {
+            const res = await Api.scanImage(Api.getEndpointId(), { Image: ref, Force: true });
+            const findings = (res.Findings || []).slice(0, 40);
+            const rowsF = findings.map((f) => `<tr>
+              <td>${esc(f.Severity)}</td>
+              <td class="mono">${esc(f.Cve)}</td>
+              <td>${esc(f.Package)} ${esc(f.Version || '')}</td>
+              <td class="muted">${esc((f.Title || '').slice(0, 120))}</td>
+            </tr>`).join('');
+            if (host) {
+              host.innerHTML = `
+                <div class="modal-backdrop">
+                  <div class="modal modal-form-wide" style="max-width:820px">
+                    <h3>Scan CVE · ${esc(ref)}</h3>
+                    <p>${cveBadge(res.Summary)} · ${esc(String(res.Summary?.TOTAL || 0))} finding(s)</p>
+                    <div class="table-wrap" style="max-height:360px;overflow:auto">
+                      <table class="data"><thead><tr><th>Sévérité</th><th>CVE</th><th>Paquet</th><th>Titre</th></tr></thead>
+                      <tbody>${rowsF || `<tr><td colspan="4" class="empty">Aucune vulnérabilité</td></tr>`}</tbody></table>
+                    </div>
+                    <div class="actions-bar"><button class="btn" id="close-scan">Fermer</button></div>
+                  </div>
+                </div>`;
+              document.getElementById('close-scan').onclick = () => { host.innerHTML = ''; viewImages(); };
+            }
+          } catch (err) {
+            if (host) host.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+          }
+        }, { minMs: 400 });
+      });
       root.querySelectorAll('.quick-actions button[data-id]').forEach((btn) => {
         const entry = [...usageByKey.values()].find((e) => e.img.Id === btn.dataset.id);
         const used = !!(entry && entry.users.length);
@@ -3938,6 +4161,13 @@ CMD ["sh"]
             : 'Supprimer cette image ?',
           reload: true,
         });
+      });
+      bindBulkDelete({
+        enabled: true,
+        confirmOne: () => 'Supprimer cette image ?',
+        confirmMany: (n) => `Supprimer ${n} images (force) ?`,
+        deleteOne: (id) => Api.docker(`/images/${encodeURIComponent(id)}?force=true`, { method: 'DELETE' }),
+        reload: () => viewImages(),
       });
     }
   }
@@ -3993,6 +4223,7 @@ CMD ["sh"]
         ${iconBtn({ name: v.Name, title: 'Supprimer', icon: 'remove', danger: true })}
       </div>`;
       return `<tr data-search="${esc(search)}">
+      ${all ? '' : bulkSelectTd(v.Name)}
       ${all ? `<td class="muted">${esc(v._nodeName || '—')}</td>` : ''}
       <td>${all
         ? esc(v.Name)
@@ -4003,19 +4234,20 @@ CMD ["sh"]
       <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 6 : 5;
+    const colSpan = all ? 6 : 7;
     root.innerHTML = shell('Volumes', `
       ${pageHeader(all ? 'Volumes — tous les nœuds' : 'Volumes')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
       ${all ? pickNodeGuardHtml() : ''}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des volumes…" value="${esc(state.filters.volumes || '')}">
-        ${all ? '' : createBtn('create', 'Créer un volume')}
+        ${all ? '' : `${createBtn('create', 'Créer un volume')}${bulkDeleteBtnHtml()}`}
         <div class="spacer"></div>
         <span class="muted mono" id="filter-count">${volumes.length} / ${volumes.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
         <thead><tr>
+          ${bulkSelectTh(!all)}
           ${all ? sortTh('Nœud', 'node', 'volumes') : ''}
           ${sortTh('Nom', 'name', 'volumes')}
           ${sortTh('Pilote', 'driver', 'volumes')}
@@ -4036,6 +4268,13 @@ CMD ["sh"]
     });
     if (!all) {
       document.getElementById('create').onclick = () => openCreateVolumeModal();
+      bindBulkDelete({
+        enabled: true,
+        confirmOne: () => 'Supprimer ce volume ?',
+        confirmMany: (n) => `Supprimer ${n} volumes ?`,
+        deleteOne: (name) => Api.docker(`/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+        reload: () => viewVolumes(),
+      });
       root.querySelectorAll('.quick-actions button[data-name]').forEach((btn) => {
         const entry = [...usageByKey.values()].find((e) => e.vol.Name === btn.dataset.name);
         const used = !!(entry && entry.users.length);
@@ -4699,6 +4938,7 @@ CMD ["sh"]
       const search = `${n.Id} ${n.Name} ${n.Driver} ${n.Scope} ${n._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
       const isBuiltin = ['bridge', 'host', 'none'].includes(n.Name);
       return `<tr data-search="${esc(search)}">
+      ${all ? '' : bulkSelectTd(n.Id, { disabled: isBuiltin, title: 'Réseau système' })}
       ${all ? `<td class="muted">${esc(n._nodeName || '—')}</td>` : ''}
       <td class="mono">${esc(shortId(n.Id))}</td>
       <td>${esc(n.Name)}</td>
@@ -4710,19 +4950,20 @@ CMD ["sh"]
       </div>`}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 7 : 6;
+    const colSpan = all ? 7 : 8;
     root.innerHTML = shell('Réseaux', `
       ${pageHeader(all ? 'Réseaux — tous les nœuds' : 'Réseaux')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
       ${all ? pickNodeGuardHtml() : ''}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des réseaux…" value="${esc(state.filters.networks || '')}">
-        ${all ? '' : createBtn('create', 'Créer un réseau')}
+        ${all ? '' : `${createBtn('create', 'Créer un réseau')}${bulkDeleteBtnHtml()}`}
         <div class="spacer"></div>
         <span class="muted mono" id="filter-count">${list.length} / ${list.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
         <thead><tr>
+          ${bulkSelectTh(!all)}
           ${all ? sortTh('Nœud', 'node', 'networks') : ''}
           ${sortTh('ID', 'id', 'networks')}
           ${sortTh('Nom', 'name', 'networks')}
@@ -4755,6 +4996,13 @@ CMD ["sh"]
             : 'Supprimer ce réseau ?',
           reload: true,
         });
+      });
+      bindBulkDelete({
+        enabled: true,
+        confirmOne: () => 'Supprimer ce réseau ?',
+        confirmMany: (n) => `Supprimer ${n} réseaux ?`,
+        deleteOne: (id) => Api.docker(`/networks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+        reload: () => viewNetworks(),
       });
     }
   }
@@ -4803,6 +5051,7 @@ CMD ["sh"]
       </div>`;
       const rowCls = isRunning ? '' : 'row-stopped';
       return `<tr class="${rowCls}" data-search="${esc(search)}" data-stack-id="${esc(s.Id)}">
+      ${bulkSelectTd(s.Id)}
       ${all ? `<td class="muted">${esc(node)}</td>` : ''}
       <td class="name-cell">
         <strong><a href="#stacks/${s.Id}">${esc(s.Name)}</a></strong>
@@ -4816,7 +5065,7 @@ CMD ["sh"]
       <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 6 : 5;
+    const colSpan = all ? 7 : 6;
     root.innerHTML = shell('Stacks', `
       ${pageHeader(all ? 'Stacks — tous les nœuds' : 'Stacks')}
       ${all ? pickNodeGuardHtml() : ''}
@@ -4825,6 +5074,7 @@ CMD ["sh"]
         ${all ? '' : `<a class="btn btn-info btn-create" href="#stacks/new" title="Créer une stack">
           <span class="btn-ico">${ico('plus')}</span><span>Créer une stack</span>
         </a>`}
+        ${bulkDeleteBtnHtml()}
         <div class="spacer"></div>
         <span class="muted" style="font-size:12px">● vert = à jour · ● orange = mise à jour dispo · cache 24 h</span>
         <button type="button" class="btn btn-sm" id="stack-upd-refresh" title="Revérifier les images maintenant">Rafraîchir images</button>
@@ -4832,6 +5082,7 @@ CMD ["sh"]
       </div>
       <div class="table-wrap"><table class="data">
         <thead><tr>
+          ${bulkSelectTh(true)}
           ${all ? sortTh('Nœud', 'node', 'stacks') : ''}
           ${sortTh('Nom', 'name', 'stacks')}
           ${sortTh('État', 'state', 'stacks')}
@@ -4854,6 +5105,13 @@ CMD ["sh"]
         else if (act === 'restart') await Api.restartStack(id);
         else if (act === 'remove') await Api.deleteStack(id);
       }, { confirm: confirmMsg, reload: true });
+    });
+    bindBulkDelete({
+      enabled: true,
+      confirmOne: () => 'Supprimer cette stack et ses conteneurs ?',
+      confirmMany: (n) => `Supprimer ${n} stacks et leurs conteneurs ?`,
+      deleteOne: (id) => Api.deleteStack(id),
+      reload: () => viewStacks(),
     });
     document.getElementById('stack-upd-refresh')?.addEventListener('click', () => {
       root.querySelectorAll('[data-upd]').forEach((cell) => {
@@ -5266,6 +5524,14 @@ CMD ["sh"]
       }
       const pullImages = !!document.getElementById('stack-pull')?.checked;
       try {
+        const gate = await cveAdviseBeforeDeploy({ Compose: content }, errBox);
+        if (!gate.proceed) {
+          if (errBox) {
+            errBox.innerHTML = (errBox.innerHTML || '') + `<div class="info-box" style="margin-top:8px">Déploiement annulé.</div>`;
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+          return;
+        }
         if (isEdit) await Api.updateStack(existing.Id, content, Env, pullImages);
         else await Api.createStack(name, content, Env, pullImages);
         location.hash = '#stacks';
@@ -5316,8 +5582,19 @@ CMD ["sh"]
           <tbody><tr><td colspan="4" class="muted">Vérification des digests…</td></tr></tbody>
         </table>
       </div>
+      <div class="section-title">Planifications</div>
+      <div class="toolbar" style="margin-bottom:8px">
+        ${createBtn('add-schedule', 'Nouvelle planification')}
+      </div>
+      <div class="table-wrap" style="margin-bottom:1rem">
+        <table class="data" id="stack-sched-table">
+          <thead><tr><th>Nom</th><th>Action</th><th>Cron</th><th>Prochain</th><th>Dernier</th><th></th></tr></thead>
+          <tbody><tr><td colspan="6" class="muted">Chargement…</td></tr></tbody>
+        </table>
+      </div>
       <div class="section-title">Fichier Compose</div>
-      <pre class="compose-preview cm-s-wharf" id="compose-preview"></pre>`);
+      <pre class="compose-preview cm-s-wharf" id="compose-preview"></pre>
+      <div id="sched-modal"></div>`);
     const preview = document.getElementById('compose-preview');
     const composeText = file.StackFileContent || '';
     if (preview) {
@@ -5356,6 +5633,92 @@ CMD ["sh"]
         await viewStackDetail(id);
       }, { confirm: confirmMsg, minMs: 300 });
     });
+    const renderSchedules = async () => {
+      const tb = document.querySelector('#stack-sched-table tbody');
+      if (!tb) return;
+      try {
+        const res = await Api.schedules({ stackId: stack.Id });
+        const items = res.Items || [];
+        if (!items.length) {
+          tb.innerHTML = `<tr><td colspan="6" class="muted">Aucune planification</td></tr>`;
+          return;
+        }
+        tb.innerHTML = items.map((s) => `<tr>
+          <td>${esc(s.Name)}${s.Enabled ? '' : ' <span class="muted">(off)</span>'}</td>
+          <td class="mono">${esc(s.Action)}</td>
+          <td class="mono">${esc(s.Cron)}</td>
+          <td class="muted">${esc(fmtTs(s.NextRunAt))}</td>
+          <td class="muted">${esc(s.LastStatus || '—')} ${s.LastRunAt ? '· ' + fmtTs(s.LastRunAt) : ''}</td>
+          <td class="actions"><div class="quick-actions">
+            ${iconBtn({ runSched: s.Id, title: 'Exécuter maintenant', icon: 'start', success: true })}
+            ${iconBtn({ delSched: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+          </div></td>
+        </tr>`).join('');
+        tb.querySelectorAll('[data-run-sched]').forEach((btn) => {
+          onBusyClick(btn, async (el) => {
+            await Api.runSchedule(el.dataset.runSched);
+            await renderSchedules();
+          }, { minMs: 300 });
+        });
+        tb.querySelectorAll('[data-del-sched]').forEach((btn) => {
+          onBusyClick(btn, async (el) => {
+            await Api.deleteSchedule(el.dataset.delSched);
+            await renderSchedules();
+          }, { confirm: 'Supprimer cette planification ?', minMs: 250 });
+        });
+      } catch (err) {
+        tb.innerHTML = `<tr><td colspan="6" class="error-box">${esc(err.message)}</td></tr>`;
+      }
+    };
+    document.getElementById('add-schedule').onclick = () => {
+      const slot = document.getElementById('sched-modal');
+      slot.innerHTML = `
+        <div class="modal-backdrop">
+          <div class="modal modal-form" style="max-width:480px">
+            <h3>Planifier start / stop / restart</h3>
+            <div id="sched-form-err"></div>
+            <div class="form-group">
+              <label class="field-label">Nom</label>
+              <input id="sched-name" placeholder="Stop nuit">
+            </div>
+            <div class="form-group">
+              <label class="field-label">Action</label>
+              <select id="sched-action">
+                <option value="stop">stop</option>
+                <option value="start">start</option>
+                <option value="restart">restart</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="field-label">Cron (UTC, 5 champs)</label>
+              <input id="sched-cron" placeholder="0 22 * * *" value="0 22 * * *">
+              <p class="field-hint muted">Ex. <code>0 22 * * *</code> = tous les jours à 22:00 UTC</p>
+            </div>
+            <div class="actions-bar">
+              <button class="btn btn-primary" id="save-sched">Créer</button>
+              <button class="btn" id="cancel-sched" style="margin-left:8px">Annuler</button>
+            </div>
+          </div>
+        </div>`;
+      document.getElementById('cancel-sched').onclick = () => { slot.innerHTML = ''; };
+      onBusyClick(document.getElementById('save-sched'), async () => {
+        const errBox = document.getElementById('sched-form-err');
+        errBox.innerHTML = '';
+        try {
+          await Api.createSchedule({
+            StackId: stack.Id,
+            Name: document.getElementById('sched-name').value.trim(),
+            Action: document.getElementById('sched-action').value,
+            Cron: document.getElementById('sched-cron').value.trim(),
+          });
+          slot.innerHTML = '';
+          await renderSchedules();
+        } catch (err) {
+          errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+        }
+      }, { disableSiblings: false, minMs: 250 });
+    };
+    renderSchedules();
     try {
       const upd = await Api.stackUpdate(id);
       const sum = document.getElementById('stack-upd-summary');
@@ -5388,9 +5751,14 @@ CMD ["sh"]
       state.publicUrl = s.PublicURL || s.HostURL || '';
       if (s.MetricsChartHours != null) state.metricsChartHours = Number(s.MetricsChartHours) || 24;
       if (s.MetricsRetentionDays != null) state.metricsRetentionDays = Number(s.MetricsRetentionDays) || 90;
+      if (s.TrivyEnabled != null) state.trivyEnabled = !!s.TrivyEnabled;
     } catch (_) {
       state.publicUrl = '';
     }
+  }
+
+  function trivyOn() {
+    return state.trivyEnabled !== false;
   }
 
   /** Minimal Markdown → HTML (headers, lists, tables, code, links). */
@@ -5545,7 +5913,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.5.0', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=2.0.0', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -5567,7 +5935,7 @@ CMD ["sh"]
 
   function registryImageRef(reg, repo, tag) {
     const t = tag || 'latest';
-    if ((reg?.Type || '') === 'hub') return `${repo}:${t}`;
+    if (registryKind(reg) === 'hub') return `${repo}:${t}`;
     return `${registryHost(reg)}/${repo}:${t}`;
   }
 
@@ -5584,7 +5952,7 @@ CMD ["sh"]
     const isEdit = !!(existing && existing.Id);
     closeAppModal();
     const host = modalHost();
-    const type = existing?.Type === 'hub' ? 'hub' : 'v2';
+    const type = registryKind(existing) === 'hub' ? 'hub' : 'v2';
     host.innerHTML = `
       <div class="modal-backdrop">
         <div class="modal modal-form" role="dialog" aria-modal="true">
@@ -5642,7 +6010,7 @@ CMD ["sh"]
       const hub = typeSel.value === 'hub';
       urlWrap.hidden = hub;
       if (hub) urlInput.value = 'https://docker.io';
-      else if (urlInput.value === 'https://docker.io') urlInput.value = existing?.URL && existing.Type !== 'hub' ? existing.URL : '';
+      else if (urlInput.value === 'https://docker.io') urlInput.value = existing?.URL && registryKind(existing) !== 'hub' ? existing.URL : '';
     };
     typeSel.addEventListener('change', syncType);
     syncType();
@@ -5680,8 +6048,9 @@ CMD ["sh"]
   async function viewRegistries() {
     const list = await Api.registries();
     const rows = (list || []).map((r) => {
-      const search = `${r.Name} ${r.URL} ${r.Type} ${r.Username || ''}`.toLowerCase();
-      const typeLabel = r.Type === 'hub' ? 'Docker Hub' : 'Registry V2';
+      const kind = registryKind(r);
+      const search = `${r.Name} ${r.URL} ${kind} ${r.Username || ''}`.toLowerCase();
+      const typeLabel = kind === 'hub' ? 'Docker Hub' : 'Registry V2';
       return `<tr data-search="${esc(search)}">
         <td><a href="#registries/${r.Id}">${esc(r.Name)}</a></td>
         <td class="mono">${esc(r.URL)}</td>
@@ -5696,6 +6065,7 @@ CMD ["sh"]
     }).join('');
     root.innerHTML = shell('Registres', `
       ${pageHeader('Registres')}
+      ${settingsSubnav('registries')}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des registres…" value="${esc(state.filters.registries || '')}">
         ${createBtn('create-registry', 'Ajouter un registre')}
@@ -5730,18 +6100,19 @@ CMD ["sh"]
 
     root.innerHTML = shell(`Registre · ${reg.Name}`, `
       ${pageHeader(reg.Name, false)}
+      ${settingsSubnav('registries')}
       <div class="toolbar">
         ${iconBtn({ tag: 'a', href: '#registries', title: 'Retour', icon: 'back' })}
         ${iconBtn({ elId: 'reg-edit', title: 'Modifier la config', icon: 'edit', info: true })}
         <div class="spacer"></div>
-        <span class="muted mono">${esc(reg.URL)} · ${reg.Type === 'hub' ? 'Docker Hub' : 'V2'}</span>
+        <span class="muted mono">${esc(reg.URL)} · ${registryKind(reg) === 'hub' ? 'Docker Hub' : 'V2'}</span>
       </div>
       <div id="reg-err"></div>
       <div class="reg-browse">
         <div class="reg-pane">
           <div class="reg-pane-head">
             <label class="field-label">Dépôts</label>
-            <input class="search" id="reg-q" type="search" placeholder="${reg.Type === 'hub' ? 'Rechercher sur Docker Hub…' : 'Filtrer le catalogue…'}" autocomplete="off">
+            <input class="search" id="reg-q" type="search" placeholder="${registryKind(reg) === 'hub' ? 'Rechercher sur Docker Hub…' : 'Filtrer le catalogue…'}" autocomplete="off">
           </div>
           <div class="reg-list" id="reg-repos"><div class="muted" style="padding:12px">Chargement…</div></div>
         </div>
@@ -5814,7 +6185,7 @@ CMD ["sh"]
         const data = await Api.registryRepos(id, q, 60);
         const repos = data?.Repositories || [];
         if (!repos.length) {
-          const hint = reg.Type === 'hub' && !q
+          const hint = registryKind(reg) === 'hub' && !q
             ? 'Saisissez un terme pour rechercher sur Docker Hub (ex. nginx), ou ajoutez des identifiants pour lister vos dépôts.'
             : (q
               ? 'Aucun dépôt ne correspond au filtre.'
@@ -5868,11 +6239,221 @@ CMD ["sh"]
     return `<span class="audit-action tone-${tone}">${esc(a)}</span>`;
   }
 
-  function nodeStatusLabel(status) {
-    const s = Number(status);
-    if (s === 0) return '<span class="badge badge-muted">Désactivé</span>';
+  function nodeStatusLabel(nodeOrStatus, disabled) {
+    if (nodeOrStatus && typeof nodeOrStatus === 'object') {
+      disabled = !!nodeOrStatus.Disabled;
+      nodeOrStatus = nodeOrStatus.Status;
+    }
+    if (disabled) return '<span class="badge badge-muted">Désactivé</span>';
+    const s = Number(nodeOrStatus);
     if (s === 1) return '<span class="badge badge-success">En ligne</span>';
     return '<span class="badge badge-warn">Hors ligne</span>';
+  }
+
+  function openEditNodeModal(node) {
+    if (!node?.Id) return;
+    closeAppModal();
+    const isAgent = node.Kind === 'agent';
+    const host = modalHost();
+    host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Modifier le nœud</h3>
+              <div class="modal-sub">${isAgent ? 'Agent distant' : 'Nœud local'} · #${esc(node.Id)}</div>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div id="edit-node-err"></div>
+          <div class="form-group">
+            <label class="field-label">Nom <span class="req">*</span></label>
+            <input id="n-name" value="${esc(node.NodeName || node.Name || '')}" placeholder="serveur-atelier" autocomplete="off" spellcheck="false">
+          </div>
+          ${isAgent ? `
+          <div class="form-group">
+            <label class="field-label">URL agent <span class="req">*</span></label>
+            <input id="n-agent-url" value="${esc(node.AgentURL || node.URL || '')}" placeholder="https://192.168.1.5:9001" autocomplete="off" spellcheck="false">
+            <p class="field-hint muted">Changer l’URL réinitialise l’empreinte TLS (re-pin au prochain ping).</p>
+          </div>
+          <label class="check-row"><input type="checkbox" id="n-clear-pin"> Forcer le reset de l’empreinte TLS</label>
+          ` : ''}
+          <div class="form-group">
+            <label class="field-label">URL publique (optionnel)</label>
+            <input id="n-public-url" value="${esc(node.PublicURL || '')}" placeholder="https://nas.lan" autocomplete="off" spellcheck="false">
+            <p class="field-hint muted">Utilisée pour les liens de ports publiés sur ce nœud.</p>
+          </div>
+          <div class="actions-bar">
+            <button type="button" class="btn btn-primary" id="n-save">Enregistrer</button>
+            <button type="button" class="btn" data-close-modal>Annuler</button>
+          </div>
+        </div>
+      </div>`;
+    bindAppModalChrome();
+    document.getElementById('n-name')?.focus();
+    onBusyClick(document.getElementById('n-save'), async () => {
+      const errBox = document.getElementById('edit-node-err');
+      errBox.innerHTML = '';
+      const Name = document.getElementById('n-name').value.trim();
+      const PublicURL = document.getElementById('n-public-url').value.trim();
+      if (!Name || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(Name)) {
+        errBox.innerHTML = `<div class="error-box">Nom invalide (lettres, chiffres, . _ - ; 1–64 caractères).</div>`;
+        return;
+      }
+      const payload = { NodeName: Name, Name, PublicURL };
+      if (isAgent) {
+        const AgentURL = document.getElementById('n-agent-url').value.trim();
+        if (!AgentURL || !/^https?:\/\//i.test(AgentURL)) {
+          errBox.innerHTML = `<div class="error-box">URL agent invalide (http:// ou https://).</div>`;
+          return;
+        }
+        payload.AgentURL = AgentURL.replace(/\/$/, '');
+        if (document.getElementById('n-clear-pin')?.checked) payload.ClearTlsPin = true;
+      }
+      try {
+        await Api.updateNode(node.Id, payload);
+        closeAppModal();
+        // Refresh endpoint switcher names
+        try {
+          const n = await Api.nodes();
+          state.endpoints = n?.Items || state.endpoints;
+        } catch (_) {}
+        await viewNodes();
+      } catch (err) {
+        errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      }
+    }, { disableSiblings: false, minMs: 250 });
+  }
+
+  function openAddNodeModal(tokenMeta) {
+    closeAppModal();
+    const draft = state._joinDraft || { host: '', name: '', port: '9001' };
+    const tokenBox = tokenMeta
+      ? `<div class="info-box" style="margin-bottom:12px">
+          Token actif : <code>${esc(tokenMeta.Hint)}</code>
+          · expire ${esc(formatAuditTime(tokenMeta.ExpiresAt))}
+          · utilisations ${esc(tokenMeta.UseCount)}${tokenMeta.MaxUses != null ? ' / ' + esc(tokenMeta.MaxUses) : ''}
+          <div class="muted" style="margin-top:6px">Le secret complet n’est affiché qu’à la génération / rotation.</div>
+        </div>`
+      : `<div class="info-box" style="margin-bottom:12px">Aucun token de jointure actif — générez-en un pour enrôler un nœud.</div>`;
+    const host = modalHost();
+    host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form modal-form-wide" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Ajouter un nœud</h3>
+              <div class="modal-sub">IP / hostname distant → commande d’install HTTPS</div>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <p class="muted" style="margin:0 0 12px">Indiquez l’IP (ou hostname) de la machine distante et le nom du nœud, puis générez le token : la commande d’install HTTPS sera prête à copier-coller.</p>
+          ${tokenBox}
+          <div id="join-form-err"></div>
+          <div class="form-row-2" style="align-items:end">
+            <div class="form-group" style="margin:0">
+              <label class="field-label" for="join-node-host">IP / hostname de la machine</label>
+              <input type="text" id="join-node-host" placeholder="192.168.1.5" value="${esc(draft.host)}" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="form-group" style="margin:0">
+              <label class="field-label" for="join-node-name">Nom du nœud</label>
+              <input type="text" id="join-node-name" placeholder="serveur-atelier" value="${esc(draft.name)}" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <div class="form-group" style="margin-top:12px;max-width:140px">
+            <label class="field-label" for="join-node-port">Port agent</label>
+            <input type="number" id="join-node-port" min="1" max="65535" value="${esc(draft.port || '9001')}">
+          </div>
+          <div id="join-token-out" style="margin-top:12px"></div>
+          <div class="actions-bar">
+            <button type="button" class="btn btn-primary" id="gen-join-token">Générer la commande</button>
+            <button type="button" class="btn" data-close-modal>Fermer</button>
+          </div>
+        </div>
+      </div>`;
+    bindAppModalChrome();
+
+    const readJoinDraft = () => {
+      const h = (document.getElementById('join-node-host')?.value || '').trim();
+      const name = (document.getElementById('join-node-name')?.value || '').trim();
+      const portRaw = (document.getElementById('join-node-port')?.value || '9001').trim();
+      const port = Number(portRaw) || 9001;
+      state._joinDraft = { host: h, name, port: String(port) };
+      return { host: h, name, port };
+    };
+
+    const validateJoinDraft = () => {
+      const errEl = document.getElementById('join-form-err');
+      const { host: h, name, port } = readJoinDraft();
+      let msg = '';
+      if (!h) msg = 'Indiquez l’IP ou le hostname de la machine distante.';
+      else if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name)) {
+        msg = 'Nom de nœud invalide (lettres, chiffres, . _ - ; 1–64 caractères).';
+      } else if (port < 1 || port > 65535) msg = 'Port agent invalide.';
+      if (errEl) {
+        errEl.innerHTML = msg ? `<div class="error-box">${esc(msg)}</div>` : '';
+      }
+      return msg ? null : { host: h, name, port };
+    };
+
+    const showToken = (data) => {
+      const out = document.getElementById('join-token-out');
+      if (!out || !data?.Token) return;
+      const cmd = data.InstallCommand || '';
+      const adv = data.AdvertiseURL || '';
+      out.innerHTML = `
+        <div class="info-box">
+          <div class="muted" style="margin-bottom:8px">
+            Nœud <strong>${esc(data.NodeName || '—')}</strong>
+            · advertise <code>${esc(adv)}</code>
+            · expire ${esc(formatAuditTime(data.ExpiresAt))}
+          </div>
+          <strong>Commande à exécuter sur la machine distante</strong>
+          <pre class="mono" id="join-cmd" style="white-space:pre-wrap;margin:8px 0;user-select:all">${esc(cmd)}</pre>
+          <div class="toolbar" style="gap:8px">
+            <button type="button" class="btn btn-sm btn-primary" id="copy-join-cmd">Copier la commande</button>
+            <button type="button" class="btn btn-sm" id="show-join-token">Afficher le token</button>
+          </div>
+          <pre class="mono" id="join-token-raw" style="display:none;white-space:pre-wrap;margin:8px 0 0">${esc(data.Token)}</pre>
+        </div>`;
+      document.getElementById('copy-join-cmd')?.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(cmd || data.Token);
+          const btn = document.getElementById('copy-join-cmd');
+          if (btn) {
+            const prev = btn.textContent;
+            btn.textContent = 'Copié';
+            setTimeout(() => { btn.textContent = prev; }, 1400);
+          }
+        } catch (_) {}
+      });
+      document.getElementById('show-join-token')?.addEventListener('click', () => {
+        const el = document.getElementById('join-token-raw');
+        if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
+      });
+    };
+
+    ['join-node-host', 'join-node-name', 'join-node-port'].forEach((id) => {
+      document.getElementById(id)?.addEventListener('change', readJoinDraft);
+      document.getElementById(id)?.addEventListener('input', readJoinDraft);
+    });
+    document.getElementById('join-node-host')?.focus();
+
+    onBusyClick(document.getElementById('gen-join-token'), async () => {
+      const draftOk = validateJoinDraft();
+      if (!draftOk) return 'cancelled';
+      const data = await Api.createJoinToken({
+        ttlSeconds: 86400,
+        nodeHost: draftOk.host,
+        nodeName: draftOk.name,
+        nodePort: draftOk.port,
+      });
+      showToken(data);
+      try {
+        const t = await Api.joinTokenMeta();
+        state._joinTokenMeta = t?.Active || null;
+      } catch (_) {}
+    }, { disableSiblings: false, minMs: 200 });
   }
 
   async function viewNodes() {
@@ -5883,6 +6464,7 @@ CMD ["sh"]
       const [n, t] = await Promise.all([Api.nodes(), Api.joinTokenMeta()]);
       nodes = n?.Items || [];
       tokenMeta = t?.Active || null;
+      state._joinTokenMeta = tokenMeta;
       state.endpoints = nodes;
     } catch (err) {
       errMsg = err.message || String(err);
@@ -5930,170 +6512,65 @@ CMD ["sh"]
       return `<span class="badge badge-compact ${cls}" title="${esc(pinTip)}">${label}${pin}</span>`;
     };
 
+    const byId = new Map(nodes.map((n) => [String(n.Id), n]));
     const rows = nodes.map((n) => {
       const isLocal = n.Kind !== 'agent';
-      const actions = isLocal
-        ? '<span class="muted">—</span>'
-        : `<div class="quick-actions">
+      const agentActions = isLocal
+        ? ''
+        : `
             <button type="button" class="btn btn-icon btn-sm" title="Ping" aria-label="Ping" data-ping="${esc(n.Id)}"><span class="btn-ico">${ico('activity')}</span></button>
-            ${Number(n.Status) === 0
+            ${n.Disabled
               ? `<button type="button" class="btn btn-icon btn-sm btn-success" title="Activer" aria-label="Activer" data-enable="${esc(n.Id)}"><span class="btn-ico">${ico('start')}</span></button>`
               : `<button type="button" class="btn btn-icon btn-sm" title="Désactiver" aria-label="Désactiver" data-disable="${esc(n.Id)}"><span class="btn-ico">${ico('stop')}</span></button>`}
-            <button type="button" class="btn btn-icon btn-sm btn-danger" title="Délier" aria-label="Délier" data-unlink="${esc(n.Id)}"><span class="btn-ico">${ico('remove')}</span></button>
+            <button type="button" class="btn btn-icon btn-sm btn-danger" title="Délier" aria-label="Délier" data-unlink="${esc(n.Id)}"><span class="btn-ico">${ico('remove')}</span></button>`;
+      const actions = `<div class="quick-actions">
+            <button type="button" class="btn btn-icon btn-sm btn-info" title="Modifier" aria-label="Modifier" data-edit-node="${esc(n.Id)}"><span class="btn-ico">${ico('edit')}</span></button>
+            <button type="button" class="btn btn-icon btn-sm" title="Accès (users / équipes)" aria-label="Accès" data-access-node="${esc(n.Id)}"><span class="btn-ico">${ico('users')}</span></button>
+            ${agentActions}
           </div>`;
       const url = n.AgentURL || n.URL || '—';
       return `<tr>
         <td><strong>${esc(n.NodeName || n.Name)}</strong><div class="muted mono">#${esc(n.Id)}</div></td>
         <td>${esc(n.Kind === 'agent' ? 'Agent' : 'Local')}</td>
         <td class="mono cell-clip" title="${esc(url)}">${esc(url)}</td>
-        <td>${nodeStatusLabel(n.Status)}</td>
+        <td>${nodeStatusLabel(n)}</td>
         <td>${tlsCell(n)}</td>
         <td class="muted mono" title="${esc(n.LastSeenAt ? formatAuditTime(n.LastSeenAt) : '')}">${esc(n.LastSeenAt ? shortSeen(n.LastSeenAt) : '—')}</td>
         <td class="actions">${actions}</td>
       </tr>`;
     }).join('');
 
-    const tokenBox = tokenMeta
-      ? `<div class="info-box">
-          Token actif : <code>${esc(tokenMeta.Hint)}</code>
-          · expire ${esc(formatAuditTime(tokenMeta.ExpiresAt))}
-          · utilisations ${esc(tokenMeta.UseCount)}${tokenMeta.MaxUses != null ? ' / ' + esc(tokenMeta.MaxUses) : ''}
-          <div class="muted" style="margin-top:6px">Le secret complet n’est affiché qu’à la génération / rotation.</div>
-        </div>`
-      : `<div class="info-box">Aucun token de jointure actif — générez-en un pour enrôler un nœud.</div>`;
-
-    const draft = state._joinDraft || { host: '', name: '', port: '9001' };
-
     root.innerHTML = shell('Nœuds', `
       ${pageHeader('Infrastructure multi-nœuds', false)}
+      ${settingsSubnav('nodes')}
       ${errMsg ? `<div class="error-box">${esc(errMsg)}</div>` : ''}
-      <div class="panel" style="margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">Ajouter un nœud</div>
-        <p class="muted">Indiquez l’IP (ou hostname) de la machine distante et le nom du nœud, puis générez le token : la commande d’install HTTPS sera prête à copier-coller.</p>
-        ${tokenBox}
-        <div class="form-row-2" style="margin-top:12px;align-items:end">
-          <div class="form-group" style="margin:0">
-            <label class="field-label" for="join-node-host">IP / hostname de la machine</label>
-            <input type="text" id="join-node-host" placeholder="192.168.1.5" value="${esc(draft.host)}" autocomplete="off" spellcheck="false">
-          </div>
-          <div class="form-group" style="margin:0">
-            <label class="field-label" for="join-node-name">Nom du nœud</label>
-            <input type="text" id="join-node-name" placeholder="serveur-atelier" value="${esc(draft.name)}" autocomplete="off" spellcheck="false">
-          </div>
-        </div>
-        <div class="form-group" style="margin-top:12px;max-width:140px">
-          <label class="field-label" for="join-node-port">Port agent</label>
-          <input type="number" id="join-node-port" min="1" max="65535" value="${esc(draft.port || '9001')}">
-        </div>
-        <div id="join-form-err" class="error-box" style="display:none;margin-top:10px"></div>
-        <div class="toolbar" style="margin-top:12px">
-          <button type="button" class="btn btn-primary" id="gen-join-token">Générer la commande</button>
-        </div>
-        <div id="join-token-out" style="margin-top:12px"></div>
+      <div class="toolbar">
+        ${createBtn('create-node', 'Ajouter un nœud')}
+        <div class="spacer"></div>
+        <span class="muted mono">${nodes.length} nœud${nodes.length > 1 ? 's' : ''}</span>
       </div>
-      <div class="panel-card">
-        <div class="panel-head"><h3>Nœuds enregistrés</h3></div>
-        <div class="table-wrap" style="border:0;box-shadow:none">
-          <table class="data table-nodes">
-            <thead><tr><th>Nom</th><th>Type</th><th>URL</th><th>Statut</th><th>TLS</th><th>Vu</th><th class="actions-col"></th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="7" class="empty">Aucun nœud</td></tr>`}</tbody>
-          </table>
-        </div>
+      <div class="table-wrap">
+        <table class="data table-nodes">
+          <thead><tr><th>Nom</th><th>Type</th><th>URL</th><th>Statut</th><th>TLS</th><th>Vu</th><th class="actions-col"></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="7" class="empty">Aucun nœud — cliquez « Ajouter un nœud » pour enrôler un agent.</td></tr>`}</tbody>
+        </table>
       </div>
-    `, { subtitle: 'Joindre, surveiller et délier les agents Docker' });
+    `, { subtitle: 'Joindre, accès users/équipes, agents Docker' });
 
-    const readJoinDraft = () => {
-      const host = (document.getElementById('join-node-host')?.value || '').trim();
-      const name = (document.getElementById('join-node-name')?.value || '').trim();
-      const portRaw = (document.getElementById('join-node-port')?.value || '9001').trim();
-      const port = Number(portRaw) || 9001;
-      state._joinDraft = { host, name, port: String(port) };
-      return { host, name, port };
-    };
+    document.getElementById('create-node').onclick = () => openAddNodeModal(tokenMeta || state._joinTokenMeta);
 
-    const validateJoinDraft = () => {
-      const errEl = document.getElementById('join-form-err');
-      const { host, name, port } = readJoinDraft();
-      let msg = '';
-      if (!host) msg = 'Indiquez l’IP ou le hostname de la machine distante.';
-      else if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(name)) {
-        msg = 'Nom de nœud invalide (lettres, chiffres, . _ - ; 1–64 caractères).';
-      } else if (port < 1 || port > 65535) msg = 'Port agent invalide.';
-      if (errEl) {
-        if (msg) {
-          errEl.style.display = '';
-          errEl.textContent = msg;
-        } else {
-          errEl.style.display = 'none';
-          errEl.textContent = '';
-        }
-      }
-      return msg ? null : { host, name, port };
-    };
-
-    const showToken = (data) => {
-      const out = document.getElementById('join-token-out');
-      if (!out || !data?.Token) return;
-      const cmd = data.InstallCommand || '';
-      const adv = data.AdvertiseURL || '';
-      out.innerHTML = `
-        <div class="info-box">
-          <div class="muted" style="margin-bottom:8px">
-            Nœud <strong>${esc(data.NodeName || '—')}</strong>
-            · advertise <code>${esc(adv)}</code>
-            · expire ${esc(formatAuditTime(data.ExpiresAt))}
-          </div>
-          <strong>Commande à exécuter sur la machine distante</strong>
-          <pre class="mono" id="join-cmd" style="white-space:pre-wrap;margin:8px 0;user-select:all">${esc(cmd)}</pre>
-          <div class="toolbar" style="gap:8px">
-            <button type="button" class="btn btn-sm btn-primary" id="copy-join-cmd">Copier la commande</button>
-            <button type="button" class="btn btn-sm" id="show-join-token">Afficher le token</button>
-          </div>
-          <pre class="mono" id="join-token-raw" style="display:none;white-space:pre-wrap;margin:8px 0 0">${esc(data.Token)}</pre>
-        </div>`;
-      document.getElementById('copy-join-cmd')?.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(cmd || data.Token);
-          const btn = document.getElementById('copy-join-cmd');
-          if (btn) {
-            const prev = btn.textContent;
-            btn.textContent = 'Copié';
-            setTimeout(() => { btn.textContent = prev; }, 1400);
-          }
-        } catch (_) {}
+    root.querySelectorAll('[data-edit-node]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const node = byId.get(String(btn.dataset.editNode));
+        if (node) openEditNodeModal(node);
       });
-      document.getElementById('show-join-token')?.addEventListener('click', () => {
-        const el = document.getElementById('join-token-raw');
-        if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
-      });
-    };
-
-    const afterToken = async (data) => {
-      state._lastJoinToken = data;
-      await viewNodes();
-    };
-
-    onBusyClick(document.getElementById('gen-join-token'), async () => {
-      const draftOk = validateJoinDraft();
-      if (!draftOk) return 'cancelled';
-      const data = await Api.createJoinToken({
-        ttlSeconds: 86400,
-        nodeHost: draftOk.host,
-        nodeName: draftOk.name,
-        nodePort: draftOk.port,
-      });
-      await afterToken(data);
-    }, { disableSiblings: false, minMs: 200 });
-
-    ['join-node-host', 'join-node-name', 'join-node-port'].forEach((id) => {
-      document.getElementById(id)?.addEventListener('change', readJoinDraft);
-      document.getElementById(id)?.addEventListener('input', readJoinDraft);
     });
-
-    if (state._lastJoinToken?.Token) {
-      showToken(state._lastJoinToken);
-      state._lastJoinToken = null;
-    }
+    root.querySelectorAll('[data-access-node]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const node = byId.get(String(btn.dataset.accessNode));
+        if (node) openNodeAccessModal(node);
+      });
+    });
 
     root.querySelectorAll('[data-ping]').forEach((btn) => {
       onBusyClick(btn, async (el) => {
@@ -6190,11 +6667,17 @@ CMD ["sh"]
 
   async function viewSettings() {
     await loadPublicUrl();
+    let settings = {};
+    try { settings = await Api.settings(); } catch (_) { settings = {}; }
+    state.publicUrl = settings.PublicURL || settings.HostURL || state.publicUrl || '';
+    if (settings.TrivyEnabled != null) state.trivyEnabled = !!settings.TrivyEnabled;
     const fallback = `${window.location.protocol}//${window.location.hostname}`;
     const chartHours = metricChartHours();
     const retentionDays = metricRetentionDays();
+    const isAdmin = Number(state.user?.Role) === 1;
     root.innerHTML = shell('Paramètres', `
       ${pageHeader('Paramètres', false)}
+      ${settingsSubnav('settings')}
       <div id="settings-err"></div>
       <div class="panel" style="max-width:720px; margin-bottom:16px">
         <div class="section-title" style="margin-top:0">Apparence</div>
@@ -6219,7 +6702,7 @@ CMD ["sh"]
           <code>https://nas.lan:8080</code>.
         </div>
       </div>
-      <div class="panel" style="max-width:720px">
+      <div class="panel" style="max-width:720px; margin-bottom:16px">
         <div class="section-title" style="margin-top:0">Historique &amp; courbes</div>
         <p class="muted" style="margin:0 0 14px">
           Relevés du tableau de bord stockés en SQLite. Les courbes affichent une fenêtre glissante ;
@@ -6235,11 +6718,28 @@ CMD ["sh"]
           <input id="metrics-retention-days" type="number" min="7" max="365" step="1" value="${esc(retentionDays)}" placeholder="90">
           <p class="field-hint muted">Conservation des relevés (7–365). Défaut 90 jours.</p>
         </div>
+      </div>
+      ${isAdmin ? `
+      <div class="panel" style="max-width:720px; margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">Scan CVE (Trivy)</div>
+        <p class="muted" style="margin:0 0 14px">
+          Active ou désactive totalement les scans de vulnérabilités : pastilles Images, scan manuel,
+          et avis non bloquant à la création de conteneurs / stacks.
+          ${settings.TrivyInstalled === false
+            ? '<br><span class="badge badge-warn">Binaire Trivy non détecté sur cette instance</span>'
+            : ''}
+        </p>
+        <label class="field-label" style="display:flex;align-items:center;gap:8px;margin-bottom:0">
+          <input type="checkbox" id="trivy-enabled" ${settings.TrivyEnabled !== false ? 'checked' : ''}>
+          Activer le scan CVE Trivy
+        </label>
+      </div>` : ''}
+      <div class="panel" style="max-width:720px">
         <div class="actions-bar">
           <button class="btn btn-primary" id="save-settings">Enregistrer</button>
         </div>
       </div>
-      ${Number(state.user?.Role) === 1 ? `
+      ${isAdmin ? `
       <div class="panel" style="max-width:720px; margin-top:16px">
         <div class="section-title" style="margin-top:0">Sauvegarde / reprise</div>
         <p class="muted" style="margin:0 0 14px">
@@ -6278,15 +6778,19 @@ CMD ["sh"]
         errBox.innerHTML = `<div class="error-box">Rétention : entre 7 et 365 jours.</div>`;
         return;
       }
+      const trivyEl = document.getElementById('trivy-enabled');
+      const payload = {
+        PublicURL: value,
+        MetricsChartHours: hours,
+        MetricsRetentionDays: days,
+      };
+      if (trivyEl) payload.TrivyEnabled = !!trivyEl.checked;
       try {
-        const saved = await Api.updateSettings({
-          PublicURL: value,
-          MetricsChartHours: hours,
-          MetricsRetentionDays: days,
-        });
+        const saved = await Api.updateSettings(payload);
         state.publicUrl = saved.PublicURL || '';
         state.metricsChartHours = Number(saved.MetricsChartHours) || hours;
         state.metricsRetentionDays = Number(saved.MetricsRetentionDays) || days;
+        if (saved.TrivyEnabled != null) state.trivyEnabled = !!saved.TrivyEnabled;
         metricCache.scope = '';
         metricCache.series = [];
         errBox.innerHTML = `<div class="info-box">Paramètres enregistrés.</div>`;
@@ -6316,8 +6820,575 @@ CMD ["sh"]
     if (sqliteBtn) onBusyClick(sqliteBtn, () => runBackup('sqlite'), { disableSiblings: false, minMs: 300 });
   }
 
+  async function viewSettingsAuth() {
+    if (Number(state.user?.Role) !== 1) {
+      location.hash = '#settings';
+      return;
+    }
+    let settings = {};
+    try { settings = await Api.settings(); } catch (_) { settings = {}; }
+    const ldap = settings.Ldap || {};
+    const method = Number(settings.AuthenticationMethod) === 2 || ldap.Enabled ? 'ldap' : 'local';
+    root.innerHTML = shell('Authentification', `
+      ${pageHeader('Authentification', false)}
+      ${settingsSubnav('settings/auth')}
+      <div id="settings-err"></div>
+      <div class="panel" style="max-width:720px; margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">Méthode</div>
+        <p class="muted" style="margin:0 0 14px">
+          Mode actuel : <strong>${method === 'ldap' ? 'Active Directory / LDAP' : 'Comptes locaux'}</strong>.
+          Les comptes locaux (admin bootstrap) restent utilisables même avec LDAP activé.
+        </p>
+        <label class="field-label" style="display:flex;align-items:center;gap:8px;margin-bottom:0">
+          <input type="checkbox" id="ldap-enabled" ${ldap.Enabled ? 'checked' : ''}> Activer l’authentification Active Directory / LDAP
+        </label>
+      </div>
+      <div class="panel" style="max-width:720px">
+        <div class="section-title" style="margin-top:0">Active Directory / LDAP</div>
+        <p class="muted" style="margin:0 0 14px">
+          Connectez WharfMaster à votre domaine. Mappez les groupes AD via le champ « Groupe AD » des équipes.
+        </p>
+        <div class="form-group">
+          <label class="field-label">Hôte</label>
+          <input id="ldap-host" value="${esc(ldap.Host || '')}" placeholder="dc.example.com">
+        </div>
+        <div class="form-group" style="display:flex;gap:12px;flex-wrap:wrap">
+          <div style="flex:1;min-width:120px">
+            <label class="field-label">Port</label>
+            <input id="ldap-port" type="number" value="${esc(ldap.Port || 389)}">
+          </div>
+          <label class="field-label" style="display:flex;align-items:center;gap:6px;margin-top:22px">
+            <input type="checkbox" id="ldap-tls" ${ldap.UseTls ? 'checked' : ''}> StartTLS
+          </label>
+          <label class="field-label" style="display:flex;align-items:center;gap:6px;margin-top:22px">
+            <input type="checkbox" id="ldap-ssl" ${ldap.UseSsl ? 'checked' : ''}> LDAPS
+          </label>
+        </div>
+        <div class="form-group">
+          <label class="field-label">Base DN</label>
+          <input id="ldap-base" value="${esc(ldap.BaseDn || '')}" placeholder="DC=example,DC=com">
+        </div>
+        <div class="form-group">
+          <label class="field-label">Bind DN (compte service)</label>
+          <input id="ldap-bind" value="${esc(ldap.BindDn || '')}" placeholder="CN=svc-wharf,OU=Service,DC=example,DC=com">
+        </div>
+        <div class="form-group">
+          <label class="field-label">Mot de passe bind ${ldap.BindPasswordSet ? '<span class="muted">(laisser vide pour conserver)</span>' : ''}</label>
+          <input id="ldap-pass" type="password" autocomplete="new-password" placeholder="${ldap.BindPasswordSet ? '••••••••' : ''}">
+        </div>
+        <div class="form-group">
+          <label class="field-label">Filtre utilisateur</label>
+          <input id="ldap-filter" value="${esc(ldap.UserFilter || '(sAMAccountName={username})')}">
+        </div>
+        <div class="form-group">
+          <label class="field-label">Attribut username</label>
+          <input id="ldap-attr" value="${esc(ldap.UsernameAttr || 'sAMAccountName')}">
+        </div>
+        <div class="actions-bar">
+          <button class="btn btn-primary" id="save-auth">Enregistrer</button>
+        </div>
+      </div>
+    `, { subtitle: 'Connexion locale et Active Directory' });
+
+    onBusyClick(document.getElementById('save-auth'), async () => {
+      const errBox = document.getElementById('settings-err');
+      errBox.innerHTML = '';
+      const ldapPass = document.getElementById('ldap-pass').value;
+      const payload = {
+        Ldap: {
+          Enabled: document.getElementById('ldap-enabled').checked,
+          Host: document.getElementById('ldap-host').value.trim(),
+          Port: parseInt(document.getElementById('ldap-port').value, 10) || 389,
+          UseTls: document.getElementById('ldap-tls').checked,
+          UseSsl: document.getElementById('ldap-ssl').checked,
+          BaseDn: document.getElementById('ldap-base').value.trim(),
+          BindDn: document.getElementById('ldap-bind').value.trim(),
+          UserFilter: document.getElementById('ldap-filter').value.trim(),
+          UsernameAttr: document.getElementById('ldap-attr').value.trim(),
+        },
+      };
+      if (ldapPass) payload.Ldap.BindPassword = ldapPass;
+      try {
+        await Api.updateSettings(payload);
+        errBox.innerHTML = `<div class="info-box">Paramètres d’authentification enregistrés.</div>`;
+      } catch (err) {
+        errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      }
+    }, { disableSiblings: false, minMs: 250 });
+  }
+
   function roleLabel(role) {
     return Number(role) === 1 ? 'Administrateur' : 'Utilisateur';
+  }
+
+  function aclRoleLabel(role) {
+    const map = { read: 'Lecture', operate: 'Opération', admin: 'Admin nœud' };
+    return map[role] || role || '—';
+  }
+
+  function cveBadge(summary) {
+    if (!summary || typeof summary !== 'object') return '<span class="muted">—</span>';
+    const c = Number(summary.CRITICAL || 0);
+    const h = Number(summary.HIGH || 0);
+    const m = Number(summary.MEDIUM || 0);
+    if (c > 0) return `<span class="badge badge-danger" title="Critical ${c}">C${c}</span>`;
+    if (h > 0) return `<span class="badge badge-warn" title="High ${h}">H${h}</span>`;
+    if (m > 0) return `<span class="badge badge-info" title="Medium ${m}">M${m}</span>`;
+    if (Number(summary.TOTAL || 0) > 0) return `<span class="badge">L${Number(summary.LOW || 0)}</span>`;
+    return `<span class="badge badge-success" title="Aucune CVE">OK</span>`;
+  }
+
+  /** Soft CVE gate before create/deploy — never throws; returns { proceed, html }. */
+  async function cveAdviseBeforeDeploy(payload, errBox) {
+    if (!trivyOn()) {
+      return { proceed: true, advise: null };
+    }
+    if (errBox) {
+      errBox.innerHTML = `<div class="info-box">Vérification CVE (non bloquante)…</div>`;
+    }
+    let advise = null;
+    try {
+      advise = await Api.adviseImages(Api.getEndpointId(), payload);
+    } catch (err) {
+      if (errBox) {
+        errBox.innerHTML = `<div class="info-box">Scan CVE indisponible (${esc(err.message || 'erreur')}) — déploiement non bloqué.</div>`;
+      }
+      return { proceed: true, advise: null };
+    }
+    const items = Array.isArray(advise?.Items) ? advise.Items : [];
+    if (!items.length) {
+      if (errBox) errBox.innerHTML = '';
+      return { proceed: true, advise };
+    }
+    const lines = items.map((it) => {
+      if (it.Status === 'skipped' || it.Warning) {
+        return `<li><code>${esc(it.ImageRef || '?')}</code> — <span class="muted">${esc(it.Warning || 'scan ignoré')}</span></li>`;
+      }
+      return `<li><code>${esc(it.ImageRef || '?')}</code> ${cveBadge(it.Summary)}${it.FromCache ? ' <span class="muted">(cache)</span>' : ''}</li>`;
+    });
+    const worst = String(advise?.Worst || 'ok');
+    const skippedOnly = items.every((it) => it.Status === 'skipped' || it.Warning);
+    let boxClass = 'info-box';
+    let title = 'Scan CVE';
+    if (worst === 'critical' || worst === 'high') {
+      boxClass = 'error-box';
+      title = 'CVE critiques / élevées détectées';
+    } else if (worst === 'findings') {
+      boxClass = 'info-box';
+      title = 'CVE détectées (sévérité moyenne ou basse)';
+    } else if (skippedOnly || worst === 'skipped') {
+      boxClass = 'info-box';
+      title = 'Scan CVE partiel ou indisponible';
+    } else {
+      title = 'Scan CVE : aucune vulnérabilité critique';
+    }
+    if (errBox) {
+      errBox.innerHTML = `<div class="${boxClass}"><strong>${esc(title)}</strong><ul style="margin:8px 0 0;padding-left:18px">${lines.join('')}</ul><p class="muted" style="margin:8px 0 0;font-size:12px">Le déploiement n’est jamais bloqué par Trivy.</p></div>`;
+    }
+    if (worst === 'critical' || worst === 'high') {
+      const ok = window.confirm(
+        'Des CVE Critical/High ont été trouvées sur une ou plusieurs images.\n\nContinuer le déploiement ?',
+      );
+      return { proceed: ok, advise };
+    }
+    return { proceed: true, advise };
+  }
+
+  function fmtTs(ts) {
+    if (!ts) return '—';
+    try {
+      return new Date(Number(ts) * 1000).toLocaleString();
+    } catch (_) {
+      return String(ts);
+    }
+  }
+
+  async function viewTeams() {
+    const [teamsRes, users] = await Promise.all([
+      Api.teams(true),
+      Api.users(),
+    ]);
+    const teams = Array.isArray(teamsRes) ? teamsRes : (teamsRes?.Items || []);
+    const teamRows = teams.map((t) => {
+      const members = (t.Members || []).map((m) => m.Username).join(', ') || '—';
+      const search = `${t.Name} ${t.Description || ''} ${t.AdGroupDn || ''} ${members}`.toLowerCase();
+      return `<tr data-search="${esc(search)}">
+        <td>${esc(t.Name)}</td>
+        <td class="muted">${esc(t.Description || '—')}</td>
+        <td class="mono muted" style="font-size:12px">${esc(t.AdGroupDn || '—')}</td>
+        <td>${esc(members)}</td>
+        <td class="actions"><div class="quick-actions">
+          ${iconBtn({ editTeam: t.Id, title: 'Éditer', icon: 'edit' })}
+          ${iconBtn({ delTeam: t.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+        </div></td>
+      </tr>`;
+    }).join('');
+
+    root.innerHTML = shell('Équipes', `
+      ${pageHeader('Équipes', false)}
+      ${settingsSubnav('teams')}
+      <div class="toolbar">
+        <input class="search" id="filter" type="search" placeholder="Rechercher des équipes…" value="${esc(state.filters.teams || '')}">
+        ${createBtn('add-team', 'Nouvelle équipe')}
+        <div class="spacer"></div>
+        <span class="muted mono" id="filter-count">${teams.length} / ${teams.length}</span>
+      </div>
+      <div id="teams-err"></div>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Nom</th><th>Description</th><th>Groupe AD</th><th>Membres</th><th></th></tr></thead>
+        <tbody>${teamRows || `<tr><td colspan="5" class="empty">Aucune équipe</td></tr>`}</tbody>
+      </table></div>
+      <div id="team-modal"></div>
+    `, { subtitle: 'Groupes et membres (droits sur les nœuds)' });
+
+    bindSearch('teams');
+    document.getElementById('add-team').onclick = () => showTeamModal(null, users);
+    root.querySelectorAll('[data-edit-team]').forEach((btn) => {
+      btn.onclick = async () => {
+        const t = await Api.team(btn.dataset.editTeam);
+        showTeamModal(t, users);
+      };
+    });
+    root.querySelectorAll('[data-del-team]').forEach((btn) => {
+      onBusyClick(btn, async (el) => {
+        await Api.deleteTeam(el.dataset.delTeam);
+      }, { confirm: 'Supprimer cette équipe ?', reload: true });
+    });
+  }
+
+  function showTeamModal(team, users) {
+    const slot = document.getElementById('team-modal');
+    let teamId = team ? Number(team.Id) : 0;
+    let members = [...(team?.Members || [])].map((m) => ({
+      Id: Number(m.Id),
+      Username: m.Username || String(m.Id),
+    }));
+    const allUsers = users || [];
+
+    const renderMembers = () => {
+      const tb = document.getElementById('team-member-rows');
+      if (!tb) return;
+      if (!members.length) {
+        tb.innerHTML = `<tr><td colspan="2" class="empty">Aucun membre — ajoutez un utilisateur ci-dessous.</td></tr>`;
+        return;
+      }
+      tb.innerHTML = members.map((m) => `<tr>
+        <td><strong>${esc(m.Username)}</strong></td>
+        <td class="actions"><div class="quick-actions">
+          <button type="button" class="btn btn-icon btn-sm btn-danger" title="Retirer" data-rm-member="${esc(m.Id)}">
+            <span class="btn-ico">${ico('remove')}</span>
+          </button>
+        </div></td>
+      </tr>`).join('');
+      tb.querySelectorAll('[data-rm-member]').forEach((btn) => {
+        onBusyClick(btn, async (el) => {
+          const uid = Number(el.dataset.rmMember);
+          const box = document.getElementById('team-form-err');
+          if (box) box.innerHTML = '';
+          try {
+            if (teamId) await Api.removeTeamMember(teamId, uid);
+            members = members.filter((m) => Number(m.Id) !== uid);
+            fillAddSelect();
+            renderMembers();
+          } catch (err) {
+            if (box) box.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+          }
+        }, { disableSiblings: false, minMs: 120 });
+      });
+    };
+
+    const fillAddSelect = () => {
+      const sel = document.getElementById('team-add-user');
+      if (!sel) return;
+      const q = (document.getElementById('team-user-search')?.value || '').trim().toLowerCase();
+      const taken = new Set(members.map((m) => Number(m.Id)));
+      const opts = allUsers
+        .filter((u) => !taken.has(Number(u.Id)))
+        .filter((u) => !q || String(u.Username || '').toLowerCase().includes(q))
+        .map((u) => `<option value="${esc(u.Id)}">${esc(u.Username)}</option>`);
+      sel.innerHTML = opts.length
+        ? opts.join('')
+        : '<option value="">Aucun utilisateur disponible</option>';
+    };
+
+    slot.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form modal-form-wide" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>${teamId ? 'Éditer l’équipe' : 'Nouvelle équipe'}</h3>
+              <div class="modal-sub">Membres et groupe AD</div>
+            </div>
+            <button type="button" class="icon-btn" id="cancel-team" title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div id="team-form-err"></div>
+          <div class="form-group">
+            <label class="field-label">Nom <span class="req">*</span></label>
+            <input id="team-name" value="${esc(team?.Name || '')}" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="field-label">Description</label>
+            <input id="team-desc" value="${esc(team?.Description || '')}" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="field-label">DN / CN groupe Active Directory</label>
+            <input id="team-ad" placeholder="CN=DockerOps,OU=Groups,DC=example,DC=com" value="${esc(team?.AdGroupDn || '')}" autocomplete="off">
+            <p class="field-hint muted">Optionnel : au login LDAP, les membres de ce groupe AD rejoignent l’équipe.</p>
+          </div>
+          <div class="section-title">Membres</div>
+          <div class="panel" style="margin-bottom:12px;padding:12px">
+            <div class="form-group" style="margin:0 0 10px">
+              <label class="field-label">Rechercher un utilisateur</label>
+              <input type="search" id="team-user-search" placeholder="Nom d’utilisateur…" autocomplete="off">
+            </div>
+            <div class="form-row-2" style="align-items:end;gap:10px">
+              <div class="form-group" style="margin:0;flex:1">
+                <label class="field-label">Utilisateur</label>
+                <select id="team-add-user" class="select-block"></select>
+              </div>
+              <button type="button" class="btn btn-primary" id="team-add-btn">Ajouter</button>
+            </div>
+            ${!teamId ? '<p class="field-hint muted" style="margin:10px 0 0">Enregistrez d’abord l’équipe, ou ajoutez après création — les ajouts sont appliqués immédiatement une fois l’équipe créée.</p>' : ''}
+          </div>
+          <div class="table-wrap" style="margin-bottom:14px">
+            <table class="data">
+              <thead><tr><th>Utilisateur</th><th></th></tr></thead>
+              <tbody id="team-member-rows"></tbody>
+            </table>
+          </div>
+          <div class="actions-bar">
+            <button class="btn btn-primary" id="save-team">${teamId ? 'Enregistrer' : 'Créer l’équipe'}</button>
+            <button class="btn" id="cancel-team-2" style="margin-left:8px">Fermer</button>
+          </div>
+        </div>
+      </div>`;
+
+    const close = () => { slot.innerHTML = ''; };
+    document.getElementById('cancel-team').onclick = async () => { close(); await viewTeams(); };
+    document.getElementById('cancel-team-2').onclick = async () => { close(); await viewTeams(); };
+
+    fillAddSelect();
+    renderMembers();
+    document.getElementById('team-user-search')?.addEventListener('input', fillAddSelect);
+
+    onBusyClick(document.getElementById('team-add-btn'), async () => {
+      const box = document.getElementById('team-form-err');
+      if (box) box.innerHTML = '';
+      const uid = Number(document.getElementById('team-add-user')?.value || 0);
+      if (!uid) {
+        if (box) box.innerHTML = `<div class="error-box">Choisissez un utilisateur.</div>`;
+        return;
+      }
+      const u = allUsers.find((x) => Number(x.Id) === uid);
+      try {
+        // Create team on the fly if needed so members can be added right away
+        if (!teamId) {
+          const Name = document.getElementById('team-name').value.trim();
+          if (!Name) {
+            if (box) box.innerHTML = `<div class="error-box">Indiquez un nom d’équipe avant d’ajouter des membres.</div>`;
+            return;
+          }
+          const created = await Api.createTeam({
+            Name,
+            Description: document.getElementById('team-desc').value.trim(),
+            AdGroupDn: document.getElementById('team-ad').value.trim(),
+          });
+          teamId = Number(created?.Id || 0);
+          if (!teamId) throw new Error('Création d’équipe échouée');
+          const title = slot.querySelector('h3');
+          if (title) title.textContent = 'Éditer l’équipe';
+          const saveBtn = document.getElementById('save-team');
+          if (saveBtn) saveBtn.textContent = 'Enregistrer';
+        }
+        await Api.addTeamMember(teamId, uid);
+        if (!members.some((m) => Number(m.Id) === uid)) {
+          members.push({ Id: uid, Username: u?.Username || String(uid) });
+        }
+        document.getElementById('team-user-search').value = '';
+        fillAddSelect();
+        renderMembers();
+      } catch (err) {
+        if (box) box.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      }
+    }, { disableSiblings: false, minMs: 150 });
+
+    onBusyClick(document.getElementById('save-team'), async () => {
+      const errBox = document.getElementById('team-form-err');
+      errBox.innerHTML = '';
+      const payload = {
+        Name: document.getElementById('team-name').value.trim(),
+        Description: document.getElementById('team-desc').value.trim(),
+        AdGroupDn: document.getElementById('team-ad').value.trim(),
+      };
+      if (!payload.Name) {
+        errBox.innerHTML = `<div class="error-box">Le nom est requis.</div>`;
+        return;
+      }
+      try {
+        if (teamId) {
+          await Api.updateTeam(teamId, payload);
+        } else {
+          await Api.createTeam(payload);
+        }
+        close();
+        await viewTeams();
+      } catch (err) {
+        errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      }
+    }, { disableSiblings: false, minMs: 250 });
+  }
+
+  async function openNodeAccessModal(node) {
+    if (!node?.Id) return;
+    closeAppModal();
+    const host = modalHost();
+    host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form modal-form-wide" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Accès · ${esc(node.NodeName || node.Name)}</h3>
+              <div class="modal-sub">Attribuer un utilisateur ou une équipe à ce nœud</div>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div id="node-acl-err"></div>
+          <p class="muted" style="margin:0 0 12px">
+            Rôles : <strong>lecture</strong> · <strong>opération</strong> (ses ressources) ·
+            <strong>admin nœud</strong> (tout sur le nœud). Les admins globaux passent toujours.
+          </p>
+          <div class="panel" style="margin-bottom:14px;padding:12px">
+            <div class="form-group" style="margin:0 0 10px">
+              <label class="field-label">Rechercher un utilisateur ou une équipe</label>
+              <input type="search" id="acl-search" placeholder="Nom d’utilisateur ou d’équipe…" autocomplete="off">
+            </div>
+            <div class="form-row-2" style="align-items:end;gap:10px">
+              <div class="form-group" style="margin:0;flex:2">
+                <label class="field-label">Sujet</label>
+                <select id="acl-subject" class="select-block"></select>
+              </div>
+              <div class="form-group" style="margin:0;flex:1">
+                <label class="field-label">Rôle</label>
+                <select id="acl-role" class="select-block">
+                  <option value="read">Lecture</option>
+                  <option value="operate" selected>Opération</option>
+                  <option value="admin">Admin nœud</option>
+                </select>
+              </div>
+              <button type="button" class="btn btn-primary" id="acl-add">Attribuer</button>
+            </div>
+          </div>
+          <div class="section-title" style="margin-top:0">Droits sur ce nœud</div>
+          <div class="table-wrap">
+            <table class="data">
+              <thead><tr><th>Type</th><th>Sujet</th><th>Rôle</th><th></th></tr></thead>
+              <tbody id="node-acl-rows"><tr><td colspan="4" class="muted">Chargement…</td></tr></tbody>
+            </table>
+          </div>
+          <div class="actions-bar" style="margin-top:14px">
+            <button type="button" class="btn" data-close-modal>Fermer</button>
+          </div>
+        </div>
+      </div>`;
+    bindAppModalChrome();
+
+    let users = [];
+    let teams = [];
+    let acls = [];
+
+    const errBox = () => document.getElementById('node-acl-err');
+
+    const fillSubjects = () => {
+      const q = (document.getElementById('acl-search')?.value || '').trim().toLowerCase();
+      const sel = document.getElementById('acl-subject');
+      if (!sel) return;
+      const opts = [];
+      users.forEach((u) => {
+        const label = String(u.Username || '');
+        if (q && !label.toLowerCase().includes(q)) return;
+        // Skip global admins — they already have full access
+        if (Number(u.Role) === 1) return;
+        opts.push(`<option value="user:${esc(u.Id)}">${esc(label)} · utilisateur</option>`);
+      });
+      teams.forEach((t) => {
+        const label = String(t.Name || '');
+        if (q && !label.toLowerCase().includes(q)) return;
+        opts.push(`<option value="team:${esc(t.Id)}">${esc(label)} · équipe</option>`);
+      });
+      sel.innerHTML = opts.length
+        ? opts.join('')
+        : '<option value="">Aucun résultat</option>';
+    };
+
+    const renderAcls = () => {
+      const tb = document.getElementById('node-acl-rows');
+      if (!tb) return;
+      if (!acls.length) {
+        tb.innerHTML = `<tr><td colspan="4" class="empty">Aucun droit spécifique — défaut opération pour les users non-admin.</td></tr>`;
+        return;
+      }
+      tb.innerHTML = acls.map((a) => {
+        const typeLabel = a.SubjectType === 'team' ? 'Équipe' : 'Utilisateur';
+        return `<tr>
+          <td>${esc(typeLabel)}</td>
+          <td><strong>${esc(a.SubjectName || ('#' + a.SubjectId))}</strong></td>
+          <td>${esc(aclRoleLabel(a.Role))}</td>
+          <td class="actions"><div class="quick-actions">
+            <button type="button" class="btn btn-icon btn-sm btn-danger" title="Retirer" data-del-acl="${esc(a.Id)}"><span class="btn-ico">${ico('remove')}</span></button>
+          </div></td>
+        </tr>`;
+      }).join('');
+      tb.querySelectorAll('[data-del-acl]').forEach((btn) => {
+        onBusyClick(btn, async (el) => {
+          if (!confirm('Retirer ce droit ?')) return 'cancelled';
+          await Api.deleteAcl(el.dataset.delAcl);
+          await refreshAcls();
+        }, { disableSiblings: false, minMs: 150 });
+      });
+    };
+
+    const refreshAcls = async () => {
+      const res = await Api.acls(node.Id);
+      acls = res?.Items || [];
+      renderAcls();
+    };
+
+    try {
+      const [u, tRes] = await Promise.all([Api.users(), Api.teams(true)]);
+      users = u || [];
+      teams = Array.isArray(tRes) ? tRes : (tRes?.Items || []);
+      fillSubjects();
+      await refreshAcls();
+    } catch (err) {
+      if (errBox()) errBox().innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+    }
+
+    document.getElementById('acl-search')?.addEventListener('input', fillSubjects);
+    document.getElementById('acl-search')?.focus();
+
+    onBusyClick(document.getElementById('acl-add'), async () => {
+      const box = errBox();
+      if (box) box.innerHTML = '';
+      const raw = document.getElementById('acl-subject')?.value || '';
+      const [stype, sid] = raw.split(':');
+      if (!stype || !sid) {
+        if (box) box.innerHTML = `<div class="error-box">Choisissez un utilisateur ou une équipe.</div>`;
+        return;
+      }
+      try {
+        await Api.upsertAcl({
+          EndpointId: Number(node.Id),
+          SubjectType: stype,
+          SubjectId: Number(sid),
+          Role: document.getElementById('acl-role').value,
+        });
+        document.getElementById('acl-search').value = '';
+        fillSubjects();
+        await refreshAcls();
+      } catch (err) {
+        if (box) box.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      }
+    }, { disableSiblings: false, minMs: 200 });
   }
 
   async function viewUsers() {
@@ -6325,13 +7396,15 @@ CMD ["sh"]
     const list = users || [];
     const rows = list.map((u) => {
       const isSelf = Number(u.Id) === Number(state.user?.Id);
-      const search = `${u.Id} ${u.Username} ${roleLabel(u.Role)}`.toLowerCase();
+      const src = u.AuthSource === 'ldap' ? 'AD/LDAP' : 'Local';
+      const search = `${u.Id} ${u.Username} ${roleLabel(u.Role)} ${src}`.toLowerCase();
       return `<tr data-search="${esc(search)}">
         <td>${esc(u.Id)}</td>
         <td>${esc(u.Username)}${isSelf ? ' <span class="muted">(vous)</span>' : ''}</td>
         <td>${esc(roleLabel(u.Role))}</td>
+        <td>${esc(src)}</td>
         <td class="actions"><div class="quick-actions">
-          ${iconBtn({ reset: u.Id, name: u.Username, title: 'Réinitialiser le mot de passe', icon: 'key' })}
+          ${u.AuthSource === 'ldap' ? '' : iconBtn({ reset: u.Id, name: u.Username, title: 'Réinitialiser le mot de passe', icon: 'key' })}
           ${isSelf ? '' : iconBtn({ del: u.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div></td>
       </tr>`;
@@ -6339,6 +7412,7 @@ CMD ["sh"]
 
     root.innerHTML = shell('Utilisateurs', `
       ${pageHeader('Gestion des utilisateurs', false)}
+      ${settingsSubnav('users')}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des utilisateurs…" value="${esc(state.filters.users || '')}">
         ${createBtn('add-user', 'Ajouter un utilisateur')}
@@ -6347,8 +7421,8 @@ CMD ["sh"]
       </div>
       <div id="users-err"></div>
       <div class="table-wrap"><table class="data">
-        <thead><tr><th>Id</th><th>Nom d'utilisateur</th><th>Rôle</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="4" class="empty">Aucun utilisateur</td></tr>`}</tbody>
+        <thead><tr><th>Id</th><th>Nom d'utilisateur</th><th>Rôle</th><th>Auth</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="empty">Aucun utilisateur</td></tr>`}</tbody>
       </table></div>
       <div id="user-modal"></div>
     `);
@@ -6572,8 +7646,22 @@ CMD ["sh"]
         }
         await viewNodes();
       }
-      else if (state.route === 'settings') await viewSettings();
-      else if (state.route === 'users') await viewUsers();
+      else if (state.route === 'settings' || state.route === 'settings/') await viewSettings();
+      else if (state.route === 'settings/auth') await viewSettingsAuth();
+      else if (state.route === 'users') {
+        if (Number(state.user?.Role) !== 1) {
+          location.hash = '#dashboard';
+          return;
+        }
+        await viewUsers();
+      }
+      else if (state.route === 'teams') {
+        if (Number(state.user?.Role) !== 1) {
+          location.hash = '#dashboard';
+          return;
+        }
+        await viewTeams();
+      }
       else if (state.route === 'registries') await viewRegistries();
       else if (state.route.startsWith('registries/')) await viewRegistryBrowse(state.route.split('/')[1]);
       else if (state.route === 'docs') await viewDocs();
@@ -6581,7 +7669,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.5.0</strong> — maj images stacks, pull forcé, tri des listes.</p>
+          <p class="muted">Version <strong>2.0.0</strong> — équipes, ACL nœuds, SSO AD, scheduler, scan CVE Trivy.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

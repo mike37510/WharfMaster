@@ -4,8 +4,10 @@ declare(strict_types=1);
 namespace App;
 
 use App\Access\DockerScope;
+use App\Access\EndpointAcl;
 use App\Access\Ownership;
 use App\Auth\Jwt;
+use App\Auth\LdapClient;
 use App\Docker\AgentComposeClient;
 use App\Docker\Client as DockerClient;
 use App\Docker\ImageBuilder;
@@ -13,8 +15,10 @@ use App\Docker\VolumeBrowser;
 use App\Http\Request;
 use App\Http\Response;
 use App\Registry\Client as RegistryClient;
+use App\Schedule\CronExpr;
 use App\Security\AgentTls;
 use App\Security\ComposePolicy;
+use App\Security\ImageScanner;
 use App\Security\PasswordPolicy;
 use App\Security\RateLimiter;
 use App\Security\SecretBox;
@@ -33,7 +37,11 @@ final class App
     private ImageBuilder $imageBuilder;
     private VolumeBrowser $volumeBrowser;
     private DockerScope $dockerScope;
+    private EndpointAcl $endpointAcl;
+    private ImageScanner $imageScanner;
+    private LdapClient $ldap;
     private RateLimiter $rateLimiter;
+    private SecretBox $secrets;
     /** @var array<string, mixed> */
     private array $config;
 
@@ -43,7 +51,8 @@ final class App
         $this->config = $config;
         $db = new Database($config['sqlite_path']);
         $db->migrate();
-        $this->repo = new Repositories($db->pdo(), SecretBox::fromConfig($config));
+        $this->secrets = SecretBox::fromConfig($config);
+        $this->repo = new Repositories($db->pdo(), $this->secrets);
         $this->jwt = new Jwt($config['jwt_secret'], (int) $config['jwt_ttl']);
         $this->docker = new DockerClient($config['docker_socket'], $config['docker_api_version']);
         $this->compose = new ComposeDeployer(
@@ -60,11 +69,18 @@ final class App
         );
         $this->volumeBrowser = new VolumeBrowser($this->docker);
         $this->dockerScope = new DockerScope($this->docker, $this->repo);
+        $this->endpointAcl = new EndpointAcl($this->repo);
+        $this->imageScanner = new ImageScanner(
+            (string) (getenv('TRIVY_BIN') ?: 'trivy'),
+            (string) $config['docker_socket'],
+        );
+        $this->ldap = new LdapClient();
         $rateDir = dirname((string) $config['sqlite_path']) . '/rate_limit';
         $this->rateLimiter = new RateLimiter($rateDir, 8, 900);
         $this->repo->ensureLocalEndpoint($config['docker_socket']);
         $this->repo->ensureDefaultHubRegistry();
         $this->repo->migrateRegistryPasswords();
+        $this->ensureSchedulerApiKey();
     }
 
     public function handle(Request $request): Response
@@ -188,8 +204,94 @@ final class App
             return $this->createToken((int) $m[1], $request, $user);
         }
 
+        // --- Teams ---
+        if ($path === '/api/teams' && $method === 'GET') {
+            $detail = strtolower((string) ($request->query('detail') ?? $request->query('expand') ?? ''));
+            if (in_array($detail, ['1', 'true', 'yes'], true)) {
+                return $this->listTeamsDetailed($user);
+            }
+            return $this->listTeams($user);
+        }
+        if ($path === '/api/teams' && $method === 'POST') {
+            return $this->createTeam($request, $user);
+        }
+        if (preg_match('#^/api/teams/(\d+)$#', $path, $m)) {
+            $tid = (int) $m[1];
+            if ($method === 'GET') {
+                return $this->getTeam($tid, $user);
+            }
+            if ($method === 'PUT') {
+                return $this->updateTeam($tid, $request, $user);
+            }
+            if ($method === 'DELETE') {
+                return $this->deleteTeam($tid, $request, $user);
+            }
+        }
+        if (preg_match('#^/api/teams/(\d+)/members$#', $path, $m) && $method === 'POST') {
+            return $this->addTeamMember((int) $m[1], $request, $user);
+        }
+        if (preg_match('#^/api/teams/(\d+)/members/(\d+)$#', $path, $m) && $method === 'DELETE') {
+            return $this->removeTeamMember((int) $m[1], (int) $m[2], $request, $user);
+        }
+
+        // --- Endpoint ACLs ---
+        if ($path === '/api/acls' && $method === 'GET') {
+            return $this->listAcls($request, $user);
+        }
+        if ($path === '/api/acls' && $method === 'POST') {
+            return $this->upsertAcl($request, $user);
+        }
+        if (preg_match('#^/api/acls/(\d+)$#', $path, $m) && $method === 'DELETE') {
+            return $this->deleteAcl((int) $m[1], $request, $user);
+        }
+
+        // --- Schedules ---
+        if ($path === '/api/schedules' && $method === 'GET') {
+            return $this->listSchedules($request, $user);
+        }
+        if ($path === '/api/schedules' && $method === 'POST') {
+            return $this->createSchedule($request, $user);
+        }
+        if ($path === '/api/schedules/run-due' && $method === 'POST') {
+            return $this->runDueSchedules($request, $user);
+        }
+        if (preg_match('#^/api/schedules/(\d+)$#', $path, $m)) {
+            $sid = (int) $m[1];
+            if ($method === 'GET') {
+                return $this->getScheduleApi($sid, $user);
+            }
+            if ($method === 'PUT') {
+                return $this->updateSchedule($sid, $request, $user);
+            }
+            if ($method === 'DELETE') {
+                return $this->deleteSchedule($sid, $request, $user);
+            }
+        }
+        if (preg_match('#^/api/schedules/(\d+)/run$#', $path, $m) && $method === 'POST') {
+            return $this->runScheduleNow((int) $m[1], $request, $user);
+        }
+
+        // --- Image CVE scans ---
+        if (preg_match('#^/api/endpoints/(\d+)/images/scans$#', $path, $m) && $method === 'GET') {
+            return $this->listImageScans((int) $m[1], $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/images/advise$#', $path, $m) && $method === 'POST') {
+            return $this->adviseImages((int) $m[1], $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/images/scan$#', $path, $m) && $method === 'POST') {
+            return $this->scanImage((int) $m[1], $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/images/scan$#', $path, $m) && $method === 'GET') {
+            return $this->getImageScan((int) $m[1], $request, $user);
+        }
+
         if ($path === '/api/endpoints' && $method === 'GET') {
-            return Response::json(array_map([$this, 'formatEndpoint'], $this->repo->listEndpoints()));
+            $eps = $this->endpointAcl->filterEndpoints($user, $this->repo->listEndpoints());
+            return Response::json(array_map(function (array $ep) use ($user): array {
+                $fmt = $this->formatEndpoint($ep);
+                $fmt['AccessRole'] = $this->endpointAcl->roleFor($user, (int) $ep['id']);
+                return $fmt;
+            }, $eps));
         }
 
         if ($path === '/api/endpoints' && $method === 'POST') {
@@ -201,7 +303,36 @@ final class App
             if (!$ep) {
                 return Response::error('Environnement introuvable', 404);
             }
-            return Response::json($this->formatEndpoint($ep));
+            if (!$this->endpointAcl->can($user, (int) $ep['id'], EndpointAcl::READ)) {
+                return Response::error('Accès refusé à ce nœud', 403);
+            }
+            $fmt = $this->formatEndpoint($ep);
+            $fmt['AccessRole'] = $this->endpointAcl->roleFor($user, (int) $ep['id']);
+            return Response::json($fmt);
+        }
+
+        // Portainer CE: update endpoint access policies
+        if (preg_match('#^/api/endpoints/(\d+)$#', $path, $m) && $method === 'PUT') {
+            return $this->updateEndpointPortainer((int) $m[1], $request, $user);
+        }
+
+        // Portainer CE team memberships
+        if ($path === '/api/team_memberships' && $method === 'GET') {
+            return $this->listTeamMembershipsPortainer($user);
+        }
+        if ($path === '/api/team_memberships' && $method === 'POST') {
+            return $this->createTeamMembershipPortainer($request, $user);
+        }
+        if (preg_match('#^/api/team_memberships/(\d+)$#', $path, $m) && $method === 'DELETE') {
+            return $this->deleteTeamMembershipPortainer((int) $m[1], $request, $user);
+        }
+        if (preg_match('#^/api/teams/(\d+)/memberships$#', $path, $m) && $method === 'GET') {
+            return $this->listTeamMembershipsForTeam((int) $m[1], $user);
+        }
+
+        // Portainer CE: GET single user
+        if (preg_match('#^/api/users/(\d+)$#', $path, $m) && $method === 'GET') {
+            return $this->getUserPortainer((int) $m[1], $user);
         }
 
         // --- Multinode / agents (admin) ---
@@ -225,6 +356,9 @@ final class App
         }
         if (preg_match('#^/api/nodes/(\d+)/ping$#', $path, $m) && $method === 'POST') {
             return $this->pingNode((int) $m[1], $user);
+        }
+        if (preg_match('#^/api/nodes/(\d+)$#', $path, $m) && $method === 'PUT') {
+            return $this->updateNode((int) $m[1], $request, $user);
         }
         if (preg_match('#^/api/nodes/(\d+)$#', $path, $m) && $method === 'DELETE') {
             return $this->unlinkNode((int) $m[1], $request, $user);
@@ -441,10 +575,12 @@ final class App
             if (!$row) {
                 return Response::error('Clé API invalide', 401);
             }
+            $dbUser = $this->repo->findUserById((int) $row['user_id']);
             return [
                 'id' => (int) $row['user_id'],
                 'username' => (string) $row['username'],
                 'role' => (int) $row['role'],
+                'auth_source' => (string) ($dbUser['auth_source'] ?? 'local'),
             ];
         }
 
@@ -465,6 +601,7 @@ final class App
             'id' => (int) $dbUser['id'],
             'username' => (string) $dbUser['username'],
             'role' => (int) $dbUser['role'],
+            'auth_source' => (string) ($dbUser['auth_source'] ?? 'local'),
         ];
     }
 
@@ -504,6 +641,7 @@ final class App
         }
         $user = $this->repo->createAdmin($username, $password);
         $this->rateLimiter->clear($bucket);
+        $this->ensureSchedulerApiKey();
         $this->audit(
             ['id' => (int) $user['id'], 'username' => (string) $user['username'], 'role' => (int) $user['role']],
             'auth.admin_init',
@@ -539,8 +677,8 @@ final class App
         $body = $request->json();
         $username = (string) ($body['Username'] ?? $body['username'] ?? '');
         $password = (string) ($body['Password'] ?? $body['password'] ?? '');
-        $user = $this->repo->findUserByUsername($username);
-        if (!$user || !password_verify($password, $user['password_hash'])) {
+        $user = $this->tryAuthenticateUser($username, $password, $request);
+        if (!$user) {
             $this->rateLimiter->hit($bucket);
             usleep(random_int(80_000, 180_000));
             $this->audit(
@@ -563,8 +701,58 @@ final class App
             'auth.login.ok',
             'Connexion de « ' . $user['username'] . ' »',
             $request,
+            ['authSource' => (string) ($user['auth_source'] ?? 'local')],
         );
         return Response::json(['jwt' => $token]);
+    }
+
+    /**
+     * Local password first; if LDAP enabled, try AD then fall back to local.
+     * @return array<string, mixed>|null
+     */
+    private function tryAuthenticateUser(string $username, string $password, Request $request): ?array
+    {
+        $ldapCfg = $this->ldapConfig();
+        $ldapEnabled = !empty($ldapCfg['enabled']);
+
+        if ($ldapEnabled) {
+            try {
+                $ldapUser = $this->ldap->authenticate($ldapCfg, $username, $password);
+                if ($ldapUser !== null) {
+                    $existing = $this->repo->findUserByUsername($ldapUser['username'])
+                        ?? $this->repo->findUserByUsername($username);
+                    if ($existing && (string) ($existing['auth_source'] ?? 'local') === 'local'
+                        && Ownership::isGlobalAdmin($existing)) {
+                        // Never hijack the bootstrap admin via LDAP same name
+                        return password_verify($password, $existing['password_hash']) ? $existing : null;
+                    }
+                    if (!$existing) {
+                        $existing = $this->repo->createLdapUser($ldapUser['username'], 2);
+                    }
+                    $teams = $this->repo->listTeams();
+                    $matched = $this->ldap->matchTeamIds($ldapUser['groups'], $teams);
+                    $this->repo->syncUserTeamMemberships((int) $existing['id'], $matched);
+                    $existing['auth_source'] = 'ldap';
+                    return $existing;
+                }
+            } catch (\Throwable $e) {
+                error_log('[WharfMaster] LDAP auth error: ' . $e->getMessage());
+                // fall through to local
+            }
+        }
+
+        $user = $this->repo->findUserByUsername($username);
+        if (!$user) {
+            return null;
+        }
+        if ((string) ($user['auth_source'] ?? 'local') === 'ldap') {
+            // LDAP-only account and LDAP failed above
+            return null;
+        }
+        if (!password_verify($password, $user['password_hash'])) {
+            return null;
+        }
+        return $user;
     }
 
     /** @param array<string, mixed> $user */
@@ -608,6 +796,16 @@ final class App
         if ($deny = $this->assertEndpointUsable($ep)) {
             return $deny;
         }
+        $role = $this->endpointAcl->roleFor($user, $endpointId);
+        if ($role === EndpointAcl::NONE) {
+            return Response::error('Accès refusé à ce nœud', 403);
+        }
+        $min = in_array(strtoupper($request->method), ['GET', 'HEAD'], true)
+            ? EndpointAcl::READ
+            : EndpointAcl::OPERATE;
+        if (!$this->endpointAcl->can($user, $endpointId, $min)) {
+            return Response::error('Permissions insuffisantes sur ce nœud', 403);
+        }
 
         $dockerPath = $dockerPath === '' ? '/' : $dockerPath;
         $forwardHeaders = [];
@@ -616,14 +814,16 @@ final class App
             $forwardHeaders['Content-Type'] = $contentType;
         }
 
+        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
         $scope = $this->scopeForEndpoint($ep);
         $response = $scope->handle(
-            $user,
+            $scopedUser,
             $request->method,
             $dockerPath,
             $request->rawBody !== '' ? $request->rawBody : null,
             $forwardHeaders,
             $request->query,
+            $role,
         );
         if ($response->status < 400) {
             $this->repo->updateEndpointLastSeen((int) $ep['id'], 1);
@@ -632,18 +832,36 @@ final class App
         return $response;
     }
 
-    /** @param array{id:int,username:string,role:int} $user */
-    private function containerLogs(int $endpointId, string $containerId, Request $request, array $user): Response
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @return array{0:?array,1:?Response} endpoint row or error
+     */
+    private function requireEndpointAccess(int $endpointId, array $user, string $minRole): array
     {
         $ep = $this->repo->getEndpoint($endpointId);
         if (!$ep) {
-            return Response::error('Environnement introuvable', 404);
+            return [null, Response::error('Environnement introuvable', 404)];
         }
         if ($deny = $this->assertEndpointUsable($ep)) {
+            return [null, $deny];
+        }
+        if (!$this->endpointAcl->can($user, $endpointId, $minRole)) {
+            return [null, Response::error('Accès refusé à ce nœud', 403)];
+        }
+        return [$ep, null];
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function containerLogs(int $endpointId, string $containerId, Request $request, array $user): Response
+    {
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::READ);
+        if ($deny) {
             return $deny;
         }
+        $role = $this->endpointAcl->roleFor($user, $endpointId);
+        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
         $scope = $this->scopeForEndpoint($ep);
-        if (!$scope->canAccessContainer($containerId, $user)) {
+        if (!$scope->canAccessContainer($containerId, $scopedUser)) {
             return Response::error('Accès refusé à ce conteneur', 403);
         }
 
@@ -677,15 +895,14 @@ final class App
     /** @param array{id:int,username:string,role:int} $user */
     private function containerExec(int $endpointId, string $containerId, Request $request, array $user): Response
     {
-        $ep = $this->repo->getEndpoint($endpointId);
-        if (!$ep) {
-            return Response::error('Environnement introuvable', 404);
-        }
-        if ($deny = $this->assertEndpointUsable($ep)) {
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::OPERATE);
+        if ($deny) {
             return $deny;
         }
+        $role = $this->endpointAcl->roleFor($user, $endpointId);
+        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
         $scope = $this->scopeForEndpoint($ep);
-        if (!$scope->canAccessContainer($containerId, $user)) {
+        if (!$scope->canAccessContainer($containerId, $scopedUser)) {
             return Response::error('Accès refusé à ce conteneur', 403);
         }
         $docker = $this->dockerForEndpoint($ep);
@@ -749,12 +966,28 @@ final class App
         $filter = null;
         if ($endpointId !== null && (int) $endpointId > 0) {
             $filter = (int) $endpointId;
+            if (!$this->endpointAcl->can($user, $filter, EndpointAcl::READ)) {
+                return Response::error('Accès refusé à ce nœud', 403);
+            }
         }
+        $isEpAdmin = $filter !== null && $this->endpointAcl->can($user, $filter, EndpointAcl::ADMIN);
         $rows = $this->repo->listStacksForUser(
             Ownership::username($user),
-            Ownership::isAdmin($user),
+            Ownership::isGlobalAdmin($user) || $isEpAdmin,
             $filter,
         );
+        if ($filter === null && !Ownership::isGlobalAdmin($user)) {
+            $rows = array_values(array_filter($rows, function (array $s) use ($user): bool {
+                $eid = (int) ($s['endpoint_id'] ?? 0);
+                if (!$this->endpointAcl->can($user, $eid, EndpointAcl::READ)) {
+                    return false;
+                }
+                if ($this->endpointAcl->can($user, $eid, EndpointAcl::ADMIN)) {
+                    return true;
+                }
+                return strcasecmp((string) ($s['created_by'] ?? ''), Ownership::username($user)) === 0;
+            }));
+        }
         return Response::json(array_map([$this, 'formatStack'], $rows));
     }
 
@@ -905,6 +1138,9 @@ final class App
         if (!$ep) {
             return Response::error('Environnement introuvable', 404);
         }
+        if (!$this->endpointAcl->can($user, $endpointId, EndpointAcl::OPERATE)) {
+            return Response::error('Permissions insuffisantes sur ce nœud', 403);
+        }
         $isAgent = ($ep['kind'] ?? 'local') === 'agent';
         $body = $request->json();
         $name = trim((string) ($body['Name'] ?? $body['name'] ?? ''));
@@ -988,6 +1224,9 @@ final class App
         if (!$stack || !$this->canAccessStack($stack, $user)) {
             return Response::error('Stack introuvable', 404);
         }
+        if (!$this->canOperateStack($stack, $user)) {
+            return Response::error('Permissions insuffisantes (lecture seule)', 403);
+        }
         $ep = $this->repo->getEndpoint((int) $stack['endpoint_id']);
         if (!$ep) {
             return Response::error('Environnement introuvable', 404);
@@ -1052,6 +1291,9 @@ final class App
         if (!$stack || !$this->canAccessStack($stack, $user)) {
             return Response::error('Stack introuvable', 404);
         }
+        if (!$this->canOperateStack($stack, $user)) {
+            return Response::error('Permissions insuffisantes (lecture seule)', 403);
+        }
         $ep = $this->repo->getEndpoint((int) $stack['endpoint_id']);
         $env = json_decode($stack['env_json'], true);
         if (!is_array($env)) {
@@ -1089,6 +1331,9 @@ final class App
         $stack = $this->repo->getStack($id);
         if (!$stack || !$this->canAccessStack($stack, $user)) {
             return Response::error('Stack introuvable', 404);
+        }
+        if (!$this->canOperateStack($stack, $user)) {
+            return Response::error('Permissions insuffisantes (lecture seule)', 403);
         }
         if (!in_array($action, ['start', 'stop', 'restart'], true)) {
             return Response::error('Action invalide', 400);
@@ -1167,18 +1412,17 @@ final class App
      * @param array{id:int,username:string,role:int} $user
      * @return array{0:?VolumeBrowser,1:?Response}
      */
-    private function volumeBrowserForEndpoint(int $endpointId, string $name, array $user): array
+    private function volumeBrowserForEndpoint(int $endpointId, string $name, array $user, string $minRole = EndpointAcl::READ): array
     {
-        $ep = $this->repo->getEndpoint($endpointId);
-        if (!$ep) {
-            return [null, Response::error('Environnement introuvable', 404)];
-        }
-        if ($deny = $this->assertEndpointUsable($ep)) {
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, $minRole);
+        if ($deny) {
             return [null, $deny];
         }
+        $role = $this->endpointAcl->roleFor($user, $endpointId);
+        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
         $docker = $this->dockerForEndpoint($ep);
         $scope = new DockerScope($docker, $this->repo);
-        if (!$scope->canAccessVolume($name, $user)) {
+        if (!$scope->canAccessVolume($name, $scopedUser)) {
             return [null, Response::error('Volume introuvable ou accès refusé', 404)];
         }
         return [new VolumeBrowser($docker), null];
@@ -1251,7 +1495,7 @@ final class App
     /** @param array{id:int,username:string,role:int} $user */
     private function writeVolumeFile(int $endpointId, string $name, Request $request, array $user): Response
     {
-        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user, EndpointAcl::OPERATE);
         if ($deny || !$browser) {
             return $deny ?? Response::error('Volume introuvable', 404);
         }
@@ -1280,7 +1524,7 @@ final class App
      */
     private function uploadVolumeFile(int $endpointId, string $name, Request $request, array $user): Response
     {
-        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user, EndpointAcl::OPERATE);
         if ($deny || !$browser) {
             return $deny ?? Response::error('Volume introuvable', 404);
         }
@@ -1307,7 +1551,7 @@ final class App
     /** @param array{id:int,username:string,role:int} $user */
     private function mkdirVolumePath(int $endpointId, string $name, Request $request, array $user): Response
     {
-        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user, EndpointAcl::OPERATE);
         if ($deny || !$browser) {
             return $deny ?? Response::error('Volume introuvable', 404);
         }
@@ -1326,7 +1570,7 @@ final class App
     /** @param array{id:int,username:string,role:int} $user */
     private function renameVolumePath(int $endpointId, string $name, Request $request, array $user): Response
     {
-        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user, EndpointAcl::OPERATE);
         if ($deny || !$browser) {
             return $deny ?? Response::error('Volume introuvable', 404);
         }
@@ -1346,7 +1590,7 @@ final class App
     /** @param array{id:int,username:string,role:int} $user */
     private function deleteVolumeEntry(int $endpointId, string $name, Request $request, array $user): Response
     {
-        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user, EndpointAcl::OPERATE);
         if ($deny || !$browser) {
             return $deny ?? Response::error('Volume introuvable', 404);
         }
@@ -1371,11 +1615,8 @@ final class App
         $url = trim((string) ($body['URL'] ?? $body['Url'] ?? $body['url'] ?? ''));
         $username = trim((string) ($body['Username'] ?? $body['username'] ?? ''));
         $password = (string) ($body['Password'] ?? $body['password'] ?? '');
-        $type = strtolower(trim((string) ($body['Type'] ?? $body['type'] ?? 'v2')));
+        $type = $this->normalizeRegistryKind($body['Type'] ?? $body['type'] ?? $body['RegistryKind'] ?? 'v2');
         $shared = Ownership::isAdmin($user) && !empty($body['Shared']);
-        if (!in_array($type, ['hub', 'v2'], true)) {
-            $type = 'v2';
-        }
         if ($name === '' || $url === '') {
             return Response::error('Le nom et l’URL sont requis', 400);
         }
@@ -1431,10 +1672,8 @@ final class App
                 $password = $incoming;
             }
         }
-        $type = strtolower(trim((string) ($body['Type'] ?? $body['type'] ?? $existing['type'])));
-        if (!in_array($type, ['hub', 'v2'], true)) {
-            $type = 'v2';
-        }
+        $typeRaw = $body['Type'] ?? $body['type'] ?? $body['RegistryKind'] ?? $existing['type'];
+        $type = $this->normalizeRegistryKind($typeRaw);
         if ($name === '' || $url === '') {
             return Response::error('Le nom et l’URL sont requis', 400);
         }
@@ -1574,12 +1813,24 @@ final class App
             'URL' => (string) $row['url'],
             'Username' => (string) $row['username'],
             'Authentication' => ((string) ($row['username'] ?? '') !== '' || (string) ($row['password'] ?? '') !== ''),
-            'Type' => (string) ($row['type'] ?? 'v2'),
+            // Portainer CE Type enum: 6 = Docker Hub, 3 = Custom / Registry v2
+            'Type' => ((string) ($row['type'] ?? 'v2') === 'hub') ? 6 : 3,
+            'RegistryKind' => (string) ($row['type'] ?? 'v2'),
             'CreatedAt' => (int) ($row['created_at'] ?? 0),
             'OwnerId' => isset($row['owner_id']) ? (int) $row['owner_id'] : null,
             'OwnerUsername' => (string) ($row['owner_username'] ?? ''),
             'Shared' => !empty($row['is_shared']),
         ];
+    }
+
+    /** Accept Portainer int Type (6=hub, 3=custom) or WM string kind. */
+    private function normalizeRegistryKind(mixed $type): string
+    {
+        if (is_int($type) || (is_string($type) && ctype_digit($type))) {
+            return ((int) $type) === 6 ? 'hub' : 'v2';
+        }
+        $s = strtolower(trim((string) $type));
+        return $s === 'hub' ? 'hub' : 'v2';
     }
 
     /**
@@ -1607,10 +1858,27 @@ final class App
     /** @param array<string, mixed> $stack @param array{id:int,username:string,role:int} $user */
     private function canAccessStack(array $stack, array $user): bool
     {
-        if (Ownership::isAdmin($user)) {
+        if (Ownership::isGlobalAdmin($user)) {
+            return true;
+        }
+        $eid = (int) ($stack['endpoint_id'] ?? 0);
+        if (!$this->endpointAcl->can($user, $eid, EndpointAcl::READ)) {
+            return false;
+        }
+        if ($this->endpointAcl->can($user, $eid, EndpointAcl::ADMIN)) {
             return true;
         }
         return strcasecmp((string) ($stack['created_by'] ?? ''), Ownership::username($user)) === 0;
+    }
+
+    /** @param array<string, mixed> $stack @param array{id:int,username:string,role:int} $user */
+    private function canOperateStack(array $stack, array $user): bool
+    {
+        if (!$this->canAccessStack($stack, $user)) {
+            return false;
+        }
+        $eid = (int) ($stack['endpoint_id'] ?? 0);
+        return $this->endpointAcl->can($user, $eid, EndpointAcl::OPERATE);
     }
 
     /** @param array<string, mixed> $row @param array{id:int,username:string,role:int} $user */
@@ -1761,7 +2029,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.5.0',
+                'User-Agent: WharfMaster/2.0.0',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1910,10 +2178,11 @@ final class App
         if ($publicUrl === '' && $ep && !empty($ep['public_url'])) {
             $publicUrl = (string) $ep['public_url'];
         }
+        $ldap = $this->ldapConfig();
         return [
             'LogoURL' => '',
             'BlackListedLabels' => [],
-            'AuthenticationMethod' => 1,
+            'AuthenticationMethod' => !empty($ldap['enabled']) ? 2 : 1,
             'InternalAuthSettings' => ['RequiredPasswordLength' => 8],
             'EnableEdgeComputeFeatures' => false,
             'UserSessionTimeout' => '8h',
@@ -1924,7 +2193,30 @@ final class App
             'HostURL' => $publicUrl,
             'MetricsChartHours' => $this->metricsChartHours(),
             'MetricsRetentionDays' => $this->metricsRetentionDays(),
+            'Ldap' => [
+                'Enabled' => !empty($ldap['enabled']),
+                'Host' => (string) ($ldap['host'] ?? ''),
+                'Port' => (int) ($ldap['port'] ?? 389),
+                'UseTls' => !empty($ldap['use_tls']),
+                'UseSsl' => !empty($ldap['use_ssl']),
+                'BaseDn' => (string) ($ldap['base_dn'] ?? ''),
+                'BindDn' => (string) ($ldap['bind_dn'] ?? ''),
+                'BindPasswordSet' => trim((string) ($ldap['bind_password'] ?? '')) !== '',
+                'UserFilter' => (string) ($ldap['user_filter'] ?? '(sAMAccountName={username})'),
+                'UsernameAttr' => (string) ($ldap['username_attr'] ?? 'sAMAccountName'),
+            ],
+            // Portainer CE shape (clients reading settings.LDAPSettings)
+            'LDAPSettings' => $this->formatLdapSettingsPortainer($ldap),
+            'TrivyEnabled' => $this->trivyEnabled(),
+            'TrivyInstalled' => $this->imageScanner->available(),
+            'TrivyAvailable' => $this->trivyEnabled() && $this->imageScanner->available(),
         ];
+    }
+
+    private function trivyEnabled(): bool
+    {
+        $v = strtolower(trim((string) ($this->repo->getSetting('trivy_enabled', '1') ?? '1')));
+        return !in_array($v, ['0', 'false', 'off', 'no'], true);
     }
 
     /** @param array<string, mixed> $user */
@@ -1934,13 +2226,15 @@ final class App
             return $err;
         }
         $body = $request->json();
-        $publicUrl = trim((string) ($body['PublicURL'] ?? $body['HostURL'] ?? $body['publicURL'] ?? ''));
-        $publicUrl = rtrim($publicUrl, '/');
-        if ($publicUrl !== '' && !preg_match('#^https?://#i', $publicUrl)) {
-            return Response::error('L\'URL publique doit commencer par http:// ou https://', 400);
+        $publicUrl = (string) ($this->repo->getSetting('public_url', '') ?? '');
+        if (array_key_exists('PublicURL', $body) || array_key_exists('HostURL', $body) || array_key_exists('publicURL', $body)) {
+            $publicUrl = rtrim(trim((string) ($body['PublicURL'] ?? $body['HostURL'] ?? $body['publicURL'] ?? '')), '/');
+            if ($publicUrl !== '' && !preg_match('#^https?://#i', $publicUrl)) {
+                return Response::error('L\'URL publique doit commencer par http:// ou https://', 400);
+            }
+            $this->repo->setSetting('public_url', $publicUrl);
+            $this->repo->updateEndpointPublicUrl(1, $publicUrl);
         }
-        $this->repo->setSetting('public_url', $publicUrl);
-        $this->repo->updateEndpointPublicUrl(1, $publicUrl);
 
         if (array_key_exists('MetricsChartHours', $body) || array_key_exists('metricsChartHours', $body)) {
             $hours = (int) ($body['MetricsChartHours'] ?? $body['metricsChartHours'] ?? 24);
@@ -1953,10 +2247,27 @@ final class App
             $this->repo->setSetting('metrics_retention_days', (string) $days);
         }
 
+        if (array_key_exists('TrivyEnabled', $body) || array_key_exists('trivyEnabled', $body)) {
+            $raw = $body['TrivyEnabled'] ?? $body['trivyEnabled'];
+            $on = filter_var($raw, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            if ($on === null) {
+                $on = !in_array(strtolower(trim((string) $raw)), ['0', 'false', 'off', 'no', ''], true);
+            }
+            $this->repo->setSetting('trivy_enabled', $on ? '1' : '0');
+        }
+
+        if (isset($body['Ldap']) && is_array($body['Ldap'])) {
+            $this->saveLdapSettings($body['Ldap']);
+        } elseif (isset($body['LDAPSettings']) && is_array($body['LDAPSettings'])) {
+            $this->saveLdapSettingsFromPortainer($body['LDAPSettings']);
+        }
+
         $this->audit($user, 'settings.update', 'Mise à jour des paramètres', $request, [
             'publicUrl' => $publicUrl,
             'metricsChartHours' => $this->metricsChartHours(),
             'metricsRetentionDays' => $this->metricsRetentionDays(),
+            'ldapEnabled' => !empty($this->ldapConfig()['enabled']),
+            'trivyEnabled' => $this->trivyEnabled(),
         ]);
         return Response::json($this->formatSettings());
     }
@@ -1967,12 +2278,16 @@ final class App
         if ($err = $this->requireAdmin($user)) {
             return $err;
         }
-        $rows = $this->repo->listUsers();
+        $rows = array_values(array_filter(
+            $this->repo->listUsers(),
+            static fn(array $row): bool => (string) ($row['username'] ?? '') !== '__scheduler__',
+        ));
         return Response::json(array_map(static function (array $row): array {
             return [
                 'Id' => (int) $row['id'],
                 'Username' => $row['username'],
                 'Role' => (int) $row['role'],
+                'AuthSource' => (string) ($row['auth_source'] ?? 'local'),
                 'ThemeSettings' => (object) [],
             ];
         }, $rows));
@@ -2084,6 +2399,7 @@ final class App
             'Username' => $user['username'],
             'Role' => $role,
             'IsAdmin' => $role === 1,
+            'AuthSource' => (string) ($user['auth_source'] ?? 'local'),
             'ThemeSettings' => (object) [],
         ];
     }
@@ -2092,7 +2408,8 @@ final class App
     private function formatEndpoint(array $ep): array
     {
         $stored = (int) ($ep['status'] ?? 1);
-        $status = $stored === 0 ? 0 : 2;
+        // Portainer CE Status: 1=up, 2=down (disabled maps to down, never 0)
+        $status = $stored === 0 ? 2 : 2;
         $tlsExpiresAt = isset($ep['tls_expires_at']) && $ep['tls_expires_at'] !== null
             ? (int) $ep['tls_expires_at']
             : null;
@@ -2134,6 +2451,7 @@ final class App
         if ($tlsExpiresAt !== null && $tlsExpiresAt > 0) {
             $tlsDaysLeft = (int) floor(($tlsExpiresAt - time()) / 86400);
         }
+        [$userPolicies, $teamPolicies] = $this->portainerAccessPolicies((int) $ep['id']);
         return [
             'Id' => (int) $ep['id'],
             'Name' => $ep['name'],
@@ -2146,13 +2464,14 @@ final class App
             'Status' => $status,
             'Snapshots' => json_decode($ep['snapshots'] ?: '[]', true) ?: [],
             'IsEdgeDevice' => false,
-            'UserAccessPolicies' => (object) [],
-            'TeamAccessPolicies' => (object) [],
+            'UserAccessPolicies' => $userPolicies,
+            'TeamAccessPolicies' => $teamPolicies,
             'TagIds' => [],
             'Kubernetes' => (object) [],
             'Kind' => $kind,
             'NodeName' => (string) ($ep['node_name'] ?? $ep['name']),
             'AgentURL' => (string) ($ep['agent_url'] ?? ''),
+            'Disabled' => $stored === 0,
             'LastSeenAt' => isset($ep['last_seen_at']) ? (int) $ep['last_seen_at'] : null,
             'JoinedAt' => isset($ep['joined_at']) ? (int) $ep['joined_at'] : null,
             'Tls' => $kind === 'agent',
@@ -2751,7 +3070,7 @@ MD;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.5.0');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.0.0');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)
@@ -2834,6 +3153,65 @@ MD;
                 ? 'Nœud déjà connu — secret renouvelé, redémarrez l’agent'
                 : 'Nœud enregistré — démarrez l’agent avec ce NodeSecret',
         ], $rejoined ? 200 : 201);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function updateNode(int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $ep = $this->repo->getEndpoint($id);
+        if (!$ep) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $body = $request->json();
+        $name = trim((string) ($body['NodeName'] ?? $body['Name'] ?? $body['name'] ?? ''));
+        if ($name === '') {
+            return Response::error('Le nom du nœud est requis', 400);
+        }
+        if (!preg_match('/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/', $name)) {
+            return Response::error('Nom de nœud invalide (lettres, chiffres, . _ - ; 1–64 caractères)', 400);
+        }
+
+        $fields = [
+            'name' => $name,
+            'node_name' => $name,
+        ];
+        if (array_key_exists('PublicURL', $body) || array_key_exists('publicURL', $body) || array_key_exists('public_url', $body)) {
+            $publicUrl = rtrim(trim((string) ($body['PublicURL'] ?? $body['publicURL'] ?? $body['public_url'] ?? '')), '/');
+            if ($publicUrl !== '' && !preg_match('#^https?://#i', $publicUrl)) {
+                return Response::error('L\'URL publique doit commencer par http:// ou https://', 400);
+            }
+            $fields['public_url'] = $publicUrl;
+        }
+
+        $kind = (string) ($ep['kind'] ?? 'local');
+        if ($kind === 'agent') {
+            $agentUrl = trim((string) ($body['AgentURL'] ?? $body['agentURL'] ?? $body['URL'] ?? $body['url'] ?? ''));
+            if ($agentUrl === '') {
+                $agentUrl = (string) ($ep['agent_url'] ?? '');
+            }
+            $agentUrl = rtrim($agentUrl, '/');
+            if ($agentUrl === '' || !preg_match('#^https?://#i', $agentUrl)) {
+                return Response::error('URL agent invalide (http:// ou https:// requis)', 400);
+            }
+            $fields['agent_url'] = $agentUrl;
+            if (!empty($body['ClearTlsPin']) || !empty($body['clearTlsPin'])) {
+                $fields['clear_tls_pin'] = true;
+            }
+        }
+
+        $fresh = $this->repo->updateEndpointDetails($id, $fields);
+        if (!$fresh) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $this->audit($user, 'node.update', 'Modification du nœud « ' . $name . ' »', $request, [
+            'endpointId' => $id,
+            'kind' => $kind,
+            'agentUrl' => $fields['agent_url'] ?? null,
+        ]);
+        return Response::json($this->formatEndpoint($fresh));
     }
 
     /** @param array{id:int,username:string,role:int} $user */
@@ -3052,5 +3430,1276 @@ MD;
             'Total' => $total,
             'Items' => $items,
         ]);
+    }
+
+    // --- Portainer CE compatibility helpers ---
+
+    /**
+     * Map WM ACL roles → Portainer RoleId on endpoints.
+     * 1 ≈ endpoint admin, 2 ≈ helpdesk/operate, 3 ≈ readonly
+     */
+    private function aclRoleToPortainerRoleId(string $role): int
+    {
+        return match ($role) {
+            EndpointAcl::ADMIN => 1,
+            EndpointAcl::OPERATE => 2,
+            EndpointAcl::READ => 3,
+            default => 2,
+        };
+    }
+
+    private function portainerRoleIdToAclRole(int $roleId): string
+    {
+        return match ($roleId) {
+            1 => EndpointAcl::ADMIN,
+            3 => EndpointAcl::READ,
+            default => EndpointAcl::OPERATE,
+        };
+    }
+
+    /**
+     * @return array{0:object|array<string,array{RoleId:int}>,1:object|array<string,array{RoleId:int}>}
+     */
+    private function portainerAccessPolicies(int $endpointId): array
+    {
+        $userPolicies = [];
+        $teamPolicies = [];
+        foreach ($this->repo->listEndpointAcls($endpointId) as $row) {
+            $stype = (string) ($row['subject_type'] ?? '');
+            $sid = (string) (int) ($row['subject_id'] ?? 0);
+            $roleId = $this->aclRoleToPortainerRoleId((string) ($row['role'] ?? 'operate'));
+            if ($stype === 'user') {
+                $userPolicies[$sid] = ['RoleId' => $roleId];
+            } elseif ($stype === 'team') {
+                $teamPolicies[$sid] = ['RoleId' => $roleId];
+            }
+        }
+        return [
+            $userPolicies === [] ? new \stdClass() : $userPolicies,
+            $teamPolicies === [] ? new \stdClass() : $teamPolicies,
+        ];
+    }
+
+    /** @param array<string, mixed> $ldap */
+    private function formatLdapSettingsPortainer(array $ldap): array
+    {
+        $host = (string) ($ldap['host'] ?? '');
+        $port = (int) ($ldap['port'] ?? 389);
+        $url = $host;
+        if ($host !== '' && $port > 0) {
+            $url = $host . ':' . $port;
+        }
+        return [
+            'AnonymousMode' => false,
+            'ReaderDN' => (string) ($ldap['bind_dn'] ?? ''),
+            'Password' => '',
+            'URL' => $url,
+            'TLSConfig' => [
+                'TLS' => !empty($ldap['use_ssl']),
+                'TLSSkipVerify' => false,
+                'StartTLS' => !empty($ldap['use_tls']),
+            ],
+            'StartTLS' => !empty($ldap['use_tls']),
+            'SearchSettings' => [[
+                'BaseDN' => (string) ($ldap['base_dn'] ?? ''),
+                'Filter' => (string) ($ldap['user_filter'] ?? '(sAMAccountName={username})'),
+                'UserNameAttribute' => (string) ($ldap['username_attr'] ?? 'sAMAccountName'),
+            ]],
+            'GroupSearchSettings' => [],
+            'AutoCreateUsers' => true,
+        ];
+    }
+
+    /** @param array<string, mixed> $ldap */
+    private function saveLdapSettingsFromPortainer(array $ldap): void
+    {
+        $url = trim((string) ($ldap['URL'] ?? $ldap['url'] ?? ''));
+        $host = $url;
+        $port = 389;
+        if (str_contains($url, ':')) {
+            $parts = explode(':', $url);
+            // host:port (ignore scheme if present)
+            $host = preg_replace('#^ldaps?://#i', '', $parts[0]) ?: $parts[0];
+            if (isset($parts[1]) && ctype_digit($parts[1])) {
+                $port = (int) $parts[1];
+            }
+            if (count($parts) > 2 && ctype_digit($parts[count($parts) - 1])) {
+                $port = (int) $parts[count($parts) - 1];
+                $host = preg_replace('#^ldaps?://#i', '', implode(':', array_slice($parts, 0, -1))) ?: $host;
+            }
+        }
+        $search = [];
+        if (isset($ldap['SearchSettings'][0]) && is_array($ldap['SearchSettings'][0])) {
+            $search = $ldap['SearchSettings'][0];
+        }
+        $tls = is_array($ldap['TLSConfig'] ?? null) ? $ldap['TLSConfig'] : [];
+        $mapped = [
+            'Enabled' => true,
+            'Host' => $host,
+            'Port' => $port,
+            'UseTls' => !empty($ldap['StartTLS'] ?? $tls['StartTLS'] ?? false),
+            'UseSsl' => !empty($tls['TLS'] ?? false),
+            'BaseDn' => (string) ($search['BaseDN'] ?? ''),
+            'BindDn' => (string) ($ldap['ReaderDN'] ?? ''),
+            'UserFilter' => (string) ($search['Filter'] ?? '(sAMAccountName={username})'),
+            'UsernameAttr' => (string) ($search['UserNameAttribute'] ?? 'sAMAccountName'),
+        ];
+        $pass = $ldap['Password'] ?? null;
+        if (is_string($pass) && $pass !== '') {
+            $mapped['BindPassword'] = $pass;
+        }
+        // AuthenticationMethod=2 typically accompanies LDAPSettings write
+        $authMethod = $this->repo->getSetting('ldap_json', '');
+        $this->saveLdapSettings($mapped);
+        unset($authMethod);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function updateEndpointPortainer(int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $ep = $this->repo->getEndpoint($id);
+        if (!$ep) {
+            return Response::error('Environnement introuvable', 404);
+        }
+        $body = $request->json();
+        if (isset($body['UserAccessPolicies']) && (is_array($body['UserAccessPolicies']) || is_object($body['UserAccessPolicies']))) {
+            $this->syncPortainerPolicies($id, 'user', (array) $body['UserAccessPolicies']);
+        }
+        if (isset($body['TeamAccessPolicies']) && (is_array($body['TeamAccessPolicies']) || is_object($body['TeamAccessPolicies']))) {
+            $this->syncPortainerPolicies($id, 'team', (array) $body['TeamAccessPolicies']);
+        }
+        $meta = [];
+        if (isset($body['Name']) || isset($body['NodeName']) || isset($body['name'])) {
+            $name = trim((string) ($body['NodeName'] ?? $body['Name'] ?? $body['name'] ?? ''));
+            if ($name !== '' && preg_match('/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/', $name)) {
+                $meta['name'] = $name;
+                $meta['node_name'] = $name;
+            }
+        }
+        if (isset($body['PublicURL']) || isset($body['publicURL'])) {
+            $meta['public_url'] = rtrim(trim((string) ($body['PublicURL'] ?? $body['publicURL'] ?? '')), '/');
+        }
+        if ($meta !== []) {
+            $this->repo->updateEndpointDetails($id, $meta);
+        }
+        $this->audit($user, 'endpoint.update', 'Mise à jour endpoint #' . $id . ' (policies Portainer)', $request, [
+            'endpointId' => $id,
+        ]);
+        $fresh = $this->repo->getEndpoint($id) ?? $ep;
+        $fmt = $this->formatEndpoint($fresh);
+        $fmt['AccessRole'] = $this->endpointAcl->roleFor($user, $id);
+        return Response::json($fmt);
+    }
+
+    /** @param array<string|int, mixed> $policies */
+    private function syncPortainerPolicies(int $endpointId, string $subjectType, array $policies): void
+    {
+        $existing = $this->repo->listEndpointAcls($endpointId);
+        foreach ($existing as $row) {
+            if ((string) ($row['subject_type'] ?? '') === $subjectType) {
+                $this->repo->deleteEndpointAcl((int) $row['id']);
+            }
+        }
+        foreach ($policies as $sid => $policy) {
+            $subjectId = (int) $sid;
+            if ($subjectId <= 0) {
+                continue;
+            }
+            $roleId = 2;
+            if (is_array($policy)) {
+                $roleId = (int) ($policy['RoleId'] ?? $policy['roleId'] ?? $policy['Role'] ?? 2);
+            } elseif (is_object($policy)) {
+                $roleId = (int) ($policy->RoleId ?? $policy->roleId ?? 2);
+            }
+            $role = $this->portainerRoleIdToAclRole($roleId);
+            if ($subjectType === 'user' && !$this->repo->findUserById($subjectId)) {
+                continue;
+            }
+            if ($subjectType === 'team' && !$this->repo->getTeam($subjectId)) {
+                continue;
+            }
+            $this->repo->upsertEndpointAcl($endpointId, $subjectType, $subjectId, $role);
+        }
+    }
+
+    /** Synthetic membership id: teamId * 1_000_000 + userId */
+    private function membershipId(int $teamId, int $userId): int
+    {
+        return ($teamId * 1_000_000) + $userId;
+    }
+
+    /** @return array{0:int,1:int}|null */
+    private function parseMembershipId(int $id): ?array
+    {
+        if ($id < 1_000_001) {
+            return null;
+        }
+        $teamId = intdiv($id, 1_000_000);
+        $userId = $id % 1_000_000;
+        if ($teamId <= 0 || $userId <= 0) {
+            return null;
+        }
+        return [$teamId, $userId];
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listTeamMembershipsPortainer(array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $items = [];
+        foreach ($this->repo->listTeams() as $t) {
+            $tid = (int) $t['id'];
+            foreach ($this->repo->listTeamMembers($tid) as $m) {
+                $uid = (int) $m['id'];
+                $items[] = [
+                    'Id' => $this->membershipId($tid, $uid),
+                    'UserID' => $uid,
+                    'TeamID' => $tid,
+                    'Role' => 2, // member (Portainer: 1=leader, 2=member)
+                ];
+            }
+        }
+        return Response::json($items);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listTeamMembershipsForTeam(int $teamId, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        if (!$this->repo->getTeam($teamId)) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        $items = [];
+        foreach ($this->repo->listTeamMembers($teamId) as $m) {
+            $uid = (int) $m['id'];
+            $items[] = [
+                'Id' => $this->membershipId($teamId, $uid),
+                'UserID' => $uid,
+                'TeamID' => $teamId,
+                'Role' => 2,
+            ];
+        }
+        return Response::json($items);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function createTeamMembershipPortainer(Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $body = $request->json();
+        $teamId = (int) ($body['TeamID'] ?? $body['TeamId'] ?? $body['team_id'] ?? 0);
+        $userId = (int) ($body['UserID'] ?? $body['UserId'] ?? $body['user_id'] ?? 0);
+        if (!$this->repo->getTeam($teamId)) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        if (!$this->repo->findUserById($userId)) {
+            return Response::error('Utilisateur introuvable', 404);
+        }
+        $this->repo->addTeamMember($teamId, $userId);
+        $this->audit($user, 'team.member_add', 'Membership Portainer team=' . $teamId, $request, [
+            'teamId' => $teamId,
+            'userId' => $userId,
+        ]);
+        return Response::json([
+            'Id' => $this->membershipId($teamId, $userId),
+            'UserID' => $userId,
+            'TeamID' => $teamId,
+            'Role' => (int) ($body['Role'] ?? 2),
+        ], 200);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function deleteTeamMembershipPortainer(int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $parsed = $this->parseMembershipId($id);
+        if ($parsed === null) {
+            return Response::error('Membership introuvable', 404);
+        }
+        [$teamId, $userId] = $parsed;
+        $this->repo->removeTeamMember($teamId, $userId);
+        $this->audit($user, 'team.member_remove', 'Membership Portainer #' . $id, $request, [
+            'teamId' => $teamId,
+            'userId' => $userId,
+        ]);
+        return Response::empty(204);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function getUserPortainer(int $id, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $row = $this->repo->findUserById($id);
+        if (!$row || (string) ($row['username'] ?? '') === '__scheduler__') {
+            return Response::error('Utilisateur introuvable', 404);
+        }
+        return Response::json([
+            'Id' => (int) $row['id'],
+            'Username' => (string) $row['username'],
+            'Role' => (int) $row['role'],
+            'AuthSource' => (string) ($row['auth_source'] ?? 'local'),
+            'ThemeSettings' => (object) [],
+        ]);
+    }
+
+    // --- LDAP helpers ---
+
+    /** @return array<string, mixed> */
+    private function ldapConfig(): array
+    {
+        $raw = (string) ($this->repo->getSetting('ldap_json', '{}') ?? '{}');
+        $cfg = json_decode($raw, true);
+        if (!is_array($cfg)) {
+            $cfg = [];
+        }
+        if (!empty($cfg['bind_password_enc']) && is_string($cfg['bind_password_enc'])) {
+            try {
+                $cfg['bind_password'] = $this->secrets->decrypt($cfg['bind_password_enc']);
+            } catch (\Throwable) {
+                $cfg['bind_password'] = '';
+            }
+        }
+        return $cfg;
+    }
+
+    /** @param array<string, mixed> $ldap */
+    private function saveLdapSettings(array $ldap): void
+    {
+        $prev = $this->ldapConfig();
+        $cfg = [
+            'enabled' => !empty($ldap['Enabled'] ?? $ldap['enabled'] ?? false),
+            'host' => trim((string) ($ldap['Host'] ?? $ldap['host'] ?? '')),
+            'port' => (int) ($ldap['Port'] ?? $ldap['port'] ?? 389),
+            'use_tls' => !empty($ldap['UseTls'] ?? $ldap['use_tls'] ?? false),
+            'use_ssl' => !empty($ldap['UseSsl'] ?? $ldap['use_ssl'] ?? false),
+            'base_dn' => trim((string) ($ldap['BaseDn'] ?? $ldap['base_dn'] ?? '')),
+            'bind_dn' => trim((string) ($ldap['BindDn'] ?? $ldap['bind_dn'] ?? '')),
+            'user_filter' => trim((string) ($ldap['UserFilter'] ?? $ldap['user_filter'] ?? '(sAMAccountName={username})')),
+            'username_attr' => trim((string) ($ldap['UsernameAttr'] ?? $ldap['username_attr'] ?? 'sAMAccountName')),
+        ];
+        $newPass = $ldap['BindPassword'] ?? $ldap['bind_password'] ?? null;
+        if (is_string($newPass) && $newPass !== '') {
+            $cfg['bind_password_enc'] = $this->secrets->encrypt($newPass);
+        } elseif (!empty($prev['bind_password_enc'])) {
+            $cfg['bind_password_enc'] = $prev['bind_password_enc'];
+        }
+        unset($cfg['bind_password']);
+        $this->repo->setSetting('ldap_json', json_encode($cfg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}');
+    }
+
+    // --- Teams ---
+
+    /** Portainer CE: bare array `[{ Id, Name }, …]`. */
+    private function listTeams(array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $items = [];
+        foreach ($this->repo->listTeams() as $t) {
+            $items[] = [
+                'Id' => (int) $t['id'],
+                'Name' => (string) $t['name'],
+            ];
+        }
+        return Response::json($items);
+    }
+
+    /** WharfMaster detailed teams (Members, AdGroupDn, …) — also a bare array. */
+    private function listTeamsDetailed(array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $items = [];
+        foreach ($this->repo->listTeams() as $t) {
+            $members = $this->repo->listTeamMembers((int) $t['id']);
+            $items[] = $this->formatTeam($t, $members);
+        }
+        return Response::json($items);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function getTeam(int $id, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $t = $this->repo->getTeam($id);
+        if (!$t) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        return Response::json($this->formatTeam($t, $this->repo->listTeamMembers($id)));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function createTeam(Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $body = $request->json();
+        $name = trim((string) ($body['Name'] ?? $body['name'] ?? ''));
+        $desc = trim((string) ($body['Description'] ?? $body['description'] ?? ''));
+        $adDn = trim((string) ($body['AdGroupDn'] ?? $body['ad_group_dn'] ?? ''));
+        if ($name === '' || strlen($name) > 64) {
+            return Response::error('Nom d\'équipe invalide', 400);
+        }
+        try {
+            $t = $this->repo->createTeam($name, $desc, $adDn);
+        } catch (\Throwable $e) {
+            return Response::error('Équipe déjà existante ou invalide', 409);
+        }
+        $this->audit($user, 'team.create', 'Création de l\'équipe « ' . $name . ' »', $request, [
+            'teamId' => (int) $t['id'],
+        ]);
+        return Response::json($this->formatTeam($t, []), 201);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function updateTeam(int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $t = $this->repo->getTeam($id);
+        if (!$t) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        $body = $request->json();
+        $name = trim((string) ($body['Name'] ?? $body['name'] ?? $t['name']));
+        $desc = trim((string) ($body['Description'] ?? $body['description'] ?? $t['description'] ?? ''));
+        $adDn = trim((string) ($body['AdGroupDn'] ?? $body['ad_group_dn'] ?? $t['ad_group_dn'] ?? ''));
+        $updated = $this->repo->updateTeam($id, $name, $desc, $adDn);
+        $this->audit($user, 'team.update', 'Mise à jour de l\'équipe « ' . $name . ' »', $request, [
+            'teamId' => $id,
+        ]);
+        return Response::json($this->formatTeam($updated ?? $t, $this->repo->listTeamMembers($id)));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function deleteTeam(int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $t = $this->repo->getTeam($id);
+        if (!$t) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        $this->repo->deleteTeam($id);
+        $this->audit($user, 'team.delete', 'Suppression de l\'équipe « ' . $t['name'] . ' »', $request, [
+            'teamId' => $id,
+        ]);
+        return Response::empty(204);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function addTeamMember(int $teamId, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $t = $this->repo->getTeam($teamId);
+        if (!$t) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        $body = $request->json();
+        $uid = (int) ($body['UserId'] ?? $body['user_id'] ?? 0);
+        if (!$this->repo->findUserById($uid)) {
+            return Response::error('Utilisateur introuvable', 404);
+        }
+        $this->repo->addTeamMember($teamId, $uid);
+        $this->audit($user, 'team.member_add', 'Ajout d\'un membre à « ' . $t['name'] . ' »', $request, [
+            'teamId' => $teamId,
+            'userId' => $uid,
+        ]);
+        return Response::json($this->formatTeam($t, $this->repo->listTeamMembers($teamId)));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function removeTeamMember(int $teamId, int $memberId, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $t = $this->repo->getTeam($teamId);
+        if (!$t) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        $this->repo->removeTeamMember($teamId, $memberId);
+        $this->audit($user, 'team.member_remove', 'Retrait d\'un membre de « ' . $t['name'] . ' »', $request, [
+            'teamId' => $teamId,
+            'userId' => $memberId,
+        ]);
+        return Response::empty(204);
+    }
+
+    /**
+     * @param array<string, mixed> $t
+     * @param list<array<string, mixed>> $members
+     */
+    private function formatTeam(array $t, array $members): array
+    {
+        return [
+            'Id' => (int) $t['id'],
+            'Name' => (string) $t['name'],
+            'Description' => (string) ($t['description'] ?? ''),
+            'AdGroupDn' => (string) ($t['ad_group_dn'] ?? ''),
+            'CreatedAt' => (int) ($t['created_at'] ?? 0),
+            'Members' => array_map(static function (array $m): array {
+                return [
+                    'Id' => (int) $m['id'],
+                    'Username' => (string) $m['username'],
+                    'Role' => (int) $m['role'],
+                    'AuthSource' => (string) ($m['auth_source'] ?? 'local'),
+                ];
+            }, $members),
+        ];
+    }
+
+    // --- ACLs ---
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listAcls(Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $endpointId = $request->query('endpointId');
+        $filter = $endpointId !== null && $endpointId !== '' ? (int) $endpointId : null;
+        $rows = $this->repo->listEndpointAcls($filter);
+        $items = [];
+        foreach ($rows as $row) {
+            $items[] = $this->formatAcl($row);
+        }
+        return Response::json(['Items' => $items]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function upsertAcl(Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $body = $request->json();
+        $endpointId = (int) ($body['EndpointId'] ?? $body['endpoint_id'] ?? 0);
+        $subjectType = strtolower(trim((string) ($body['SubjectType'] ?? $body['subject_type'] ?? 'user')));
+        $subjectId = (int) ($body['SubjectId'] ?? $body['subject_id'] ?? 0);
+        $role = strtolower(trim((string) ($body['Role'] ?? $body['role'] ?? 'operate')));
+        if (!$this->repo->getEndpoint($endpointId)) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        if (!in_array($subjectType, ['user', 'team'], true)) {
+            return Response::error('SubjectType invalide (user|team)', 400);
+        }
+        if (!EndpointAcl::isValidRole($role)) {
+            return Response::error('Rôle invalide (read|operate|admin)', 400);
+        }
+        if ($subjectType === 'user' && !$this->repo->findUserById($subjectId)) {
+            return Response::error('Utilisateur introuvable', 404);
+        }
+        if ($subjectType === 'team' && !$this->repo->getTeam($subjectId)) {
+            return Response::error('Équipe introuvable', 404);
+        }
+        $row = $this->repo->upsertEndpointAcl($endpointId, $subjectType, $subjectId, $role);
+        $this->audit($user, 'acl.upsert', 'ACL nœud mise à jour', $request, [
+            'endpointId' => $endpointId,
+            'subjectType' => $subjectType,
+            'subjectId' => $subjectId,
+            'role' => $role,
+        ]);
+        return Response::json($this->formatAcl($row));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function deleteAcl(int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        $this->repo->deleteEndpointAcl($id);
+        $this->audit($user, 'acl.delete', 'ACL nœud supprimée', $request, ['aclId' => $id]);
+        return Response::empty(204);
+    }
+
+    /** @param array<string, mixed> $row */
+    private function formatAcl(array $row): array
+    {
+        $stype = (string) ($row['subject_type'] ?? '');
+        $sid = (int) ($row['subject_id'] ?? 0);
+        $name = '';
+        if ($stype === 'user') {
+            $u = $this->repo->findUserById($sid);
+            $name = $u ? (string) $u['username'] : '';
+        } elseif ($stype === 'team') {
+            $t = $this->repo->getTeam($sid);
+            $name = $t ? (string) $t['name'] : '';
+        }
+        return [
+            'Id' => (int) ($row['id'] ?? 0),
+            'EndpointId' => (int) ($row['endpoint_id'] ?? 0),
+            'SubjectType' => $stype,
+            'SubjectId' => $sid,
+            'SubjectName' => $name,
+            'Role' => (string) ($row['role'] ?? ''),
+        ];
+    }
+
+    // --- Schedules ---
+
+    private function ensureSchedulerApiKey(): void
+    {
+        $path = dirname((string) $this->config['sqlite_path']) . '/scheduler.api_key';
+        if (is_file($path) && trim((string) file_get_contents($path)) !== '') {
+            if (($this->repo->getSetting('scheduler_api_key_hint', '') ?? '') === '') {
+                $raw = trim((string) file_get_contents($path));
+                $this->repo->setSetting('scheduler_api_key_hint', substr($raw, -4));
+            }
+            return;
+        }
+        // Wait until a real admin exists (do not block adminInit)
+        if ($this->repo->userCount() === 0) {
+            return;
+        }
+        $admins = array_values(array_filter(
+            $this->repo->listUsers(),
+            static fn(array $u): bool => (int) ($u['role'] ?? 0) === 1
+                && (string) ($u['username'] ?? '') !== '__scheduler__',
+        ));
+        if ($admins === []) {
+            return;
+        }
+        $raw = 'ptr_' . bin2hex(random_bytes(24));
+        $this->repo->createApiKey((int) $admins[0]['id'], 'scheduler-sidecar', $raw);
+        @file_put_contents($path, $raw);
+        @chmod($path, 0600);
+        $this->repo->setSetting('scheduler_api_key_hint', substr($raw, -4));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listSchedules(Request $request, array $user): Response
+    {
+        $stackId = $request->query('stackId');
+        $endpointId = $request->query('endpointId');
+        $sid = $stackId !== null && $stackId !== '' ? (int) $stackId : null;
+        $eid = $endpointId !== null && $endpointId !== '' ? (int) $endpointId : null;
+        if ($sid !== null) {
+            $stack = $this->repo->getStack($sid);
+            if (!$stack || !$this->canAccessStack($stack, $user)) {
+                return Response::error('Stack introuvable', 404);
+            }
+        } elseif (!Ownership::isGlobalAdmin($user)) {
+            return Response::error('Accès administrateur requis', 403);
+        }
+        $rows = $this->repo->listSchedules($sid, $eid);
+        return Response::json(['Items' => array_map([$this, 'formatSchedule'], $rows)]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function getScheduleApi(int $id, array $user): Response
+    {
+        $row = $this->repo->getSchedule($id);
+        if (!$row) {
+            return Response::error('Planification introuvable', 404);
+        }
+        if (!$this->canAccessSchedule($row, $user)) {
+            return Response::error('Accès refusé', 403);
+        }
+        return Response::json($this->formatSchedule($row));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function createSchedule(Request $request, array $user): Response
+    {
+        $body = $request->json();
+        $stackId = (int) ($body['StackId'] ?? $body['stack_id'] ?? $body['TargetId'] ?? 0);
+        $action = strtolower(trim((string) ($body['Action'] ?? $body['action'] ?? '')));
+        $cron = trim((string) ($body['Cron'] ?? $body['cron_expr'] ?? $body['CronExpr'] ?? ''));
+        $name = trim((string) ($body['Name'] ?? $body['name'] ?? ''));
+        $tz = trim((string) ($body['Timezone'] ?? $body['timezone'] ?? 'UTC')) ?: 'UTC';
+        if (!in_array($action, ['start', 'stop', 'restart'], true)) {
+            return Response::error('Action invalide (start|stop|restart)', 400);
+        }
+        if (!CronExpr::isValid($cron)) {
+            return Response::error('Expression cron invalide (5 champs)', 400);
+        }
+        $stack = $this->repo->getStack($stackId);
+        if (!$stack || !$this->canOperateStack($stack, $user)) {
+            return Response::error('Stack introuvable ou accès refusé', 404);
+        }
+        if ($name === '') {
+            $name = $action . ' · ' . $stack['name'];
+        }
+        $next = CronExpr::nextAfter($cron, time());
+        $row = $this->repo->createSchedule(
+            $name,
+            (int) $stack['endpoint_id'],
+            'stack',
+            $stackId,
+            $action,
+            $cron,
+            $tz,
+            Ownership::username($user),
+            $next,
+        );
+        $this->audit($user, 'schedule.create', 'Planification créée pour « ' . $stack['name'] . ' »', $request, [
+            'scheduleId' => (int) ($row['id'] ?? 0),
+            'action' => $action,
+            'cron' => $cron,
+        ]);
+        return Response::json($this->formatSchedule($row), 201);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function updateSchedule(int $id, Request $request, array $user): Response
+    {
+        $row = $this->repo->getSchedule($id);
+        if (!$row || !$this->canAccessSchedule($row, $user)) {
+            return Response::error('Planification introuvable', 404);
+        }
+        if (!$this->canOperateSchedule($row, $user)) {
+            return Response::error('Permissions insuffisantes', 403);
+        }
+        $body = $request->json();
+        $name = trim((string) ($body['Name'] ?? $body['name'] ?? $row['name']));
+        $action = strtolower(trim((string) ($body['Action'] ?? $body['action'] ?? $row['action'])));
+        $cron = trim((string) ($body['Cron'] ?? $body['cron_expr'] ?? $body['CronExpr'] ?? $row['cron_expr']));
+        $tz = trim((string) ($body['Timezone'] ?? $body['timezone'] ?? $row['timezone'])) ?: 'UTC';
+        $enabled = array_key_exists('Enabled', $body) || array_key_exists('enabled', $body)
+            ? !empty($body['Enabled'] ?? $body['enabled'])
+            : ((int) $row['enabled'] === 1);
+        if (!in_array($action, ['start', 'stop', 'restart'], true)) {
+            return Response::error('Action invalide', 400);
+        }
+        if (!CronExpr::isValid($cron)) {
+            return Response::error('Expression cron invalide', 400);
+        }
+        $next = $enabled ? CronExpr::nextAfter($cron, time()) : null;
+        $updated = $this->repo->updateSchedule($id, $name, $action, $cron, $tz, $enabled, $next);
+        $this->audit($user, 'schedule.update', 'Planification mise à jour', $request, ['scheduleId' => $id]);
+        return Response::json($this->formatSchedule($updated ?? $row));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function deleteSchedule(int $id, Request $request, array $user): Response
+    {
+        $row = $this->repo->getSchedule($id);
+        if (!$row || !$this->canAccessSchedule($row, $user)) {
+            return Response::error('Planification introuvable', 404);
+        }
+        if (!$this->canOperateSchedule($row, $user)) {
+            return Response::error('Permissions insuffisantes', 403);
+        }
+        $this->repo->deleteSchedule($id);
+        $this->audit($user, 'schedule.delete', 'Planification supprimée', $request, ['scheduleId' => $id]);
+        return Response::empty(204);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function runScheduleNow(int $id, Request $request, array $user): Response
+    {
+        $row = $this->repo->getSchedule($id);
+        if (!$row || !$this->canAccessSchedule($row, $user)) {
+            return Response::error('Planification introuvable', 404);
+        }
+        if (!$this->canOperateSchedule($row, $user)) {
+            return Response::error('Permissions insuffisantes', 403);
+        }
+        return $this->executeScheduleRow($row, $request, $user, true);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function runDueSchedules(Request $request, array $user): Response
+    {
+        if (!Ownership::isGlobalAdmin($user)) {
+            return Response::error('Accès refusé', 403);
+        }
+        $now = time();
+        $due = $this->repo->listDueSchedules($now);
+        $results = [];
+        foreach ($due as $row) {
+            $res = $this->executeScheduleRow($row, $request, $user, false);
+            $results[] = [
+                'Id' => (int) $row['id'],
+                'Status' => $res->status,
+            ];
+        }
+        return Response::json(['Ran' => count($results), 'Results' => $results]);
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @param array{id:int,username:string,role:int} $user
+     */
+    private function executeScheduleRow(array $row, Request $request, array $user, bool $manual): Response
+    {
+        $action = (string) $row['action'];
+        $targetId = (int) $row['target_id'];
+        $cron = (string) $row['cron_expr'];
+        try {
+            $ctrl = $this->controlStack($targetId, $action, $request, $user);
+            if ($ctrl->status >= 400) {
+                $this->repo->markScheduleRun(
+                    (int) $row['id'],
+                    'error',
+                    'HTTP ' . $ctrl->status,
+                    CronExpr::nextAfter($cron, time()),
+                );
+                return $ctrl;
+            }
+            $this->repo->markScheduleRun(
+                (int) $row['id'],
+                $manual ? 'ok-manual' : 'ok',
+                '',
+                CronExpr::nextAfter($cron, time()),
+            );
+            $this->audit($user, 'schedule.run', 'Exécution planification #' . $row['id'] . ' (' . $action . ')', $request, [
+                'scheduleId' => (int) $row['id'],
+                'manual' => $manual,
+            ]);
+            return $ctrl;
+        } catch (\Throwable $e) {
+            $this->repo->markScheduleRun(
+                (int) $row['id'],
+                'error',
+                $e->getMessage(),
+                CronExpr::nextAfter($cron, time()),
+            );
+            return Response::error($e->getMessage(), 500);
+        }
+    }
+
+    /** @param array<string, mixed> $row @param array{id:int,username:string,role:int} $user */
+    private function canAccessSchedule(array $row, array $user): bool
+    {
+        if (Ownership::isGlobalAdmin($user)) {
+            return true;
+        }
+        if ((string) ($row['target_type'] ?? '') !== 'stack') {
+            return false;
+        }
+        $stack = $this->repo->getStack((int) $row['target_id']);
+        return $stack ? $this->canAccessStack($stack, $user) : false;
+    }
+
+    /** @param array<string, mixed> $row @param array{id:int,username:string,role:int} $user */
+    private function canOperateSchedule(array $row, array $user): bool
+    {
+        if (Ownership::isGlobalAdmin($user)) {
+            return true;
+        }
+        $stack = $this->repo->getStack((int) $row['target_id']);
+        return $stack ? $this->canOperateStack($stack, $user) : false;
+    }
+
+    /** @param array<string, mixed> $row */
+    private function formatSchedule(array $row): array
+    {
+        return [
+            'Id' => (int) $row['id'],
+            'Name' => (string) $row['name'],
+            'EndpointId' => (int) $row['endpoint_id'],
+            'TargetType' => (string) $row['target_type'],
+            'TargetId' => (int) $row['target_id'],
+            'StackId' => (int) $row['target_id'],
+            'Action' => (string) $row['action'],
+            'Cron' => (string) $row['cron_expr'],
+            'Timezone' => (string) $row['timezone'],
+            'Enabled' => (int) $row['enabled'] === 1,
+            'LastRunAt' => $row['last_run_at'] !== null ? (int) $row['last_run_at'] : null,
+            'NextRunAt' => $row['next_run_at'] !== null ? (int) $row['next_run_at'] : null,
+            'LastStatus' => (string) ($row['last_status'] ?? ''),
+            'LastError' => (string) ($row['last_error'] ?? ''),
+            'CreatedBy' => (string) ($row['created_by'] ?? ''),
+            'CreatedAt' => (int) ($row['created_at'] ?? 0),
+        ];
+    }
+
+    // --- Image CVE scans ---
+
+    /**
+     * Soft CVE check for create/deploy flows: never blocks the caller.
+     * Prefer cache; on Trivy/agent failure return Status=skipped with a Warning.
+     *
+     * @param array{id:int,username:string,role:int} $user
+     */
+    private function adviseImages(int $endpointId, Request $request, array $user): Response
+    {
+        if (!$this->endpointAcl->can($user, $endpointId, EndpointAcl::READ)) {
+            return Response::error('Accès refusé à ce nœud', 403);
+        }
+        if (!$this->trivyEnabled()) {
+            return Response::json([
+                'Items' => [],
+                'TrivyAvailable' => false,
+                'TrivyEnabled' => false,
+                'Blocking' => false,
+                'Worst' => 'disabled',
+                'Warning' => 'Scan CVE désactivé dans les paramètres',
+            ]);
+        }
+        $ep = $this->repo->getEndpoint($endpointId);
+        if (!$ep) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $body = $request->json();
+        $refs = [];
+        if (isset($body['Images']) && is_array($body['Images'])) {
+            foreach ($body['Images'] as $img) {
+                $refs[] = trim((string) $img);
+            }
+        }
+        $single = trim((string) ($body['Image'] ?? $body['image'] ?? $body['Ref'] ?? $body['ref'] ?? ''));
+        if ($single !== '') {
+            $refs[] = $single;
+        }
+        $compose = (string) ($body['Compose'] ?? $body['compose'] ?? $body['StackFileContent'] ?? '');
+        if ($compose !== '') {
+            $refs = array_merge($refs, $this->extractComposeImageRefs($compose));
+        }
+        $refs = array_values(array_unique(array_filter($refs, static fn (string $r): bool => $r !== '')));
+        $refs = array_slice($refs, 0, 12);
+
+        $items = [];
+        $kind = (string) ($ep['kind'] ?? 'local');
+        $trivyOk = $kind === 'agent' ? true : $this->imageScanner->available();
+        foreach ($refs as $ref) {
+            $items[] = $this->softAdviseOneImage($ep, $endpointId, $ref);
+        }
+
+        $worst = 'ok';
+        foreach ($items as $it) {
+            $st = (string) ($it['Status'] ?? '');
+            if ($st === 'skipped' && $worst === 'ok') {
+                $worst = 'skipped';
+            }
+            $sum = is_array($it['Summary'] ?? null) ? $it['Summary'] : [];
+            if ((int) ($sum['CRITICAL'] ?? 0) > 0) {
+                $worst = 'critical';
+                break;
+            }
+            if ((int) ($sum['HIGH'] ?? 0) > 0) {
+                $worst = 'high';
+            } elseif ($worst !== 'high' && (int) ($sum['TOTAL'] ?? 0) > 0) {
+                $worst = 'findings';
+            }
+        }
+
+        return Response::json([
+            'Items' => $items,
+            'TrivyAvailable' => $trivyOk,
+            'TrivyEnabled' => true,
+            'Blocking' => false,
+            'Worst' => $worst,
+        ]);
+    }
+
+    /**
+     * @param array<string, mixed> $ep
+     * @return array<string, mixed>
+     */
+    private function softAdviseOneImage(array $ep, int $endpointId, string $ref): array
+    {
+        $cached = $this->repo->getLatestImageScan($endpointId, $ref, '');
+        if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - ImageScanner::CACHE_TTL) {
+            $summary = json_decode((string) ($cached['summary_json'] ?? '{}'), true);
+            return [
+                'ImageRef' => $ref,
+                'Status' => (string) ($cached['status'] ?? 'ok'),
+                'ScannedAt' => (int) $cached['scanned_at'],
+                'Summary' => is_array($summary) ? $summary : [],
+                'FromCache' => true,
+                'Warning' => null,
+            ];
+        }
+
+        $kind = (string) ($ep['kind'] ?? 'local');
+        try {
+            if ($kind === 'agent') {
+                $parsed = $this->scanImageViaAgent($ep, $ref);
+            } else {
+                if (!$this->imageScanner->available()) {
+                    return [
+                        'ImageRef' => $ref,
+                        'Status' => 'skipped',
+                        'ScannedAt' => null,
+                        'Summary' => [],
+                        'FromCache' => false,
+                        'Warning' => 'Trivy indisponible — déploiement non bloqué',
+                    ];
+                }
+                $parsed = $this->imageScanner->scanImage($ref);
+            }
+            $row = $this->repo->saveImageScan(
+                $endpointId,
+                $ref,
+                '',
+                (string) ($parsed['status'] ?? 'ok'),
+                $parsed['summary'] ?? [],
+                (string) ($parsed['raw'] ?? ''),
+                $parsed['findings'] ?? [],
+            );
+            return [
+                'ImageRef' => $ref,
+                'Status' => (string) ($row['status'] ?? 'ok'),
+                'ScannedAt' => (int) ($row['scanned_at'] ?? time()),
+                'Summary' => $parsed['summary'] ?? [],
+                'FromCache' => false,
+                'Warning' => null,
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'ImageRef' => $ref,
+                'Status' => 'skipped',
+                'ScannedAt' => null,
+                'Summary' => [],
+                'FromCache' => false,
+                'Warning' => 'Scan CVE impossible : ' . $e->getMessage() . ' — déploiement non bloqué',
+            ];
+        }
+    }
+
+    /** @return list<string> */
+    private function extractComposeImageRefs(string $compose): array
+    {
+        $refs = [];
+        if (preg_match_all('/^\s*image:\s*["\']?([^\s"\'#]+)/mi', $compose, $m)) {
+            foreach ($m[1] as $raw) {
+                $ref = trim((string) $raw);
+                if ($ref !== '' && !str_starts_with($ref, '$')) {
+                    $refs[] = $ref;
+                }
+            }
+        }
+        return array_values(array_unique($refs));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listImageScans(int $endpointId, array $user): Response
+    {
+        if (!$this->endpointAcl->can($user, $endpointId, EndpointAcl::READ)) {
+            return Response::error('Accès refusé à ce nœud', 403);
+        }
+        $enabled = $this->trivyEnabled();
+        if (!$enabled) {
+            return Response::json([
+                'Items' => [],
+                'TrivyAvailable' => false,
+                'TrivyEnabled' => false,
+            ]);
+        }
+        $rows = $this->repo->listImageScanSummaries($endpointId);
+        $items = [];
+        foreach ($rows as $row) {
+            $summary = json_decode((string) ($row['summary_json'] ?? '{}'), true);
+            if (!is_array($summary)) {
+                $summary = [];
+            }
+            $items[] = [
+                'Id' => (int) $row['id'],
+                'ImageRef' => (string) $row['image_ref'],
+                'Digest' => (string) ($row['digest'] ?? ''),
+                'Status' => (string) $row['status'],
+                'ScannedAt' => $row['scanned_at'] !== null ? (int) $row['scanned_at'] : null,
+                'Summary' => $summary,
+            ];
+        }
+        return Response::json([
+            'Items' => $items,
+            'TrivyAvailable' => $this->imageScanner->available(),
+            'TrivyEnabled' => true,
+        ]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function getImageScan(int $endpointId, Request $request, array $user): Response
+    {
+        if (!$this->endpointAcl->can($user, $endpointId, EndpointAcl::READ)) {
+            return Response::error('Accès refusé à ce nœud', 403);
+        }
+        $ref = trim((string) ($request->query('ref') ?? $request->query('image') ?? ''));
+        $digest = trim((string) ($request->query('digest') ?? ''));
+        if ($ref === '' && $digest === '') {
+            return Response::error('Paramètre ref ou digest requis', 400);
+        }
+        $row = $this->repo->getLatestImageScan($endpointId, $ref, $digest);
+        if (!$row) {
+            return Response::error('Aucun scan', 404);
+        }
+        $summary = json_decode((string) ($row['summary_json'] ?? '{}'), true);
+        if (!is_array($summary)) {
+            $summary = [];
+        }
+        $findings = $this->repo->listImageFindings((int) $row['id']);
+        return Response::json([
+            'Id' => (int) $row['id'],
+            'ImageRef' => (string) $row['image_ref'],
+            'Digest' => (string) ($row['digest'] ?? ''),
+            'Status' => (string) $row['status'],
+            'ScannedAt' => $row['scanned_at'] !== null ? (int) $row['scanned_at'] : null,
+            'Summary' => $summary,
+            'Findings' => array_map(static function (array $f): array {
+                return [
+                    'Cve' => (string) $f['cve'],
+                    'Package' => (string) $f['package'],
+                    'Version' => (string) $f['version'],
+                    'Severity' => (string) $f['severity'],
+                    'Title' => (string) $f['title'],
+                    'FixedVersion' => (string) $f['fixed_version'],
+                ];
+            }, $findings),
+        ]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function scanImage(int $endpointId, Request $request, array $user): Response
+    {
+        if (!$this->endpointAcl->can($user, $endpointId, EndpointAcl::OPERATE)) {
+            return Response::error('Permissions insuffisantes', 403);
+        }
+        if (!$this->trivyEnabled()) {
+            return Response::error('Scan CVE désactivé dans les paramètres', 403);
+        }
+        $ep = $this->repo->getEndpoint($endpointId);
+        if (!$ep) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $body = $request->json();
+        $ref = trim((string) ($body['Image'] ?? $body['image'] ?? $body['Ref'] ?? $body['ref'] ?? ''));
+        $digest = trim((string) ($body['Digest'] ?? $body['digest'] ?? ''));
+        $force = !empty($body['Force'] ?? $body['force'] ?? false);
+        if ($ref === '') {
+            return Response::error('Image requise', 400);
+        }
+
+        if (!$force && $digest !== '') {
+            $cached = $this->repo->getLatestImageScan($endpointId, $ref, $digest);
+            if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - ImageScanner::CACHE_TTL) {
+                $summary = json_decode((string) ($cached['summary_json'] ?? '{}'), true);
+                return Response::json([
+                    'Id' => (int) $cached['id'],
+                    'ImageRef' => (string) $cached['image_ref'],
+                    'Digest' => (string) ($cached['digest'] ?? ''),
+                    'Status' => (string) $cached['status'],
+                    'ScannedAt' => (int) $cached['scanned_at'],
+                    'Summary' => is_array($summary) ? $summary : [],
+                    'FromCache' => true,
+                ]);
+            }
+        }
+
+        $kind = (string) ($ep['kind'] ?? 'local');
+        try {
+            if ($kind === 'agent') {
+                $parsed = $this->scanImageViaAgent($ep, $ref);
+            } else {
+                $parsed = $this->imageScanner->scanImage($ref);
+            }
+        } catch (\Throwable $e) {
+            return Response::error($e->getMessage(), 502);
+        }
+
+        $row = $this->repo->saveImageScan(
+            $endpointId,
+            $ref,
+            $digest,
+            (string) ($parsed['status'] ?? 'ok'),
+            $parsed['summary'] ?? [],
+            (string) ($parsed['raw'] ?? ''),
+            $parsed['findings'] ?? [],
+        );
+        $this->audit($user, 'image.scan', 'Scan CVE de « ' . $ref . ' »', $request, [
+            'endpointId' => $endpointId,
+            'digest' => $digest,
+            'summary' => $parsed['summary'] ?? [],
+        ]);
+        return Response::json([
+            'Id' => (int) $row['id'],
+            'ImageRef' => (string) $row['image_ref'],
+            'Digest' => (string) ($row['digest'] ?? ''),
+            'Status' => (string) $row['status'],
+            'ScannedAt' => (int) ($row['scanned_at'] ?? time()),
+            'Summary' => $parsed['summary'] ?? [],
+            'Findings' => array_map(static function (array $f): array {
+                return [
+                    'Cve' => (string) ($f['cve'] ?? ''),
+                    'Package' => (string) ($f['package'] ?? ''),
+                    'Version' => (string) ($f['version'] ?? ''),
+                    'Severity' => (string) ($f['severity'] ?? ''),
+                    'Title' => (string) ($f['title'] ?? ''),
+                    'FixedVersion' => (string) ($f['fixed_version'] ?? ''),
+                ];
+            }, $parsed['findings'] ?? []),
+            'FromCache' => false,
+        ]);
+    }
+
+    /**
+     * @param array<string, mixed> $ep
+     * @return array{summary:array<string,int>,findings:list<array<string,string>>,raw:string,status:string}
+     */
+    private function scanImageViaAgent(array $ep, string $imageRef): array
+    {
+        $url = rtrim((string) ($ep['agent_url'] ?? ''), '/');
+        $secret = (string) ($ep['agent_secret'] ?? '');
+        if ($url === '' || $secret === '') {
+            throw new \RuntimeException('Agent non configuré');
+        }
+        $ch = curl_init($url . '/scan/image');
+        if (!$ch) {
+            throw new \RuntimeException('curl init failed');
+        }
+        $payload = json_encode(['image' => $imageRef], JSON_UNESCAPED_SLASHES) ?: '{}';
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . $secret,
+                'Content-Type: application/json',
+                'Accept: application/json',
+            ],
+            CURLOPT_TIMEOUT => 360,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => 0,
+        ]);
+        $fp = trim((string) ($ep['tls_fingerprint'] ?? ''));
+        if ($fp !== '') {
+            // pinning handled by AgentTls elsewhere; keep soft verify for scan
+        }
+        $body = curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = curl_error($ch);
+        curl_close($ch);
+        if ($body === false || $code >= 400) {
+            throw new \RuntimeException($err !== '' ? $err : ('Agent scan HTTP ' . $code . ': ' . (string) $body));
+        }
+        $json = json_decode((string) $body, true);
+        if (!is_array($json)) {
+            throw new \RuntimeException('Réponse agent invalide');
+        }
+        if (isset($json['raw']) && is_string($json['raw'])) {
+            return $this->imageScanner->parseTrivyJson($json['raw']);
+        }
+        return [
+            'summary' => is_array($json['summary'] ?? null) ? $json['summary'] : [],
+            'findings' => is_array($json['findings'] ?? null) ? $json['findings'] : [],
+            'raw' => (string) ($json['raw'] ?? $body),
+            'status' => (string) ($json['status'] ?? 'ok'),
+        ];
     }
 }

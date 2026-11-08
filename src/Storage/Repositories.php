@@ -89,7 +89,7 @@ final class Repositories
     public function listUsers(): array
     {
         return $this->pdo->query(
-            'SELECT id, username, role, created_at FROM users ORDER BY id ASC'
+            'SELECT id, username, role, created_at, auth_source FROM users ORDER BY id ASC'
         )->fetchAll() ?: [];
     }
 
@@ -98,15 +98,19 @@ final class Repositories
         $hash = password_hash($password, PASSWORD_DEFAULT);
         $now = time();
         $stmt = $this->pdo->prepare(
-            'INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)'
+            'INSERT INTO users (username, password_hash, role, created_at, auth_source) VALUES (?, ?, ?, ?, \'local\')'
         );
         $stmt->execute([$username, $hash, $role, $now]);
         $id = (int) $this->pdo->lastInsertId();
+        if ($role !== 1) {
+            $this->seedOperateAclForUser($id);
+        }
         return $this->findUserById($id) ?? [
             'id' => $id,
             'username' => $username,
             'role' => $role,
             'created_at' => $now,
+            'auth_source' => 'local',
         ];
     }
 
@@ -121,6 +125,57 @@ final class Repositories
     {
         $stmt = $this->pdo->prepare('DELETE FROM users WHERE id = ?');
         $stmt->execute([$id]);
+    }
+
+    /**
+     * Rename / retarget an endpoint (local or agent).
+     *
+     * @param array{name?:string,node_name?:string,agent_url?:string,public_url?:string,clear_tls_pin?:bool} $fields
+     */
+    public function updateEndpointDetails(int $id, array $fields): ?array
+    {
+        $ep = $this->getEndpoint($id);
+        if (!$ep) {
+            return null;
+        }
+        $name = array_key_exists('name', $fields)
+            ? trim((string) $fields['name'])
+            : (string) ($ep['name'] ?? '');
+        $nodeName = array_key_exists('node_name', $fields)
+            ? trim((string) $fields['node_name'])
+            : (string) ($ep['node_name'] ?? $name);
+        if ($nodeName === '') {
+            $nodeName = $name;
+        }
+        if ($name === '') {
+            $name = $nodeName;
+        }
+        $publicUrl = array_key_exists('public_url', $fields)
+            ? rtrim(trim((string) $fields['public_url']), '/')
+            : (string) ($ep['public_url'] ?? '');
+        $agentUrl = (string) ($ep['agent_url'] ?? '');
+        $url = (string) ($ep['url'] ?? '');
+        $clearPin = !empty($fields['clear_tls_pin']);
+        if (($ep['kind'] ?? '') === 'agent' && array_key_exists('agent_url', $fields)) {
+            $agentUrl = rtrim(trim((string) $fields['agent_url']), '/');
+            $url = $agentUrl;
+            $prev = rtrim(trim((string) ($ep['agent_url'] ?? '')), '/');
+            if ($agentUrl !== $prev) {
+                $clearPin = true;
+            }
+        }
+        if ($clearPin) {
+            $stmt = $this->pdo->prepare(
+                'UPDATE endpoints SET name = ?, node_name = ?, public_url = ?, url = ?, agent_url = ?, tls_fingerprint = \'\' WHERE id = ?'
+            );
+            $stmt->execute([$name, $nodeName, $publicUrl, $url, $agentUrl, $id]);
+        } else {
+            $stmt = $this->pdo->prepare(
+                'UPDATE endpoints SET name = ?, node_name = ?, public_url = ?, url = ?, agent_url = ? WHERE id = ?'
+            );
+            $stmt->execute([$name, $nodeName, $publicUrl, $url, $agentUrl, $id]);
+        }
+        return $this->getEndpoint($id);
     }
 
     public function updateEndpointPublicUrl(int $id, string $publicUrl): void
@@ -222,7 +277,9 @@ final class Repositories
             $now,
             $now,
         ]);
-        return $this->getEndpoint((int) $this->pdo->lastInsertId()) ?? [];
+        $id = (int) $this->pdo->lastInsertId();
+        $this->seedOperateAclForEndpoint($id);
+        return $this->getEndpoint($id) ?? [];
     }
 
     /** Re-join existing agent: rotate secret, refresh name/status (idempotent install). */
@@ -816,5 +873,445 @@ final class Repositories
             $out[] = $mapped[$idx];
         }
         return $out;
+    }
+
+    // --- Teams & endpoint ACLs ---
+
+    /** @return list<array<string, mixed>> */
+    public function listTeams(): array
+    {
+        return $this->pdo->query('SELECT * FROM teams ORDER BY name ASC')->fetchAll() ?: [];
+    }
+
+    /** @return array<string, mixed>|null */
+    public function getTeam(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM teams WHERE id = ?');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    public function createTeam(string $name, string $description = '', string $adGroupDn = ''): array
+    {
+        $now = time();
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO teams (name, description, ad_group_dn, created_at) VALUES (?, ?, ?, ?)'
+        );
+        $stmt->execute([$name, $description, $adGroupDn, $now]);
+        return $this->getTeam((int) $this->pdo->lastInsertId()) ?? [
+            'id' => (int) $this->pdo->lastInsertId(),
+            'name' => $name,
+            'description' => $description,
+            'ad_group_dn' => $adGroupDn,
+            'created_at' => $now,
+        ];
+    }
+
+    public function updateTeam(int $id, string $name, string $description, string $adGroupDn): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE teams SET name = ?, description = ?, ad_group_dn = ? WHERE id = ?'
+        );
+        $stmt->execute([$name, $description, $adGroupDn, $id]);
+        return $this->getTeam($id);
+    }
+
+    public function deleteTeam(int $id): void
+    {
+        $this->pdo->prepare('DELETE FROM teams WHERE id = ?')->execute([$id]);
+        $this->pdo->prepare(
+            "DELETE FROM endpoint_acls WHERE subject_type = 'team' AND subject_id = ?"
+        )->execute([$id]);
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listTeamMembers(int $teamId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT u.id, u.username, u.role, u.auth_source, u.created_at
+             FROM team_members tm
+             JOIN users u ON u.id = tm.user_id
+             WHERE tm.team_id = ?
+             ORDER BY u.username ASC'
+        );
+        $stmt->execute([$teamId]);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    /** @return list<int> */
+    public function listTeamIdsForUser(int $userId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT team_id FROM team_members WHERE user_id = ?');
+        $stmt->execute([$userId]);
+        return array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+    }
+
+    public function addTeamMember(int $teamId, int $userId): void
+    {
+        $this->pdo->prepare(
+            'INSERT OR IGNORE INTO team_members (team_id, user_id) VALUES (?, ?)'
+        )->execute([$teamId, $userId]);
+    }
+
+    public function removeTeamMember(int $teamId, int $userId): void
+    {
+        $this->pdo->prepare(
+            'DELETE FROM team_members WHERE team_id = ? AND user_id = ?'
+        )->execute([$teamId, $userId]);
+    }
+
+    /** Replace LDAP-synced memberships for a user based on matched team ids. */
+    public function syncUserTeamMemberships(int $userId, array $teamIds): void
+    {
+        $teamIds = array_values(array_unique(array_map('intval', $teamIds)));
+        $ldapTeams = $this->pdo->query(
+            "SELECT id FROM teams WHERE ad_group_dn IS NOT NULL AND TRIM(ad_group_dn) != ''"
+        )->fetchAll(PDO::FETCH_COLUMN) ?: [];
+        $ldapTeamIds = array_map('intval', $ldapTeams);
+        if ($ldapTeamIds !== []) {
+            $placeholders = implode(',', array_fill(0, count($ldapTeamIds), '?'));
+            $params = array_merge([$userId], $ldapTeamIds);
+            $this->pdo->prepare(
+                "DELETE FROM team_members WHERE user_id = ? AND team_id IN ($placeholders)"
+            )->execute($params);
+        }
+        foreach ($teamIds as $tid) {
+            if ($tid > 0) {
+                $this->addTeamMember($tid, $userId);
+            }
+        }
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listEndpointAcls(?int $endpointId = null): array
+    {
+        if ($endpointId !== null) {
+            $stmt = $this->pdo->prepare(
+                'SELECT * FROM endpoint_acls WHERE endpoint_id = ? ORDER BY subject_type, subject_id'
+            );
+            $stmt->execute([$endpointId]);
+            return $stmt->fetchAll() ?: [];
+        }
+        return $this->pdo->query(
+            'SELECT * FROM endpoint_acls ORDER BY endpoint_id, subject_type, subject_id'
+        )->fetchAll() ?: [];
+    }
+
+    public function upsertEndpointAcl(int $endpointId, string $subjectType, int $subjectId, string $role): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO endpoint_acls (endpoint_id, subject_type, subject_id, role)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(endpoint_id, subject_type, subject_id) DO UPDATE SET role = excluded.role'
+        );
+        $stmt->execute([$endpointId, $subjectType, $subjectId, $role]);
+        $get = $this->pdo->prepare(
+            'SELECT * FROM endpoint_acls WHERE endpoint_id = ? AND subject_type = ? AND subject_id = ?'
+        );
+        $get->execute([$endpointId, $subjectType, $subjectId]);
+        return $get->fetch() ?: [];
+    }
+
+    public function deleteEndpointAcl(int $id): void
+    {
+        $this->pdo->prepare('DELETE FROM endpoint_acls WHERE id = ?')->execute([$id]);
+    }
+
+    public function deleteEndpointAclBySubject(int $endpointId, string $subjectType, int $subjectId): void
+    {
+        $this->pdo->prepare(
+            'DELETE FROM endpoint_acls WHERE endpoint_id = ? AND subject_type = ? AND subject_id = ?'
+        )->execute([$endpointId, $subjectType, $subjectId]);
+    }
+
+    /** Effective role for a user on an endpoint (max of direct + team ACLs). */
+    public function resolveEndpointRole(int $userId, int $endpointId): string
+    {
+        $rank = ['none' => 0, 'read' => 1, 'operate' => 2, 'admin' => 3];
+        $best = 'none';
+        $stmt = $this->pdo->prepare(
+            "SELECT role FROM endpoint_acls
+             WHERE endpoint_id = ? AND subject_type = 'user' AND subject_id = ?"
+        );
+        $stmt->execute([$endpointId, $userId]);
+        $direct = $stmt->fetchColumn();
+        if (is_string($direct) && ($rank[$direct] ?? 0) > ($rank[$best] ?? 0)) {
+            $best = $direct;
+        }
+        $teamIds = $this->listTeamIdsForUser($userId);
+        if ($teamIds !== []) {
+            $placeholders = implode(',', array_fill(0, count($teamIds), '?'));
+            $params = array_merge([$endpointId], $teamIds);
+            $stmt = $this->pdo->prepare(
+                "SELECT role FROM endpoint_acls
+                 WHERE endpoint_id = ? AND subject_type = 'team' AND subject_id IN ($placeholders)"
+            );
+            $stmt->execute($params);
+            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) ?: [] as $role) {
+                $role = (string) $role;
+                if (($rank[$role] ?? 0) > ($rank[$best] ?? 0)) {
+                    $best = $role;
+                }
+            }
+        }
+        return $best;
+    }
+
+    /** When a new endpoint is created, grant operate to all non-admin users (compat). */
+    public function seedOperateAclForEndpoint(int $endpointId): void
+    {
+        $users = $this->pdo->query('SELECT id, role FROM users')->fetchAll() ?: [];
+        $ins = $this->pdo->prepare(
+            'INSERT OR IGNORE INTO endpoint_acls (endpoint_id, subject_type, subject_id, role)
+             VALUES (?, \'user\', ?, \'operate\')'
+        );
+        foreach ($users as $u) {
+            if ((int) ($u['role'] ?? 0) === 1) {
+                continue;
+            }
+            $ins->execute([$endpointId, (int) $u['id']]);
+        }
+    }
+
+    /** When a new non-admin user is created, grant operate on all endpoints. */
+    public function seedOperateAclForUser(int $userId): void
+    {
+        $endpoints = $this->pdo->query('SELECT id FROM endpoints')->fetchAll() ?: [];
+        $ins = $this->pdo->prepare(
+            'INSERT OR IGNORE INTO endpoint_acls (endpoint_id, subject_type, subject_id, role)
+             VALUES (?, \'user\', ?, \'operate\')'
+        );
+        foreach ($endpoints as $ep) {
+            $ins->execute([(int) $ep['id'], $userId]);
+        }
+    }
+
+    public function createLdapUser(string $username, int $role = 2): array
+    {
+        $now = time();
+        // Unusable local hash — LDAP users authenticate via directory only
+        $hash = password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT);
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO users (username, password_hash, role, created_at, auth_source)
+             VALUES (?, ?, ?, ?, \'ldap\')'
+        );
+        $stmt->execute([$username, $hash, $role, $now]);
+        $id = (int) $this->pdo->lastInsertId();
+        $this->seedOperateAclForUser($id);
+        return $this->findUserById($id) ?? [
+            'id' => $id,
+            'username' => $username,
+            'role' => $role,
+            'created_at' => $now,
+            'auth_source' => 'ldap',
+        ];
+    }
+
+    // --- Schedules ---
+
+    /** @return list<array<string, mixed>> */
+    public function listSchedules(?int $stackId = null, ?int $endpointId = null): array
+    {
+        $sql = 'SELECT * FROM schedules WHERE 1=1';
+        $params = [];
+        if ($stackId !== null) {
+            $sql .= " AND target_type = 'stack' AND target_id = ?";
+            $params[] = $stackId;
+        }
+        if ($endpointId !== null) {
+            $sql .= ' AND endpoint_id = ?';
+            $params[] = $endpointId;
+        }
+        $sql .= ' ORDER BY id ASC';
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    /** @return array<string, mixed>|null */
+    public function getSchedule(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM schedules WHERE id = ?');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    public function createSchedule(
+        string $name,
+        int $endpointId,
+        string $targetType,
+        int $targetId,
+        string $action,
+        string $cronExpr,
+        string $timezone,
+        string $createdBy,
+        ?int $nextRunAt = null,
+    ): array {
+        $now = time();
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO schedules
+            (name, endpoint_id, target_type, target_id, action, cron_expr, timezone, enabled,
+             last_run_at, next_run_at, last_status, last_error, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, \'\', \'\', ?, ?)'
+        );
+        $stmt->execute([
+            $name,
+            $endpointId,
+            $targetType,
+            $targetId,
+            $action,
+            $cronExpr,
+            $timezone,
+            $nextRunAt,
+            $createdBy,
+            $now,
+        ]);
+        return $this->getSchedule((int) $this->pdo->lastInsertId()) ?? [];
+    }
+
+    public function updateSchedule(
+        int $id,
+        string $name,
+        string $action,
+        string $cronExpr,
+        string $timezone,
+        bool $enabled,
+        ?int $nextRunAt,
+    ): ?array {
+        $stmt = $this->pdo->prepare(
+            'UPDATE schedules SET name = ?, action = ?, cron_expr = ?, timezone = ?, enabled = ?, next_run_at = ?
+             WHERE id = ?'
+        );
+        $stmt->execute([$name, $action, $cronExpr, $timezone, $enabled ? 1 : 0, $nextRunAt, $id]);
+        return $this->getSchedule($id);
+    }
+
+    public function deleteSchedule(int $id): void
+    {
+        $this->pdo->prepare('DELETE FROM schedules WHERE id = ?')->execute([$id]);
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listDueSchedules(int $now): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM schedules
+             WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+             ORDER BY next_run_at ASC LIMIT 50'
+        );
+        $stmt->execute([$now]);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    public function markScheduleRun(int $id, string $status, string $error, ?int $nextRunAt): void
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE schedules SET last_run_at = ?, last_status = ?, last_error = ?, next_run_at = ? WHERE id = ?'
+        );
+        $stmt->execute([time(), $status, $error, $nextRunAt, $id]);
+    }
+
+    // --- Image vulnerability scans ---
+
+    /** @return array<string, mixed>|null */
+    public function getLatestImageScan(int $endpointId, string $imageRef, string $digest = ''): ?array
+    {
+        if ($digest !== '') {
+            $stmt = $this->pdo->prepare(
+                'SELECT * FROM image_scans WHERE endpoint_id = ? AND digest = ? ORDER BY scanned_at DESC LIMIT 1'
+            );
+            $stmt->execute([$endpointId, $digest]);
+        } else {
+            $stmt = $this->pdo->prepare(
+                'SELECT * FROM image_scans WHERE endpoint_id = ? AND image_ref = ? ORDER BY scanned_at DESC LIMIT 1'
+            );
+            $stmt->execute([$endpointId, $imageRef]);
+        }
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listImageScanSummaries(int $endpointId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT s.* FROM image_scans s
+             INNER JOIN (
+               SELECT COALESCE(NULLIF(digest, \'\'), image_ref) AS k, MAX(id) AS mid
+               FROM image_scans WHERE endpoint_id = ? GROUP BY k
+             ) t ON s.id = t.mid
+             WHERE s.endpoint_id = ?
+             ORDER BY s.scanned_at DESC'
+        );
+        $stmt->execute([$endpointId, $endpointId]);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    /** @param array<string, mixed> $summary */
+    public function saveImageScan(
+        int $endpointId,
+        string $imageRef,
+        string $digest,
+        string $status,
+        array $summary,
+        string $rawJson,
+        array $findings,
+    ): array {
+        $now = time();
+        $existing = null;
+        if ($digest !== '') {
+            $stmt = $this->pdo->prepare(
+                'SELECT id FROM image_scans WHERE endpoint_id = ? AND digest = ? LIMIT 1'
+            );
+            $stmt->execute([$endpointId, $digest]);
+            $existing = $stmt->fetchColumn();
+        }
+        $summaryJson = json_encode($summary, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}';
+        if ($existing) {
+            $id = (int) $existing;
+            $this->pdo->prepare(
+                'UPDATE image_scans SET image_ref = ?, status = ?, scanned_at = ?, summary_json = ?, raw_json = ? WHERE id = ?'
+            )->execute([$imageRef, $status, $now, $summaryJson, $rawJson, $id]);
+            $this->pdo->prepare('DELETE FROM image_findings WHERE scan_id = ?')->execute([$id]);
+        } else {
+            $this->pdo->prepare(
+                'INSERT INTO image_scans (endpoint_id, image_ref, digest, status, scanned_at, summary_json, raw_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)'
+            )->execute([$endpointId, $imageRef, $digest, $status, $now, $summaryJson, $rawJson]);
+            $id = (int) $this->pdo->lastInsertId();
+        }
+        $ins = $this->pdo->prepare(
+            'INSERT INTO image_findings (scan_id, cve, package, version, severity, title, fixed_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+        foreach ($findings as $f) {
+            $ins->execute([
+                $id,
+                (string) ($f['cve'] ?? ''),
+                (string) ($f['package'] ?? ''),
+                (string) ($f['version'] ?? ''),
+                (string) ($f['severity'] ?? 'UNKNOWN'),
+                (string) ($f['title'] ?? ''),
+                (string) ($f['fixed_version'] ?? ''),
+            ]);
+        }
+        $row = $this->pdo->prepare('SELECT * FROM image_scans WHERE id = ?');
+        $row->execute([$id]);
+        return $row->fetch() ?: [];
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listImageFindings(int $scanId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM image_findings WHERE scan_id = ? ORDER BY
+             CASE severity
+               WHEN \'CRITICAL\' THEN 1 WHEN \'HIGH\' THEN 2 WHEN \'MEDIUM\' THEN 3
+               WHEN \'LOW\' THEN 4 ELSE 5 END, cve ASC'
+        );
+        $stmt->execute([$scanId]);
+        return $stmt->fetchAll() ?: [];
     }
 }

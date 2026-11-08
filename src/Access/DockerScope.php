@@ -32,9 +32,14 @@ final class DockerScope
         ?string $rawBody,
         array $forwardHeaders,
         array $query,
+        string $endpointRole = EndpointAcl::OPERATE,
     ): Response {
         $dockerPath = $dockerPath === '' ? '/' : $dockerPath;
         $method = strtoupper($method);
+
+        if ($endpointRole === EndpointAcl::READ && !in_array($method, ['GET', 'HEAD'], true)) {
+            return Response::error('Accès lecture seule sur ce nœud', 403);
+        }
 
         if ($deny = DockerApiPolicy::denyAlways($method, $dockerPath)) {
             return Response::error($deny, 403);

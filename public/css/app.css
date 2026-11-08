@@ -1040,6 +1040,57 @@ a.notif-title:hover { color: var(--accent-hover); text-decoration: underline; }
   align-items: center;
 }
 .toolbar .spacer { flex: 1; }
+
+/* Paramètres — sous-navigation (Général / Registres / Nœuds / Users / Équipes) */
+.settings-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 18px;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.settings-subnav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .15s ease, color .15s ease;
+}
+.settings-subnav-link:hover {
+  color: var(--text);
+  background: var(--bg-input);
+  text-decoration: none;
+}
+.settings-subnav-link.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+.settings-subnav-link .nav-ico {
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  color: inherit;
+}
+.settings-subnav-link .nav-ico svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+}
+.settings-subnav-link .nav-ico svg[fill="none"] {
+  fill: none;
+  stroke: currentColor;
+}
+
 .search {
   width: min(280px, 100%);
   background: var(--bg-panel);
@@ -1117,6 +1168,26 @@ table.data th.sortable .sort-ind {
   font-size: 9px;
   margin-left: 4px;
   opacity: 0.85;
+}
+table.data .col-check {
+  width: 36px;
+  text-align: center;
+  vertical-align: middle;
+  padding-left: 10px;
+  padding-right: 6px;
+}
+table.data .col-check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent, #38bdf8);
+}
+table.data .col-check input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.bulk-delete-btn {
+  white-space: nowrap;
 }
 table.data tr:hover td { background: rgba(59, 130, 246, 0.04); }
 table.data tr.row-stopped td {

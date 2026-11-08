@@ -144,6 +144,8 @@ const Api = (() => {
     rotateJoinToken: (payload = {}) =>
       request('/api/nodes/join-token/rotate', { method: 'POST', body: JSON.stringify(payload) }),
     unlinkNode: (id) => request(`/api/nodes/${id}`, { method: 'DELETE' }),
+    updateNode: (id, payload) =>
+      request(`/api/nodes/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
     disableNode: (id) => request(`/api/nodes/${id}/disable`, { method: 'POST', body: '{}' }),
     enableNode: (id) => request(`/api/nodes/${id}/enable`, { method: 'POST', body: '{}' }),
     pingNode: (id) => request(`/api/nodes/${id}/ping`, { method: 'POST', body: '{}' }),
@@ -283,5 +285,56 @@ const Api = (() => {
       }),
     volumeDownloadUrl: (name, path) =>
       `${Api.volumeBase(name)}/download?path=${encodeURIComponent(path)}`,
+    teams: (detail = true) =>
+      request(detail ? '/api/teams?detail=1' : '/api/teams'),
+    team: (id) => request(`/api/teams/${id}`),
+    createTeam: (payload) =>
+      request('/api/teams', { method: 'POST', body: JSON.stringify(payload) }),
+    updateTeam: (id, payload) =>
+      request(`/api/teams/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+    deleteTeam: (id) => request(`/api/teams/${id}`, { method: 'DELETE' }),
+    addTeamMember: (teamId, UserId) =>
+      request(`/api/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ UserId }) }),
+    removeTeamMember: (teamId, userId) =>
+      request(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE' }),
+    acls: (endpointId) => {
+      const q = endpointId != null ? `?endpointId=${encodeURIComponent(endpointId)}` : '';
+      return request(`/api/acls${q}`);
+    },
+    upsertAcl: (payload) =>
+      request('/api/acls', { method: 'POST', body: JSON.stringify(payload) }),
+    deleteAcl: (id) => request(`/api/acls/${id}`, { method: 'DELETE' }),
+    schedules: (opts = {}) => {
+      const q = new URLSearchParams();
+      if (opts.stackId != null) q.set('stackId', String(opts.stackId));
+      if (opts.endpointId != null) q.set('endpointId', String(opts.endpointId));
+      const qs = q.toString();
+      return request(`/api/schedules${qs ? '?' + qs : ''}`);
+    },
+    createSchedule: (payload) =>
+      request('/api/schedules', { method: 'POST', body: JSON.stringify(payload) }),
+    updateSchedule: (id, payload) =>
+      request(`/api/schedules/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+    deleteSchedule: (id) => request(`/api/schedules/${id}`, { method: 'DELETE' }),
+    runSchedule: (id) => request(`/api/schedules/${id}/run`, { method: 'POST', body: '{}' }),
+    imageScans: (endpointId) =>
+      request(`/api/endpoints/${endpointId}/images/scans`),
+    imageScan: (endpointId, opts = {}) => {
+      const q = new URLSearchParams();
+      if (opts.ref) q.set('ref', opts.ref);
+      if (opts.digest) q.set('digest', opts.digest);
+      return request(`/api/endpoints/${endpointId}/images/scan?${q.toString()}`);
+    },
+    scanImage: (endpointId, payload) =>
+      request(`/api/endpoints/${endpointId}/images/scan`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    /** Soft CVE check — never blocks deploy; Status=skipped on Trivy failure. */
+    adviseImages: (endpointId, payload) =>
+      request(`/api/endpoints/${endpointId}/images/advise`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
   };
 })();

@@ -137,6 +137,79 @@ CREATE TABLE IF NOT EXISTS metric_samples (
     disk REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_metric_samples_scope_time ON metric_samples(scope, sampled_at DESC);
+
+CREATE TABLE IF NOT EXISTS teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    ad_group_dn TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (team_id, user_id),
+    FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS endpoint_acls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint_id INTEGER NOT NULL,
+    subject_type TEXT NOT NULL,
+    subject_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    UNIQUE(endpoint_id, subject_type, subject_id),
+    FOREIGN KEY(endpoint_id) REFERENCES endpoints(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_endpoint_acls_subject ON endpoint_acls(subject_type, subject_id);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT '',
+    endpoint_id INTEGER NOT NULL,
+    target_type TEXT NOT NULL DEFAULT 'stack',
+    target_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    cron_expr TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at INTEGER,
+    next_run_at INTEGER,
+    last_status TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(endpoint_id) REFERENCES endpoints(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS image_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint_id INTEGER NOT NULL,
+    image_ref TEXT NOT NULL,
+    digest TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    scanned_at INTEGER,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    raw_json TEXT NOT NULL DEFAULT '',
+    UNIQUE(endpoint_id, image_ref, digest)
+);
+CREATE INDEX IF NOT EXISTS idx_image_scans_lookup ON image_scans(endpoint_id, digest);
+
+CREATE TABLE IF NOT EXISTS image_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id INTEGER NOT NULL,
+    cve TEXT NOT NULL DEFAULT '',
+    package TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    severity TEXT NOT NULL DEFAULT 'UNKNOWN',
+    title TEXT NOT NULL DEFAULT '',
+    fixed_version TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(scan_id) REFERENCES image_scans(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_image_findings_scan ON image_findings(scan_id);
 SQL);
         $this->ensureColumn('registries', 'owner_id', 'INTEGER');
         $this->ensureColumn('registries', 'owner_username', "TEXT NOT NULL DEFAULT ''");
@@ -154,6 +227,43 @@ SQL);
         $this->ensureColumn('endpoints', 'tls_fingerprint', "TEXT NOT NULL DEFAULT ''");
         $this->pdo->exec("UPDATE endpoints SET kind = 'local' WHERE id = 1 AND (kind IS NULL OR kind = '')");
         $this->pdo->exec("UPDATE endpoints SET node_name = name WHERE (node_name IS NULL OR node_name = '') AND name IS NOT NULL AND name != ''");
+
+        $this->ensureColumn('users', 'auth_source', "TEXT NOT NULL DEFAULT 'local'");
+        $this->ensureColumn('teams', 'ad_group_dn', "TEXT NOT NULL DEFAULT ''");
+
+        $this->seedDefaultEndpointAcls();
+    }
+
+    /**
+     * One-shot compat: grant every non-admin user "operate" on all endpoints
+     * so behaviour matches pre-ACL until an admin tightens access.
+     */
+    private function seedDefaultEndpointAcls(): void
+    {
+        $flag = $this->pdo->query(
+            "SELECT value FROM settings WHERE key = 'acl_seeded_v1'"
+        )->fetchColumn();
+        if ($flag === '1') {
+            return;
+        }
+        $users = $this->pdo->query('SELECT id, role FROM users')->fetchAll() ?: [];
+        $endpoints = $this->pdo->query('SELECT id FROM endpoints')->fetchAll() ?: [];
+        $ins = $this->pdo->prepare(
+            'INSERT OR IGNORE INTO endpoint_acls (endpoint_id, subject_type, subject_id, role)
+             VALUES (?, \'user\', ?, \'operate\')'
+        );
+        foreach ($users as $u) {
+            if ((int) ($u['role'] ?? 0) === 1) {
+                continue;
+            }
+            foreach ($endpoints as $ep) {
+                $ins->execute([(int) $ep['id'], (int) $u['id']]);
+            }
+        }
+        $this->pdo->prepare(
+            "INSERT INTO settings (key, value) VALUES ('acl_seeded_v1', '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )->execute();
     }
 
     private function ensureColumn(string $table, string $column, string $ddl): void

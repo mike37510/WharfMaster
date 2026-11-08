@@ -15,8 +15,17 @@ final class Ownership
     public const LABEL_OWNER_ID = 'dockermanager.owner_id';
     public const COMPOSE_PROJECT = 'com.docker.compose.project';
 
-    /** @param array{id?:int,username?:string,role?:int} $user */
+    /** @param array{id?:int,username?:string,role?:int,_endpointAdmin?:bool} $user */
     public static function isAdmin(array $user): bool
+    {
+        if (!empty($user['_endpointAdmin'])) {
+            return true;
+        }
+        return (int) ($user['role'] ?? 0) === 1;
+    }
+
+    /** Global instance admin (ignores endpoint-level admin). */
+    public static function isGlobalAdmin(array $user): bool
     {
         return (int) ($user['role'] ?? 0) === 1;
     }

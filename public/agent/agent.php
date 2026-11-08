@@ -261,6 +261,33 @@ if ($path === '/health' || $path === '/health/') {
     ]);
 }
 
+// --- Image vulnerability scan (Trivy) ---
+if ($path === '/scan/image' && $method === 'POST') {
+    agent_require_auth($secret);
+    $body = json_decode((string) file_get_contents('php://input'), true);
+    if (!is_array($body)) {
+        agent_json(['ok' => false, 'message' => 'JSON invalide'], 400);
+    }
+    $image = trim((string) ($body['image'] ?? $body['Image'] ?? ''));
+    if ($image === '' || !preg_match('#^[a-zA-Z0-9._/:@-]+$#', $image)) {
+        agent_json(['ok' => false, 'message' => 'Image invalide'], 400);
+    }
+    $trivy = trim((string) shell_exec('command -v trivy 2>/dev/null'));
+    if ($trivy === '' || !is_executable($trivy)) {
+        agent_json(['ok' => false, 'message' => 'Trivy non installé sur l\'agent'], 503);
+    }
+    $cmd = escapeshellarg($trivy)
+        . ' image --quiet --format json --severity-exit-code 0 --scanners vuln '
+        . escapeshellarg($image)
+        . ' 2>/tmp/trivy-agent.err';
+    $raw = shell_exec($cmd);
+    if (!is_string($raw) || $raw === '') {
+        $err = is_file('/tmp/trivy-agent.err') ? trim((string) file_get_contents('/tmp/trivy-agent.err')) : '';
+        agent_json(['ok' => false, 'message' => $err !== '' ? $err : 'Scan Trivy échoué'], 502);
+    }
+    agent_json(['ok' => true, 'raw' => $raw, 'status' => 'ok']);
+}
+
 // --- Compose API ---
 if (str_starts_with($path, '/compose')) {
     agent_require_auth($secret);

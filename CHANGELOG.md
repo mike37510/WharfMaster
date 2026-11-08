@@ -2,6 +2,43 @@
 
 Toutes les dates sont en UTC+1.
 
+## [2.0.0] — 2026-11-08
+
+Release majeure : gouvernance multi-équipes, SSO AD, ACL par nœud, scheduler, scan CVE Trivy, et UX Paramètres / Nœuds revue.
+
+### Ajouté
+- **Équipes** : CRUD + membres (recherche / ajout / retrait), mapping groupe AD
+- **ACL par nœud** : rôles `read` / `operate` / `admin` (user ou équipe)
+  - gestion depuis **Nœuds → Accès** (recherche user/équipe)
+  - filtrage endpoints + enforcement proxy Docker / stacks
+  - migration : users existants conservent `operate` partout
+- **SSO Active Directory / LDAP** : Paramètres → Authentification
+  - host / TLS / LDAPS / bind / filtre / attribut username
+  - provision users au login + sync groupes → équipes
+- **Scheduler** : cron start / stop / restart de stacks + sidecar Compose
+- **Scan CVE Trivy** (0.76.2 dans Dockerfile principal + agent)
+  - pastilles Images, scan manuel, agent `/scan/image`
+  - avis non bloquant à la création conteneur / stack (`POST …/images/advise`)
+  - interrupteur global Paramètres `TrivyEnabled`
+- **Nœuds** : modal « Ajouter un nœud », édition (renommer, URL agent, URL publique), badge `Disabled`
+- Menus admin regroupés sous **Paramètres** (Général, Authentification, Registres, Nœuds, Utilisateurs, Équipes)
+
+### Compatibilité API Portainer CE
+- `UserAccessPolicies` / `TeamAccessPolicies` depuis `endpoint_acls` (`RoleId` 1/2/3)
+- `PUT /api/endpoints/{id}` accepte policies + renommage
+- `GET /api/teams` → tableau nu `[{Id,Name}]` ; détail `?detail=1`
+- Alias `GET|POST /api/team_memberships`, `GET /api/teams/{id}/memberships`
+- Settings : `LDAPSettings` (+ `Ldap` UI), `TrivyEnabled` / `TrivyInstalled` / `TrivyAvailable`
+- Registries : `Type` numérique CE (6=hub, 3=custom) + `RegistryKind` WM
+- Endpoint désactivé → `Status` `2` ; flag `Disabled`
+- `PUT /api/nodes/{id}` : mise à jour métadonnées nœud
+- `GET /api/users/{id}` ; `AuthSource` correct sur `/api/users/me`
+
+### Breaking / migration
+- Image / tag agent par défaut : **`wharfmaster-agent:2.0.0`** (rebuild / `install.sh` mis à jour)
+- Compose : service **`scheduler`** optionnel mais présent dans `docker-compose.yml`
+- Les droits nœud ne se gèrent plus depuis la page Équipes (uniquement via Nœuds → Accès)
+
 ## [1.5.0] — 2026-11-08
 
 ### Ajouté

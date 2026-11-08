@@ -8,7 +8,7 @@
 services:
   wharfmaster:
     build: .
-    image: wharfmaster:1.5.0
+    image: wharfmaster:2.0.0
     container_name: wharfmaster
     restart: unless-stopped
     ports:
@@ -17,7 +17,7 @@ services:
       DOCKER_SOCKET: /var/run/docker.sock
       DOCKER_API_VERSION: ${DOCKER_API_VERSION:-v1.45}
       # Image agent proposée dans l’UI Nœuds (optionnel)
-      # WHARFMASTER_AGENT_IMAGE: ghcr.io/mike37510/wharfmaster-agent:1.5.0
+      # WHARFMASTER_AGENT_IMAGE: ghcr.io/mike37510/wharfmaster-agent:2.0.0
     volumes:
       # Persistance : SQLite, stacks Compose, Dockerfiles, JWT
       - wharfmaster-data:/var/www/html/data
@@ -26,6 +26,20 @@ services:
     # GID du groupe docker hôte (recommandé). Ex. : 999 ou 989
     group_add:
       - "${DOCKER_GID:-999}"
+
+  scheduler:
+    image: curlimages/curl:8.11.1
+    container_name: wharfmaster-scheduler
+    restart: unless-stopped
+    depends_on:
+      - wharfmaster
+    environment:
+      WHARFMASTER_INTERNAL_URL: http://wharfmaster
+      SCHEDULER_KEY_FILE: /data/scheduler.api_key
+    volumes:
+      - wharfmaster-data:/data:ro
+      - ./deploy/scheduler-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
 
 volumes:
   wharfmaster-data:

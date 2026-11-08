@@ -11,6 +11,18 @@ RUN apk add --no-cache curl openssl socat docker-cli docker-cli-compose \
       'max_input_time=900' \
       > /usr/local/etc/php/conf.d/zz-wharfmaster-uploads.ini
 
+# Trivy for remote image CVE scans (default)
+RUN set -eux; \
+  TRIVY_VERSION=0.76.2; \
+  ARCH=$(uname -m); \
+  case "$ARCH" in x86_64) TARCH=64bit ;; aarch64) TARCH=ARM64 ;; *) TARCH=64bit ;; esac; \
+  curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TARCH}.tar.gz" \
+    -o /tmp/trivy.tgz; \
+  tar -xzf /tmp/trivy.tgz -C /usr/local/bin trivy; \
+  rm -f /tmp/trivy.tgz; \
+  chmod 0755 /usr/local/bin/trivy; \
+  /usr/local/bin/trivy --version
+
 WORKDIR /app
 COPY agent.php /app/agent.php
 COPY router.php /app/router.php

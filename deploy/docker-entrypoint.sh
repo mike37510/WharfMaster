@@ -28,5 +28,12 @@ mkdir -p /var/www/html/data/compose /var/www/html/data/dockerfiles /var/www/html
 chown -R www-data:www-data /var/www/html/data
 chmod 700 /var/www/html/data
 
+# Ensure Trivy is on PATH for CVE scans (baked into image; warn if missing)
+if [ ! -x /usr/local/bin/trivy ] && [ ! -x /usr/bin/trivy ]; then
+  echo "[wharfmaster] WARN: trivy binary missing — image CVE scans will fail. Rebuild the image." >&2
+else
+  export PATH="/usr/local/bin:${PATH}"
+fi
+
 # Démarrer Apache en root (bind :80) — il droppera vers www-data + groupes secondaires
 exec "$@"

@@ -8,9 +8,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       unzip \
       libzip-dev \
       libsqlite3-dev \
-  && docker-php-ext-install pdo_sqlite zip \
+      libldap2-dev \
+  && docker-php-ext-install pdo_sqlite zip ldap \
   && a2enmod rewrite headers \
   && rm -rf /var/lib/apt/lists/*
+
+# Trivy (image CVE scanner) — installed by default for /api/.../images/scan
+RUN set -eux; \
+  TRIVY_VERSION=0.76.2; \
+  ARCH=$(dpkg --print-architecture); \
+  case "$ARCH" in amd64) TARCH=64bit ;; arm64) TARCH=ARM64 ;; *) TARCH=64bit ;; esac; \
+  curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TARCH}.tar.gz" \
+    -o /tmp/trivy.tgz; \
+  tar -xzf /tmp/trivy.tgz -C /usr/local/bin trivy; \
+  rm -f /tmp/trivy.tgz; \
+  chmod 0755 /usr/local/bin/trivy; \
+  /usr/local/bin/trivy --version
 
 # Docker CLI + Compose plugin (dépôt officiel Docker)
 RUN set -eux; \
@@ -49,7 +62,8 @@ RUN mkdir -p /var/www/html/data/compose /var/www/html/data/dockerfiles \
 ENV DOCKER_SOCKET=/var/run/docker.sock \
     DOCKER_BIN=/usr/bin/docker \
     COMPOSE_BIN=/usr/bin/docker \
-    DOCKER_API_VERSION=v1.45
+    DOCKER_API_VERSION=v1.45 \
+    TRIVY_BIN=/usr/local/bin/trivy
 
 EXPOSE 80
 VOLUME ["/var/www/html/data"]

@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.5.0 |
+| **Version** | 2.0.0 |
 | **Console** | `/app` |
 | **Site public** | `/` |
 | **API** | `/api` |
@@ -47,8 +47,12 @@
 - **Réseaux & stacks Compose** — éditeur YAML, variables `.env`, déploiement local **et sur agents**
 - **Registres** — Docker Hub / Registry V2, parcours dépôts & tags, pull
 - **Utilisateurs** — rôles admin / utilisateur, isolation par labels `dockermanager.owner*`
+- **Équipes & ACL** — équipes + membres ; droits `read` / `operate` / `admin` par nœud (user ou équipe)
+- **SSO Active Directory / LDAP** — login domaine, sync groupes → équipes (Paramètres → Authentification)
+- **Scheduler** — planifications cron start / stop / restart de stacks
+- **Scan CVE Trivy** — pastilles Images, avis non bloquant à la création, interrupteur Paramètres
 - **Journaux** — audit applicatif (connexions, actions Docker / stacks / utilisateurs)
-- **Nœuds (multinode)** — agents HTTPS, token de jointure, sélecteur (nœud ou **Tous**), TLS, délier, stacks distantes
+- **Nœuds (multinode)** — agents HTTPS, token de jointure, édition / accès, sélecteur (nœud ou **Tous**), TLS, stacks distantes
 - **Sécurité** — rate-limit login, politique Compose résolue (`docker compose config`), proxy Docker restreint pour les non-admins
 
 ---
@@ -61,7 +65,7 @@ Les **stacks Compose** peuvent être déployées sur un nœud agent : le princip
 
 ### Enrôler un nœud
 
-1. Console → **Nœuds** (admin) → saisir l’**IP** et le **nom** du nœud → **Générer la commande**
+1. Console → **Paramètres → Nœuds** (admin) → **Ajouter un nœud** → IP + nom → **Générer la commande**
 2. Copier-coller la commande sur la machine distante (Docker + curl). L’URL `--url` reprend l’**URL publique** configurée dans Paramètres. **`--advertise` doit être en `https://`**.
 
 Exemple (valeurs déjà remplies par l’UI) :
@@ -260,7 +264,7 @@ export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
 export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.5.0
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.0.0
 ```
 
 ### Backup / restauration

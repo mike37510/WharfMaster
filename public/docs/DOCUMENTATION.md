@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **1.5.0**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.0.0**.
 
 | | |
 |---|---|
@@ -20,6 +20,7 @@ Guide d’utilisation de la console et de l’**API HTTP**. Version applicative 
 - stacks Compose (nœud local **et** agents distants) ;
 - registres (Docker Hub / Registry V2) ;
 - multi-utilisateurs avec isolation par labels ;
+- **équipes**, **ACL par nœud**, **SSO AD/LDAP**, **scheduler**, **scan CVE Trivy** ;
 - infrastructure **multi-nœuds** via agents HTTPS ;
 - API compatible **Portainer CE** pour scripts et clients existants.
 
@@ -62,15 +63,23 @@ Les stacks distantes : le principal **valide** (`ComposePolicy` + `docker compos
 | Menu | Contenu |
 |------|---------|
 | Tableau de bord | Stats, aperçus, répartition multi-nœuds |
-| Conteneurs / Images / Volumes / Réseaux | CRUD Docker (nœud sélectionné) |
-| Stacks | Compose : déployer, démarrer, arrêter, redémarrer, supprimer |
-| Registres | Hub / registry privés, parcours, pull |
-| Nœuds (admin) | Joindre / ping / désactiver / délier des agents |
+| Conteneurs / Images / Volumes / Réseaux | CRUD Docker (nœud sélectionné) ; Images : pastilles CVE |
+| Stacks | Compose : déployer, démarrer, arrêter, redémarrer, supprimer, schedules |
 | Journaux | Audit applicatif |
-| Paramètres | URL publique, thème |
-| Utilisateurs (admin) | Comptes et mots de passe |
+| Paramètres (admin) | Sous-menus : Général, Authentification (LDAP), Registres, Nœuds, Utilisateurs, Équipes |
 | Documentation | Ce guide |
 | À propos | Version et licence |
+
+#### Paramètres (admin)
+
+| Sous-menu | Contenu |
+|-----------|---------|
+| Général | Thème, URL publique, métriques, Trivy on/off, backup |
+| Authentification | Active Directory / LDAP |
+| Registres | Hub / Registry V2 |
+| Nœuds | Agents : ajouter, éditer, **Accès** (ACL user/équipe), ping, délier |
+| Utilisateurs | Comptes locaux |
+| Équipes | Groupes + membres (recherche / ajout / retrait) |
 
 ### Sélecteur de nœud
 
@@ -82,13 +91,21 @@ En haut à droite : nœud local, agent, ou **Tous les nœuds** (listes agrégée
 - Actions : **Démarrer**, **Arrêter**, **Redémarrer**, **Supprimer** (comme les conteneurs).
 - Sur un agent : fichiers hôte sous `/var/lib/wharfmaster/stacks` (monté dans l’agent).
 
-### Agents (admin → Nœuds)
+### Agents (Paramètres → Nœuds)
 
-1. Saisir IP + nom → **Générer la commande**.
+1. **Ajouter un nœud** → IP + nom → **Générer la commande**.
 2. Exécuter `install.sh` sur la machine distante (`--advertise https://…` obligatoire).
-3. L’empreinte TLS du certificat agent est **épinglée** (affichée en badge `pin …`).
+3. L’empreinte TLS du certificat agent est **épinglée** (badge `pin …`).
+4. **Accès** (icône users) : rechercher un utilisateur ou une équipe et attribuer `lecture` / `opération` / `admin nœud`.
+5. **Modifier** : renommer, changer l’URL agent / URL publique.
 
 Relancer l’install sur le même advertise = **rejoin** (nouveau secret).
+
+### CVE (Trivy)
+
+- Activable dans **Paramètres → Général**.
+- Pastilles sur Images + scan manuel.
+- À la création conteneur / stack : avis non bloquant (`advise`) ; Trivy KO n’empêche jamais le déploiement.
 
 ---
 
@@ -122,7 +139,7 @@ Variables utiles :
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.5.0
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.0.0
 ```
 
 Backup admin (ZIP complet ; `?format=sqlite` = base seule) :
@@ -156,6 +173,11 @@ Deux modes :
 - Corps JSON : `Content-Type: application/json`
 - Erreurs : `{ "message": "…" }` + code HTTP
 - Alignement volontaire avec **Portainer CE** sur de nombreux chemins
+- Extensions WharfMaster (`/api/acls`, `/api/schedules`, scans Trivy, `AccessRole`, `RegistryKind`) : **additives**, n’écrasent pas les shapes CE
+- Policies d’accès nœud exposées comme Portainer : `UserAccessPolicies` / `TeamAccessPolicies` avec `{ "RoleId": 1|2|3 }`
+  (1 ≈ admin nœud, 2 ≈ operate, 3 ≈ read) — aussi via `PUT /api/endpoints/{id}`
+- Équipes : `GET /api/teams` = tableau CE ; memberships CE via `/api/team_memberships`
+- LDAP : `AuthenticationMethod` + `LDAPSettings` (shape CE) en plus de `Ldap` (UI WM)
 
 ### Exemple de session
 
@@ -209,7 +231,7 @@ Content-Type: application/json
 ```json
 {
   "ok": true,
-  "version": "1.5.0",
+  "version": "2.0.0",
   "checks": {
     "docker": true,
     "dockerSocket": true,
@@ -233,8 +255,8 @@ Content-Type: application/json
 | PUT | `/api/users/{id}/passwd` | self/admin | Changer mot de passe |
 | DELETE | `/api/users/{id}` | admin | Supprimer |
 | POST | `/api/users/{id}/tokens` | self/admin | Créer clé API |
-| GET | `/api/settings` | user | Paramètres (URL publique…) |
-| PUT | `/api/settings` | admin | Mettre à jour |
+| GET | `/api/settings` | user | Paramètres (`PublicURL`, `Ldap`/`LDAPSettings`, `TrivyEnabled`…) |
+| PUT | `/api/settings` | admin | MAJ (URL, métriques, LDAP, `TrivyEnabled`) |
 | GET | `/api/backup` | admin | Backup ZIP complet (SQLite, Compose, Dockerfiles, JWT). `?format=sqlite` = base seule |
 | GET | `/api/audit` | user | Journaux (`?limit=&offset=&action=`) |
 | GET | `/api/system/host` | user | Ressources hôte |
@@ -261,9 +283,15 @@ Content-Type: application/json
 
 | Méthode | Chemin | Rôle | Description |
 |---------|--------|------|-------------|
-| GET | `/api/endpoints` | user | Liste (format Portainer) |
+| GET | `/api/endpoints` | user | Liste (format Portainer + `AccessRole`) |
 | GET | `/api/endpoints/{id}` | user | Détail |
-| GET | `/api/nodes` | admin | Liste enrichie (TLS, pin…) |
+| PUT | `/api/endpoints/{id}` | admin | MAJ policies CE (`UserAccessPolicies` / `TeamAccessPolicies`) |
+| GET | `/api/teams` | admin | Liste CE `[{Id,Name}]` — `?detail=1` pour Members/AD |
+| GET/POST | `/api/team_memberships` | admin | Memberships shape Portainer |
+| GET | `/api/teams/{id}/memberships` | admin | Memberships d’une équipe |
+| GET | `/api/users/{id}` | admin | Détail utilisateur |
+| GET | `/api/nodes` | admin | Liste enrichie (TLS, pin, `Disabled`…) |
+| PUT | `/api/nodes/{id}` | admin | Renommer / URL agent / URL publique |
 | GET | `/api/nodes/join-token` | admin | Métadonnées token actif |
 | POST | `/api/nodes/join-token` | admin | Générer commande + token |
 | POST | `/api/nodes/join-token/rotate` | admin | Rotation |
@@ -272,6 +300,12 @@ Content-Type: application/json
 | POST | `/api/nodes/{id}/enable` | admin | Activer |
 | DELETE | `/api/nodes/{id}` | admin | Délier |
 | POST | `/api/nodes/join` | wmj_ | Join agent |
+| GET | `/api/acls?endpointId=` | admin | Liste ACL (filtre nœud optionnel) |
+| POST | `/api/acls` | admin | Upsert `{ EndpointId, SubjectType, SubjectId, Role }` |
+| DELETE | `/api/acls/{id}` | admin | Retirer un droit |
+| GET/POST | `/api/teams` | admin | CRUD équipes (`?detail=1`) |
+| PUT/DELETE | `/api/teams/{id}` | admin | MAJ / supprimer |
+| POST/DELETE | `/api/teams/{id}/members[/{uid}]` | admin | Membres |
 
 ### Join agent (côté machine distante via install.sh)
 
@@ -384,9 +418,26 @@ Les mots de passe sont stockés chiffrés (`enc:v1:…`) ; l’API de liste n’
 
 ---
 
-## 12. Agent distant (référence)
+## 12. API — schedules & CVE
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:1.5.0` (ou build local).
+| Méthode | Chemin | Description |
+|---------|--------|-------------|
+| GET | `/api/schedules` | Liste (`?stackId=` / `?endpointId=`) |
+| POST | `/api/schedules` | Créer (cron + action start/stop/restart) |
+| PUT/DELETE | `/api/schedules/{id}` | MAJ / supprimer |
+| POST | `/api/schedules/{id}/run` | Exécuter maintenant |
+| GET | `/api/endpoints/{id}/images/scans` | Résumés scans Trivy |
+| GET | `/api/endpoints/{id}/images/scan?ref=` | Dernier scan + findings |
+| POST | `/api/endpoints/{id}/images/scan` | Lancer un scan (`Force` optionnel) |
+| POST | `/api/endpoints/{id}/images/advise` | Avis soft (création/deploy) — **jamais bloquant** |
+
+Si `TrivyEnabled=false` : advise renvoie `Worst=disabled` ; scan manuel → 403.
+
+---
+
+## 13. Agent distant (référence)
+
+Image : `ghcr.io/mike37510/wharfmaster-agent:2.0.0` (ou build local).
 
 | Chemin agent | Description |
 |--------------|-------------|
@@ -394,6 +445,7 @@ Image : `ghcr.io/mike37510/wharfmaster-agent:1.5.0` (ou build local).
 | `*` `/docker/…` | Proxy Engine (Bearer `NODE_SECRET`) |
 | `POST /compose/up\|down\|start\|stop\|restart\|config` | Runtime Compose |
 | `GET /compose/file?name=` | Lire YAML distant |
+| `POST /scan/image` | Scan Trivy local à l’agent |
 
 Install :
 
@@ -403,14 +455,15 @@ curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:1.5.0
+  --image ghcr.io/mike37510/wharfmaster-agent:2.0.0
 ```
 
 ---
 
-## 13. Sécurité (points clés)
+## 14. Sécurité (points clés)
 
 - Non-admin : pas de privileged / bind hôte / docker.sock / network|pid host ; Compose validé résolu.
+- ACL nœud : `read` / `operate` / `admin` (direct user ou via équipe) ; admins globaux toujours autorisés.
 - Rate-limit login / join.
 - JWT TTL 4 h ; rôle relu en base à chaque requête.
 - TLS agent : empreinte SHA-256 ; refresh pin seulement si `/health` Bearer OK (renouvellement cert).
@@ -419,7 +472,7 @@ curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
 
 ---
 
-## 14. Limites connues
+## 15. Limites connues
 
 - Mode **Tous les nœuds** : agrégation surtout en lecture pour Docker.
 - Pas de placement multi-nœud d’une même stack.
@@ -427,10 +480,11 @@ curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
 - Console conteneur = exécution de commandes (pas d’attach TTY interactif).
 - Swarm / secrets Engine bloqués au proxy.
 - L’agent doit être joignable depuis le principal (pas de mode edge/NAT).
+- Scan CVE dépend de Trivy (local ou agent) ; désactivable sans bloquer les déploiements.
 
 ---
 
-## 15. Fichiers utiles
+## 16. Fichiers utiles
 
 | Fichier | Rôle |
 |---------|------|
