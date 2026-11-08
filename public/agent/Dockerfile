@@ -2,7 +2,14 @@ FROM php:8.3-cli-alpine
 
 RUN apk add --no-cache curl openssl socat docker-cli docker-cli-compose \
  && docker-php-ext-enable opcache 2>/dev/null || true \
- && (docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1)
+ && (docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1) \
+ && printf '%s\n' \
+      'memory_limit=1024M' \
+      'post_max_size=350M' \
+      'upload_max_filesize=350M' \
+      'max_execution_time=900' \
+      'max_input_time=900' \
+      > /usr/local/etc/php/conf.d/zz-wharfmaster-uploads.ini
 
 WORKDIR /app
 COPY agent.php /app/agent.php

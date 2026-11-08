@@ -145,6 +145,13 @@ final class App
             return Response::json($this->hostResources());
         }
 
+        if ($path === '/api/metrics/history' && $method === 'GET') {
+            return $this->metricsHistory($request);
+        }
+        if ($path === '/api/metrics/sample' && $method === 'POST') {
+            return $this->metricsSample($request, $user);
+        }
+
         if ($path === '/api/settings' && $method === 'GET') {
             return Response::json($this->formatSettings());
         }
@@ -247,6 +254,9 @@ final class App
         if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/file$#', $path, $m) && $method === 'POST') {
             return $this->writeVolumeFile((int) $m[1], rawurldecode($m[2]), $request, $user);
         }
+        if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/upload$#', $path, $m) && $method === 'POST') {
+            return $this->uploadVolumeFile((int) $m[1], rawurldecode($m[2]), $request, $user);
+        }
         if (preg_match('#^/api/endpoints/(\d+)/volumes/([^/]+)/mkdir$#', $path, $m) && $method === 'POST') {
             return $this->mkdirVolumePath((int) $m[1], rawurldecode($m[2]), $request, $user);
         }
@@ -304,6 +314,9 @@ final class App
         }
         if (preg_match('#^/api/volumes/([^/]+)/file$#', $path, $m) && $method === 'POST') {
             return $this->writeVolumeFile($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
+        }
+        if (preg_match('#^/api/volumes/([^/]+)/upload$#', $path, $m) && $method === 'POST') {
+            return $this->uploadVolumeFile($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
         }
         if (preg_match('#^/api/volumes/([^/]+)/mkdir$#', $path, $m) && $method === 'POST') {
             return $this->mkdirVolumePath($this->endpointIdFromRequest($request), rawurldecode($m[1]), $request, $user);
@@ -1119,6 +1132,36 @@ final class App
         }
     }
 
+    /**
+     * Binary upload (application/octet-stream) — preferred for large files (up to 300 Mo).
+     * @param array{id:int,username:string,role:int} $user
+     */
+    private function uploadVolumeFile(int $endpointId, string $name, Request $request, array $user): Response
+    {
+        [$browser, $deny] = $this->volumeBrowserForEndpoint($endpointId, $name, $user);
+        if ($deny || !$browser) {
+            return $deny ?? Response::error('Volume introuvable', 404);
+        }
+        $rel = (string) ($request->query('path') ?? $request->query('Path') ?? '');
+        if ($rel === '') {
+            return Response::error('Paramètre path requis', 400);
+        }
+        $len = strlen($request->rawBody);
+        if ($len > VolumeBrowser::MAX_WRITE_BYTES) {
+            return Response::error('Fichier trop volumineux (max 300 Mo)', 413);
+        }
+        $createOnly = in_array(strtolower((string) ($request->query('createOnly') ?? '')), ['1', 'true', 'yes'], true);
+        try {
+            $result = $browser->writeBytes($name, $rel, $request->rawBody, $createOnly);
+            return Response::json($result, 201);
+        } catch (\InvalidArgumentException $e) {
+            return Response::error($e->getMessage(), 400);
+        } catch (\Throwable $e) {
+            $code = (int) $e->getCode();
+            return Response::error($e->getMessage(), $code >= 400 && $code < 600 ? $code : 500);
+        }
+    }
+
     /** @param array{id:int,username:string,role:int} $user */
     private function mkdirVolumePath(int $endpointId, string $name, Request $request, array $user): Response
     {
@@ -1568,7 +1611,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.4.2',
+                'User-Agent: WharfMaster/1.4.3',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1649,6 +1692,67 @@ final class App
         ];
     }
 
+    private function metricsChartHours(): int
+    {
+        $v = (int) ($this->repo->getSetting('metrics_chart_hours', '24') ?? '24');
+        return max(1, min(168, $v > 0 ? $v : 24));
+    }
+
+    private function metricsRetentionDays(): int
+    {
+        $v = (int) ($this->repo->getSetting('metrics_retention_days', '90') ?? '90');
+        return max(7, min(365, $v > 0 ? $v : 90));
+    }
+
+    private function metricsHistory(Request $request): Response
+    {
+        $scope = (string) ($request->query('scope') ?? 'ep:1');
+        $retention = $this->metricsRetentionDays();
+        $defaultHours = $this->metricsChartHours();
+        $hoursRaw = $request->query('hours');
+        $useHours = ($hoursRaw !== null && $hoursRaw !== '')
+            ? max(1, min($retention * 24, (int) $hoursRaw))
+            : $defaultHours;
+        $points = (int) ($request->query('points') ?? 288);
+        $series = $this->repo->listMetricSamples($scope, $retention, $points, $useHours);
+        return Response::json([
+            'Scope' => $scope,
+            'Hours' => $useHours,
+            'ChartHours' => $defaultHours,
+            'RetentionDays' => $retention,
+            'Storage' => 'sqlite',
+            'Series' => $series,
+            'Count' => count($series),
+        ]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function metricsSample(Request $request, array $user): Response
+    {
+        $body = $request->json();
+        $scope = trim((string) ($body['Scope'] ?? $body['scope'] ?? 'ep:1'));
+        if ($scope === '') {
+            $scope = 'ep:1';
+        }
+        $retention = $this->metricsRetentionDays();
+        $result = $this->repo->recordMetricSample($scope, [
+            'containers' => (int) ($body['containers'] ?? $body['Containers'] ?? 0),
+            'images' => (int) ($body['images'] ?? $body['Images'] ?? 0),
+            'volumes' => (int) ($body['volumes'] ?? $body['Volumes'] ?? 0),
+            'networks' => (int) ($body['networks'] ?? $body['Networks'] ?? 0),
+            'cpu' => (float) ($body['cpu'] ?? $body['Cpu'] ?? 0),
+            'mem' => (float) ($body['mem'] ?? $body['Mem'] ?? 0),
+            'disk' => (float) ($body['disk'] ?? $body['Disk'] ?? 0),
+        ], 300, $retention);
+        return Response::json([
+            'Ok' => true,
+            'Inserted' => $result['inserted'],
+            'Purged' => $result['purged'],
+            'Sample' => $result['sample'],
+            'RetentionDays' => $retention,
+        ], $result['inserted'] ? 201 : 200);
+    }
+
     private function formatSettings(): array
     {
         $publicUrl = (string) ($this->repo->getSetting('public_url', '') ?? '');
@@ -1668,6 +1772,8 @@ final class App
             'PublicURL' => $publicUrl,
             // Alias used by our UI
             'HostURL' => $publicUrl,
+            'MetricsChartHours' => $this->metricsChartHours(),
+            'MetricsRetentionDays' => $this->metricsRetentionDays(),
         ];
     }
 
@@ -1685,8 +1791,22 @@ final class App
         }
         $this->repo->setSetting('public_url', $publicUrl);
         $this->repo->updateEndpointPublicUrl(1, $publicUrl);
+
+        if (array_key_exists('MetricsChartHours', $body) || array_key_exists('metricsChartHours', $body)) {
+            $hours = (int) ($body['MetricsChartHours'] ?? $body['metricsChartHours'] ?? 24);
+            $hours = max(1, min(168, $hours));
+            $this->repo->setSetting('metrics_chart_hours', (string) $hours);
+        }
+        if (array_key_exists('MetricsRetentionDays', $body) || array_key_exists('metricsRetentionDays', $body)) {
+            $days = (int) ($body['MetricsRetentionDays'] ?? $body['metricsRetentionDays'] ?? 90);
+            $days = max(7, min(365, $days));
+            $this->repo->setSetting('metrics_retention_days', (string) $days);
+        }
+
         $this->audit($user, 'settings.update', 'Mise à jour des paramètres', $request, [
             'publicUrl' => $publicUrl,
+            'metricsChartHours' => $this->metricsChartHours(),
+            'metricsRetentionDays' => $this->metricsRetentionDays(),
         ]);
         return Response::json($this->formatSettings());
     }
@@ -2282,7 +2402,7 @@ final class App
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.2');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.3');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)

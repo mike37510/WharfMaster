@@ -155,7 +155,8 @@ SH;
     }
 
     private const MAX_DOWNLOAD_BYTES = 20_000_000;
-    private const MAX_WRITE_BYTES = 2_000_000;
+    /** Max raw file size for volume uploads (300 Mo). */
+    public const MAX_WRITE_BYTES = 300_000_000;
 
     /**
      * Create a directory (parents allowed).
@@ -185,17 +186,11 @@ SH;
 
     /**
      * Create an empty file or write text/binary content (base64 optional).
-     * @param array{Content?:string,Encoding?:string} $opts
+     * Large payloads use Docker put-archive (not exec argv).
+     * @param array{Content?:string,Encoding?:string,CreateOnly?:bool} $opts
      */
     public function writeFile(string $volumeName, string $path, array $opts = []): array
     {
-        $this->assertVolume($volumeName);
-        $rel = $this->normalizePath($path);
-        if ($rel === '') {
-            throw new \InvalidArgumentException('Chemin de fichier requis');
-        }
-        $this->assertEntryName(basename($rel));
-        $target = '/volume/' . $rel;
         $encoding = strtolower((string) ($opts['Encoding'] ?? 'text'));
         $content = (string) ($opts['Content'] ?? '');
         if ($encoding === 'base64') {
@@ -206,25 +201,105 @@ SH;
         } else {
             $raw = $content;
         }
+        return $this->writeBytes($volumeName, $path, $raw, !empty($opts['CreateOnly']));
+    }
+
+    /**
+     * Write raw bytes into a volume path (up to MAX_WRITE_BYTES).
+     */
+    public function writeBytes(string $volumeName, string $path, string $raw, bool $createOnly = false): array
+    {
+        $this->assertVolume($volumeName);
+        $rel = $this->normalizePath($path);
+        if ($rel === '') {
+            throw new \InvalidArgumentException('Chemin de fichier requis');
+        }
+        $this->assertEntryName(basename($rel));
         if (strlen($raw) > self::MAX_WRITE_BYTES) {
-            throw new \RuntimeException('Fichier trop volumineux (max 2 Mo)', 413);
+            throw new \RuntimeException('Fichier trop volumineux (max 300 Mo)', 413);
         }
-        $b64 = base64_encode($raw);
-        $createOnly = !empty($opts['CreateOnly']);
-        $script = $createOnly
-            ? 'if [ -e "$1" ]; then echo EXISTS; exit 2; fi; if [ -d "$1" ]; then echo ISDIR; exit 3; fi; mkdir -p "$(dirname "$1")"; echo "$2" | base64 -d > "$1"'
-            : 'if [ -d "$1" ]; then echo ISDIR; exit 3; fi; mkdir -p "$(dirname "$1")"; echo "$2" | base64 -d > "$1"';
-        $out = $this->runInVolume($volumeName, ['sh', '-c', $script, 'write', $target, $b64], false);
-        if (str_contains($out['Stdout'] . $out['Stderr'], 'EXISTS') || $out['ExitCode'] === 2) {
-            throw new \RuntimeException('Ce fichier existe déjà', 409);
+
+        $target = '/volume/' . $rel;
+        $parent = dirname($target);
+        if ($parent === '/' || $parent === '\\' || $parent === '.') {
+            $parent = '/volume';
         }
-        if (str_contains($out['Stdout'] . $out['Stderr'], 'ISDIR') || $out['ExitCode'] === 3) {
-            throw new \RuntimeException('Ce chemin est un dossier', 400);
+        $base = basename($rel);
+
+        $this->ensureBrowseImage();
+        $containerId = $this->startBrowseContainer($volumeName, false);
+        try {
+            $exec = new Exec($this->docker);
+            $prep = $createOnly
+                ? 'if [ -e "$1" ]; then echo EXISTS; exit 2; fi; if [ -d "$1" ]; then echo ISDIR; exit 3; fi; mkdir -p "$2"'
+                : 'if [ -d "$1" ]; then echo ISDIR; exit 3; fi; mkdir -p "$2"';
+            $out = $exec->run($containerId, ['sh', '-c', $prep, 'prep', $target, $parent], false, 60);
+            if (str_contains($out['Stdout'] . $out['Stderr'], 'EXISTS') || $out['ExitCode'] === 2) {
+                throw new \RuntimeException('Ce fichier existe déjà', 409);
+            }
+            if (str_contains($out['Stdout'] . $out['Stderr'], 'ISDIR') || $out['ExitCode'] === 3) {
+                throw new \RuntimeException('Ce chemin est un dossier', 400);
+            }
+            if ($out['ExitCode'] !== 0) {
+                throw new \RuntimeException($this->execError($out, 'Préparation impossible'), 500);
+            }
+
+            $tar = $this->buildUstarArchive($base, $raw);
+            $put = $this->docker->request(
+                'PUT',
+                '/containers/' . rawurlencode($containerId) . '/archive',
+                $tar,
+                ['Content-Type' => 'application/x-tar'],
+                ['path' => $parent],
+            );
+            if ($put['status'] >= 400) {
+                $msg = trim($put['body']) !== '' ? trim($put['body']) : 'Écriture archive Docker impossible';
+                throw new \RuntimeException($msg, $put['status'] >= 400 && $put['status'] < 600 ? $put['status'] : 500);
+            }
+        } finally {
+            $this->removeContainer($containerId);
         }
-        if ($out['ExitCode'] !== 0) {
-            throw new \RuntimeException($this->execError($out, 'Écriture impossible'), 500);
-        }
+
         return ['Path' => '/' . $rel, 'Type' => 'file', 'Size' => strlen($raw)];
+    }
+
+    /** Build a single-file ustar archive (GNU/POSIX). */
+    private function buildUstarArchive(string $filename, string $content): string
+    {
+        $filename = str_replace('\\', '/', $filename);
+        if ($filename === '' || str_contains($filename, '/') || strlen($filename) > 100) {
+            throw new \InvalidArgumentException('Nom de fichier invalide pour l’archive');
+        }
+        $size = strlen($content);
+        $mtime = time();
+        $header = str_pad($filename, 100, "\0");
+        $header .= str_pad(decoct(0644), 7, '0', STR_PAD_LEFT) . "\0";
+        $header .= str_pad(decoct(0), 7, '0', STR_PAD_LEFT) . "\0";
+        $header .= str_pad(decoct(0), 7, '0', STR_PAD_LEFT) . "\0";
+        $header .= str_pad(decoct($size), 11, '0', STR_PAD_LEFT) . "\0";
+        $header .= str_pad(decoct($mtime), 11, '0', STR_PAD_LEFT) . "\0";
+        $header .= str_repeat(' ', 8); // checksum placeholder
+        $header .= '0';
+        $header .= str_repeat("\0", 100); // linkname
+        $header .= "ustar\0";
+        $header .= '00';
+        $header .= str_repeat("\0", 32); // uname
+        $header .= str_repeat("\0", 32); // gname
+        $header .= str_repeat("\0", 8); // devmajor
+        $header .= str_repeat("\0", 8); // devminor
+        $header .= str_repeat("\0", 155); // prefix
+        $header .= str_repeat("\0", 12);
+        if (strlen($header) !== 512) {
+            $header = substr($header . str_repeat("\0", 512), 0, 512);
+        }
+        $checksum = 0;
+        for ($i = 0; $i < 512; $i++) {
+            $checksum += ord($header[$i]);
+        }
+        $sum = str_pad(decoct($checksum), 6, '0', STR_PAD_LEFT) . "\0 ";
+        $header = substr($header, 0, 148) . $sum . substr($header, 156);
+        $pad = (512 - ($size % 512)) % 512;
+        return $header . $content . str_repeat("\0", $pad) . str_repeat("\0", 1024);
     }
 
     public function rename(string $volumeName, string $from, string $to): array

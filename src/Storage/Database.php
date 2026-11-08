@@ -123,6 +123,20 @@ CREATE TABLE IF NOT EXISTS join_tokens (
     max_uses INTEGER,
     use_count INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS metric_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    sampled_at INTEGER NOT NULL,
+    containers INTEGER NOT NULL DEFAULT 0,
+    images INTEGER NOT NULL DEFAULT 0,
+    volumes INTEGER NOT NULL DEFAULT 0,
+    networks INTEGER NOT NULL DEFAULT 0,
+    cpu REAL NOT NULL DEFAULT 0,
+    mem REAL NOT NULL DEFAULT 0,
+    disk REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_metric_samples_scope_time ON metric_samples(scope, sampled_at DESC);
 SQL);
         $this->ensureColumn('registries', 'owner_id', 'INTEGER');
         $this->ensureColumn('registries', 'owner_username', "TEXT NOT NULL DEFAULT ''");

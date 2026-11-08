@@ -700,4 +700,121 @@ final class Repositories
         $stmt->execute($params);
         return (int) $stmt->fetchColumn();
     }
+
+    /**
+     * Persist a dashboard metric sample (min gap per scope). Purges rows older than retentionDays.
+     * @param array{containers?:int,images?:int,volumes?:int,networks?:int,cpu?:float,mem?:float,disk?:float} $metrics
+     * @return array{inserted:bool,sample:array<string,mixed>,purged:int}
+     */
+    public function recordMetricSample(string $scope, array $metrics, int $minGapSec = 300, int $retentionDays = 90): array
+    {
+        $scope = trim($scope) !== '' ? trim($scope) : 'ep:1';
+        if (strlen($scope) > 64) {
+            $scope = substr($scope, 0, 64);
+        }
+        $now = time();
+        $last = $this->pdo->prepare('SELECT sampled_at FROM metric_samples WHERE scope = ? ORDER BY sampled_at DESC LIMIT 1');
+        $last->execute([$scope]);
+        $lastAt = (int) ($last->fetchColumn() ?: 0);
+        $inserted = false;
+        $sample = [
+            't' => $now * 1000,
+            'containers' => (int) ($metrics['containers'] ?? 0),
+            'images' => (int) ($metrics['images'] ?? 0),
+            'volumes' => (int) ($metrics['volumes'] ?? 0),
+            'networks' => (int) ($metrics['networks'] ?? 0),
+            'cpu' => round((float) ($metrics['cpu'] ?? 0), 2),
+            'mem' => round((float) ($metrics['mem'] ?? 0), 2),
+            'disk' => round((float) ($metrics['disk'] ?? 0), 2),
+        ];
+        if ($lastAt <= 0 || ($now - $lastAt) >= $minGapSec) {
+            $ins = $this->pdo->prepare(
+                'INSERT INTO metric_samples (scope, sampled_at, containers, images, volumes, networks, cpu, mem, disk)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            );
+            $ins->execute([
+                $scope,
+                $now,
+                $sample['containers'],
+                $sample['images'],
+                $sample['volumes'],
+                $sample['networks'],
+                $sample['cpu'],
+                $sample['mem'],
+                $sample['disk'],
+            ]);
+            $inserted = true;
+        } else {
+            // Refresh latest row in-place (same window) so host % stay current
+            $upd = $this->pdo->prepare(
+                'UPDATE metric_samples SET sampled_at = ?, containers = ?, images = ?, volumes = ?, networks = ?, cpu = ?, mem = ?, disk = ?
+                 WHERE id = (SELECT id FROM metric_samples WHERE scope = ? ORDER BY sampled_at DESC LIMIT 1)'
+            );
+            $upd->execute([
+                $now,
+                $sample['containers'],
+                $sample['images'],
+                $sample['volumes'],
+                $sample['networks'],
+                $sample['cpu'],
+                $sample['mem'],
+                $sample['disk'],
+                $scope,
+            ]);
+            $sample['t'] = $now * 1000;
+        }
+
+        $cutoff = $now - max(1, $retentionDays) * 86400;
+        $purge = $this->pdo->prepare('DELETE FROM metric_samples WHERE sampled_at < ?');
+        $purge->execute([$cutoff]);
+        $purged = $purge->rowCount();
+
+        return ['inserted' => $inserted, 'sample' => $sample, 'purged' => $purged];
+    }
+
+    /**
+     * History for charts. Prefer $hours (rolling window); falls back to $days.
+     * Downsamples evenly when denser than $maxPoints.
+     * @return list<array{t:int,containers:int,images:int,volumes:int,networks:int,cpu:float,mem:float,disk:float}>
+     */
+    public function listMetricSamples(string $scope, int $days = 90, int $maxPoints = 180, ?int $hours = null): array
+    {
+        $scope = trim($scope) !== '' ? trim($scope) : 'ep:1';
+        $maxPoints = max(10, min(2000, $maxPoints));
+        if ($hours !== null) {
+            $hours = max(1, min(365 * 24, $hours));
+            $since = time() - $hours * 3600;
+        } else {
+            $days = max(1, min(365, $days));
+            $since = time() - $days * 86400;
+        }
+        $stmt = $this->pdo->prepare(
+            'SELECT sampled_at, containers, images, volumes, networks, cpu, mem, disk
+             FROM metric_samples WHERE scope = ? AND sampled_at >= ? ORDER BY sampled_at ASC'
+        );
+        $stmt->execute([$scope, $since]);
+        $rows = $stmt->fetchAll() ?: [];
+        $mapped = array_map(static function (array $r): array {
+            return [
+                't' => ((int) $r['sampled_at']) * 1000,
+                'containers' => (int) $r['containers'],
+                'images' => (int) $r['images'],
+                'volumes' => (int) $r['volumes'],
+                'networks' => (int) $r['networks'],
+                'cpu' => (float) $r['cpu'],
+                'mem' => (float) $r['mem'],
+                'disk' => (float) $r['disk'],
+            ];
+        }, $rows);
+        $n = count($mapped);
+        if ($n <= $maxPoints) {
+            return $mapped;
+        }
+        $out = [];
+        for ($i = 0; $i < $maxPoints; $i++) {
+            $idx = (int) round($i * ($n - 1) / ($maxPoints - 1));
+            $out[] = $mapped[$idx];
+        }
+        return $out;
+    }
 }

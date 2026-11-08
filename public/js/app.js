@@ -36,6 +36,8 @@
     logTimer: null,
     term: null,
     publicUrl: '',
+    metricsChartHours: 24,
+    metricsRetentionDays: 90,
     dashFilter: 'all',
     engineVersion: '',
     endpoints: [],
@@ -43,8 +45,287 @@
     alerts: [],
     dockerOnline: true,
     alertTimer: null,
+    metricTimer: null,
     dismissedAlerts: new Set(JSON.parse(localStorage.getItem('dm_dismissed_alerts') || '[]')),
   };
+
+  /** Metrics in SQLite; chart window + retention come from Paramètres. */
+  const metricCache = { scope: '', series: [] };
+
+  function metricChartHours() {
+    const h = Number(state.metricsChartHours);
+    return Number.isFinite(h) && h >= 1 ? Math.min(168, Math.floor(h)) : 24;
+  }
+
+  function metricRetentionDays() {
+    const d = Number(state.metricsRetentionDays);
+    return Number.isFinite(d) && d >= 7 ? Math.min(365, Math.floor(d)) : 90;
+  }
+
+  function metricWindowLabel() {
+    const h = metricChartHours();
+    if (h === 24) return '24 h glissantes';
+    if (h % 24 === 0) {
+      const days = h / 24;
+      return `${days} j glissant${days > 1 ? 's' : ''}`;
+    }
+    return `${h} h glissantes`;
+  }
+
+  function metricScopeKey() {
+    return Api.isAllEndpoints() ? 'all' : `ep:${Api.getEndpointId()}`;
+  }
+
+  function getMetricSeries() {
+    return metricCache.scope === metricScopeKey() ? metricCache.series : [];
+  }
+
+  async function loadMetricHistory(scope = metricScopeKey()) {
+    try {
+      const hours = metricChartHours();
+      const points = Math.min(288, Math.max(48, Math.ceil((hours * 60) / 5)));
+      const data = await Api.metricsHistory(scope, { hours, points });
+      if (data?.ChartHours != null) state.metricsChartHours = Number(data.ChartHours) || state.metricsChartHours;
+      if (data?.RetentionDays != null) state.metricsRetentionDays = Number(data.RetentionDays) || state.metricsRetentionDays;
+      const series = Array.isArray(data?.Series) ? data.Series : [];
+      metricCache.scope = scope;
+      metricCache.series = series;
+      return series;
+    } catch (_) {
+      if (metricCache.scope !== scope) {
+        metricCache.scope = scope;
+        metricCache.series = [];
+      }
+      return metricCache.series;
+    }
+  }
+
+  /** Persist a sample server-side (SQLite, 90 j) and refresh local cache. */
+  async function pushMetricSample(counts) {
+    const scope = metricScopeKey();
+    const clampPct = (v) => Math.max(0, Math.min(100, Number(v) || 0));
+    const payload = {
+      Scope: scope,
+      containers: Number(counts.containers) || 0,
+      images: Number(counts.images) || 0,
+      volumes: Number(counts.volumes) || 0,
+      networks: Number(counts.networks) || 0,
+    };
+    if (counts.cpu != null) payload.cpu = clampPct(counts.cpu);
+    if (counts.mem != null) payload.mem = clampPct(counts.mem);
+    if (counts.disk != null) payload.disk = clampPct(counts.disk);
+    try {
+      await Api.metricsSample(payload);
+    } catch (_) { /* ignore offline */ }
+    return loadMetricHistory(scope);
+  }
+
+  /** Multi-series host chart (CPU / mémoire / disque) — scale 0–100 %. */
+  function hostResourceChart(series) {
+    const w = 320;
+    const h = 88;
+    const padY = 4;
+    const yAt = (pct) => padY + (1 - Math.max(0, Math.min(100, pct)) / 100) * (h - padY * 2);
+    const keys = [
+      { key: 'cpu', color: '#3b82f6', label: 'CPU' },
+      { key: 'mem', color: '#22c55e', label: 'Mémoire' },
+      { key: 'disk', color: '#fb923c', label: 'Disque' },
+    ];
+    const n = Math.max(1, (series || []).length);
+    const paths = keys.map(({ key, color }) => {
+      const vals = metricValues(series, key);
+      if (!vals.length) {
+        return `<path d="M0 ${yAt(0).toFixed(2)} L${w} ${yAt(0).toFixed(2)}" fill="none" stroke="${color}" stroke-width="2" stroke-opacity="0.35"/>`;
+      }
+      const coords = vals.map((v, i) => {
+        const x = vals.length === 1 ? w / 2 : (i / (vals.length - 1)) * w;
+        return [x, yAt(v)];
+      });
+      if (coords.length === 1) {
+        const y = coords[0][1];
+        return `<path d="M0 ${y.toFixed(2)} L${w} ${y.toFixed(2)}" fill="none" stroke="${color}" stroke-width="2"/>`;
+      }
+      const d = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(' ');
+      return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }).join('');
+    const title = n < 2
+      ? 'Historique ressources en construction'
+      : `Évolution CPU / mémoire / disque — ${n} relevés (échelle 0–100 %)`;
+    const legend = keys.map(({ color, label }) =>
+      `<span class="wave-leg"><i style="background:${color}"></i>${esc(label)}</span>`
+    ).join('');
+    const y100 = yAt(100).toFixed(1);
+    const y50 = yAt(50).toFixed(1);
+    const y0 = yAt(0).toFixed(1);
+    return `<div class="wave-wrap" id="host-wave-wrap">
+      <div class="wave-head"><span class="stat-hint" title="Fenêtre configurable dans Paramètres">Courbes · ${esc(metricWindowLabel())}</span></div>
+      <div class="wave-plot">
+        <div class="wave-y" aria-hidden="true">
+          <span>100%</span>
+          <span>50%</span>
+          <span>0%</span>
+        </div>
+        <svg class="wave-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${esc(title)}">
+          <title>${esc(title)}</title>
+          <line x1="0" y1="${y100}" x2="${w}" y2="${y100}" class="wave-grid"/>
+          <line x1="0" y1="${y50}" x2="${w}" y2="${y50}" class="wave-grid"/>
+          <line x1="0" y1="${y0}" x2="${w}" y2="${y0}" class="wave-grid"/>
+          ${paths}
+        </svg>
+      </div>
+      <div class="wave-legend">${legend}</div>
+    </div>`;
+  }
+
+  function metricValues(series, key) {
+    return (series || []).map((p) => Number(p?.[key]) || 0);
+  }
+
+  function metricDeltaHtml(series, key) {
+    const vals = metricValues(series, key);
+    if (vals.length < 2) {
+      return '<span class="stat-delta is-flat" title="Pas encore d’historique">·</span>';
+    }
+    const d = vals[vals.length - 1] - vals[vals.length - 2];
+    if (d === 0) return '<span class="stat-delta is-flat" title="Stable">=</span>';
+    if (d > 0) return `<span class="stat-delta is-up" title="Depuis le dernier relevé">+${d}</span>`;
+    return `<span class="stat-delta is-down" title="Depuis le dernier relevé">${d}</span>`;
+  }
+
+  function stopDashMetricSampler() {
+    if (state.metricTimer) {
+      clearInterval(state.metricTimer);
+      state.metricTimer = null;
+    }
+  }
+
+  function startDashMetricSampler() {
+    stopDashMetricSampler();
+    state.metricTimer = setInterval(() => {
+      if (state.route !== 'dashboard') {
+        stopDashMetricSampler();
+        return;
+      }
+      void refreshDashMetricSample();
+    }, 60_000);
+  }
+
+  async function sampleHostResourcePercents(containers, memTotalHint) {
+    const list = containers || [];
+    const running = list.filter((c) => String(c.State).toLowerCase() === 'running').slice(0, 8);
+    let cpuPct = 0;
+    let memPct = 0;
+    let memUsage = 0;
+    let memTotal = Number(memTotalHint) || 0;
+    const stats = await Promise.all(running.map(async (c) => {
+      try {
+        return await Api.docker(`/containers/${c.Id}/stats?stream=false`);
+      } catch {
+        return null;
+      }
+    }));
+    const computed = stats.filter(Boolean).map((st) => computeStats(st, memTotal));
+    if (computed.length) {
+      cpuPct = computed.reduce((a, s) => a + s.cpuPct, 0);
+      memUsage = computed.reduce((a, s) => a + s.memUsage, 0);
+      if (!memTotal) {
+        memTotal = computed.reduce((a, s) => Math.max(a, s.memLimit || 0), 0);
+      }
+      memPct = memTotal ? (memUsage / memTotal) * 100 : computed.reduce((a, s) => a + s.memPct, 0) / computed.length;
+    }
+    let diskPct = 0;
+    try {
+      const host = await Api.host();
+      const diskTotal = Number(host?.DiskTotal) || 0;
+      const diskUsed = Number(host?.DiskUsed) || 0;
+      diskPct = diskTotal > 0 ? Math.min(100, (diskUsed / diskTotal) * 100) : 0;
+    } catch (_) { /* ignore */ }
+    return { cpu: cpuPct, mem: memPct, disk: diskPct };
+  }
+
+  async function refreshDashMetricSample() {
+    try {
+      let counts;
+      if (isAllNodes()) {
+        const [cAgg, iAgg, vAgg, nAgg] = await Promise.all([
+          dockerAll('/containers/json?all=true', { pick: (d) => (Array.isArray(d) ? d : []), refresh: false }),
+          dockerAll('/images/json', { pick: (d) => (Array.isArray(d) ? d : []), refresh: false }),
+          dockerAll('/volumes', { pick: (d) => d?.Volumes || [], refresh: false }),
+          dockerAll('/networks', { pick: (d) => (Array.isArray(d) ? d : []), refresh: false }),
+        ]);
+        counts = {
+          containers: (cAgg.items || []).length,
+          images: (iAgg.items || []).length,
+          volumes: (vAgg.items || []).length,
+          networks: (nAgg.items || []).length,
+        };
+      } else {
+        const [c, i, v, n, info] = await Promise.all([
+          Api.docker('/containers/json?all=true'),
+          Api.docker('/images/json'),
+          Api.docker('/volumes'),
+          Api.docker('/networks'),
+          Api.docker('/info').catch(() => ({})),
+        ]);
+        const hostPct = await sampleHostResourcePercents(c || [], Number(info?.MemTotal) || 0);
+        counts = {
+          containers: (c || []).length,
+          images: (i || []).length,
+          volumes: (v?.Volumes || []).length,
+          networks: (n || []).length,
+          cpu: hostPct.cpu,
+          mem: hostPct.mem,
+          disk: hostPct.disk,
+        };
+      }
+      const series = await pushMetricSample(counts);
+      updateDashStatCards(series, counts);
+      updateHostResourceChart(series, counts);
+    } catch (_) { /* silent */ }
+  }
+
+  function updateDashStatCards(series, counts) {
+    const map = [
+      ['containers', 'blue'],
+      ['images', 'purple'],
+      ['volumes', 'green'],
+      ['networks', 'orange'],
+    ];
+    map.forEach(([key, tone]) => {
+      const card = document.querySelector(`.stat-card[data-metric="${key}"]`);
+      if (!card) return;
+      const val = card.querySelector('.stat-value');
+      const delta = card.querySelector('.stat-delta');
+      const spark = card.querySelector('.sparkline');
+      if (val && counts && counts[key] != null) val.textContent = String(counts[key]);
+      if (delta) delta.outerHTML = metricDeltaHtml(series, key);
+      if (spark) spark.outerHTML = sparklineFromValues(metricValues(series, key), tone);
+    });
+  }
+
+  function updateHostResourceChart(series, counts) {
+    const wrap = document.getElementById('host-wave-wrap');
+    if (wrap) wrap.outerHTML = hostResourceChart(series);
+    if (!counts) return;
+    const gauges = document.querySelectorAll('.panel-card .gauge-row .gauge');
+    if (gauges.length >= 3) {
+      if (counts.cpu != null) {
+        gauges[0].querySelector('svg')?.replaceWith(
+          (() => { const t = document.createElement('div'); t.innerHTML = gaugeRing(counts.cpu, '#3b82f6'); return t.firstElementChild; })()
+        );
+      }
+      if (counts.mem != null) {
+        gauges[1].querySelector('svg')?.replaceWith(
+          (() => { const t = document.createElement('div'); t.innerHTML = gaugeRing(counts.mem, '#22c55e'); return t.firstElementChild; })()
+        );
+      }
+      if (counts.disk != null) {
+        gauges[2].querySelector('svg')?.replaceWith(
+          (() => { const t = document.createElement('div'); t.innerHTML = gaugeRing(counts.disk, '#fb923c'); return t.firstElementChild; })()
+        );
+      }
+    }
+  }
 
   function matchQuery(q, ...parts) {
     if (!q) return true;
@@ -1039,6 +1320,7 @@ CMD ["sh"]
       try { state.term.dispose(); } catch (_) {}
       state.term = null;
     }
+    stopDashMetricSampler();
   }
 
   function badge(stateName) {
@@ -1061,10 +1343,57 @@ CMD ["sh"]
     return `<img class="${cls}" src="${src}" alt="WharfMaster" decoding="async">`;
   }
 
+  /** Build a sparkline SVG from real numeric samples (oldest → newest). */
+  function sparklineFromValues(values, tone = 'blue') {
+    const pts = (values || []).map((v) => Number(v) || 0);
+    const w = 100;
+    const h = 28;
+    const padY = 3;
+    let line;
+    let fill;
+    if (pts.length === 0) {
+      line = `M0 ${h / 2} L${w} ${h / 2}`;
+      fill = `M0 ${h} L0 ${h / 2} L${w} ${h / 2} L${w} ${h} Z`;
+    } else if (pts.length === 1) {
+      const y = h / 2;
+      line = `M0 ${y} L${w} ${y}`;
+      fill = `M0 ${h} L0 ${y} L${w} ${y} L${w} ${h} Z`;
+    } else {
+      const min = Math.min(...pts);
+      const max = Math.max(...pts);
+      const span = Math.max(1, max - min);
+      const coords = pts.map((v, i) => {
+        const x = (i / (pts.length - 1)) * w;
+        const y = padY + (1 - (v - min) / span) * (h - padY * 2);
+        return [x, y];
+      });
+      line = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(' ');
+      const last = coords[coords.length - 1];
+      const first = coords[0];
+      fill = `${line} L${last[0].toFixed(2)} ${h} L${first[0].toFixed(2)} ${h} Z`;
+    }
+    const n = pts.length;
+    const title = n < 2
+      ? 'Historique en construction — revenez plus tard'
+      : `${n} relevés`;
+    return `<svg class="sparkline ${tone}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title><path class="fill" d="${fill}" fill="currentColor"/><path d="${line}"/></svg>`;
+  }
+
   function sparkline(tone = 'blue') {
-    const d = 'M0 20 C12 18, 18 8, 30 12 S48 22, 60 14 S78 4, 100 10';
-    const fill = 'M0 28 L0 20 C12 18, 18 8, 30 12 S48 22, 60 14 S78 4, 100 10 L100 28 Z';
-    return `<svg class="sparkline ${tone}" viewBox="0 0 100 28" preserveAspectRatio="none"><path class="fill" d="${fill}" fill="currentColor"/><path d="${d}"/></svg>`;
+    return sparklineFromValues([], tone);
+  }
+
+  function dashStatCard(key, tone, label, value, series) {
+    return `<div class="stat-card" data-metric="${esc(key)}">
+      <div class="stat-top">
+        <div class="stat-ico ${tone}">${ico(key === 'networks' ? 'networks' : key)}</div>
+        ${metricDeltaHtml(series, key)}
+      </div>
+      <div class="stat-value">${Number(value) || 0}</div>
+      <div class="stat-label">${esc(label)}</div>
+      ${sparklineFromValues(metricValues(series, key), tone)}
+      <div class="stat-hint" title="Fenêtre configurable dans Paramètres">Courbe · ${esc(metricWindowLabel())}</div>
+    </div>`;
   }
 
   function gaugeRing(pct, color = '#3b82f6') {
@@ -1824,7 +2153,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.2</div>
+            <div class="brand-ver">v1.4.3</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -2341,44 +2670,22 @@ CMD ["sh"]
       </li>`;
     }).join('');
 
+    const metricSeries = await pushMetricSample({
+      containers: list.length,
+      images: imgs.length,
+      volumes: volList.length,
+      networks: (networks || []).length,
+      cpu: cpuPct,
+      mem: memPct,
+      disk: diskPct,
+    });
+
     root.innerHTML = shell('Tableau de bord', `
       <div class="stat-grid">
-        <div class="stat-card">
-          <div class="stat-top">
-            <div class="stat-ico blue">${ico('containers')}</div>
-            <span class="stat-delta">+${Math.min(running, 9)}</span>
-          </div>
-          <div class="stat-value">${list.length}</div>
-          <div class="stat-label">Conteneurs</div>
-          ${sparkline('blue')}
-        </div>
-        <div class="stat-card">
-          <div class="stat-top">
-            <div class="stat-ico purple">${ico('images')}</div>
-            <span class="stat-delta">+0</span>
-          </div>
-          <div class="stat-value">${imgs.length}</div>
-          <div class="stat-label">Images</div>
-          ${sparkline('purple')}
-        </div>
-        <div class="stat-card">
-          <div class="stat-top">
-            <div class="stat-ico green">${ico('volumes')}</div>
-            <span class="stat-delta">+0</span>
-          </div>
-          <div class="stat-value">${volList.length}</div>
-          <div class="stat-label">Volumes</div>
-          ${sparkline('green')}
-        </div>
-        <div class="stat-card">
-          <div class="stat-top">
-            <div class="stat-ico orange">${ico('networks')}</div>
-            <span class="stat-delta">+0</span>
-          </div>
-          <div class="stat-value">${(networks || []).length}</div>
-          <div class="stat-label">Réseaux</div>
-          ${sparkline('orange')}
-        </div>
+        ${dashStatCard('containers', 'blue', 'Conteneurs', list.length, metricSeries)}
+        ${dashStatCard('images', 'purple', 'Images', imgs.length, metricSeries)}
+        ${dashStatCard('volumes', 'green', 'Volumes', volList.length, metricSeries)}
+        ${dashStatCard('networks', 'orange', 'Réseaux', (networks || []).length, metricSeries)}
       </div>
 
       <div class="dash-layout">
@@ -2423,10 +2730,7 @@ CMD ["sh"]
               <div class="gauge">${gaugeRing(memPct, '#22c55e')}<div class="g-label">Mémoire</div><div class="g-sub">${formatBytes(memUsage)} / ${formatBytes(memTotal)}</div></div>
               <div class="gauge">${gaugeRing(diskPct, '#fb923c')}<div class="g-label">Disque</div><div class="g-sub">${diskTotal ? `${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}` : '—'}${dockerDisk ? `<div class="g-hint">Docker ${formatBytes(dockerDisk)}</div>` : ''}</div></div>
             </div>
-            <svg class="wave-chart" viewBox="0 0 320 88" preserveAspectRatio="none">
-              <path d="M0 60 C40 50, 60 30, 100 40 S160 70, 200 45 S260 20, 320 35" fill="none" stroke="#3b82f6" stroke-width="2"/>
-              <path d="M0 70 C50 65, 80 50, 120 55 S180 75, 220 58 S280 40, 320 50" fill="none" stroke="#22c55e" stroke-width="2"/>
-            </svg>
+            ${hostResourceChart(metricSeries)}
           </div>
 
           <div class="panel-card">
@@ -2450,6 +2754,7 @@ CMD ["sh"]
     `, { subtitle: 'Vue d’ensemble de votre environnement Docker', hidePageHeader: true });
 
     bindSearch('dashboard');
+    startDashMetricSampler();
     document.getElementById('dash-filters')?.querySelectorAll('button').forEach((btn) => {
       btn.onclick = () => {
         state.dashFilter = btn.dataset.f;
@@ -2547,34 +2852,21 @@ CMD ["sh"]
       ? ` Nœuds sans réponse : ${(cAgg.failedNames || []).map(esc).join(', ')}.`
       : '';
 
+    const metricSeriesAll = await pushMetricSample({
+      containers: list.length,
+      images: imgs.length,
+      volumes: volList.length,
+      networks: nets.length,
+    });
+
     root.innerHTML = shell('Tableau de bord', `
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${failMsg}</div>` : ''}
       ${perNodeHint ? `<div class="muted" style="margin-bottom:10px">Répartition conteneurs — ${esc(perNodeHint)}</div>` : ''}
       <div class="stat-grid">
-        <div class="stat-card">
-          <div class="stat-top"><div class="stat-ico blue">${ico('containers')}</div></div>
-          <div class="stat-value">${list.length}</div>
-          <div class="stat-label">Conteneurs</div>
-          ${sparkline('blue')}
-        </div>
-        <div class="stat-card">
-          <div class="stat-top"><div class="stat-ico purple">${ico('images')}</div></div>
-          <div class="stat-value">${imgs.length}</div>
-          <div class="stat-label">Images</div>
-          ${sparkline('purple')}
-        </div>
-        <div class="stat-card">
-          <div class="stat-top"><div class="stat-ico green">${ico('volumes')}</div></div>
-          <div class="stat-value">${volList.length}</div>
-          <div class="stat-label">Volumes</div>
-          ${sparkline('green')}
-        </div>
-        <div class="stat-card">
-          <div class="stat-top"><div class="stat-ico orange">${ico('networks')}</div></div>
-          <div class="stat-value">${nets.length}</div>
-          <div class="stat-label">Réseaux</div>
-          ${sparkline('orange')}
-        </div>
+        ${dashStatCard('containers', 'blue', 'Conteneurs', list.length, metricSeriesAll)}
+        ${dashStatCard('images', 'purple', 'Images', imgs.length, metricSeriesAll)}
+        ${dashStatCard('volumes', 'green', 'Volumes', volList.length, metricSeriesAll)}
+        ${dashStatCard('networks', 'orange', 'Réseaux', nets.length, metricSeriesAll)}
       </div>
 
       <div class="dash-layout">
@@ -2626,6 +2918,7 @@ CMD ["sh"]
     `, { subtitle: 'Vue agrégée — tous les nœuds', hidePageHeader: true });
 
     bindSearch('dashboard');
+    startDashMetricSampler();
     document.getElementById('dash-filters')?.querySelectorAll('button').forEach((btn) => {
       btn.onclick = () => {
         state.dashFilter = btn.dataset.f;
@@ -3515,10 +3808,41 @@ CMD ["sh"]
       });
     }
 
-    async function collectDropEntries(dataTransfer, destDir) {
+    /**
+     * Snapshot DataTransfer synchronously during the drop event.
+     * After any await, browsers clear items/files (often leaving only 1 entry).
+     */
+    function snapshotDataTransfer(dataTransfer) {
+      const rootEntries = [];
+      const flatFiles = [];
+      const items = dataTransfer && dataTransfer.items ? Array.from(dataTransfer.items) : [];
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (!item || item.kind !== 'file') continue;
+        let entry = null;
+        try {
+          if (typeof item.webkitGetAsEntry === 'function') entry = item.webkitGetAsEntry();
+        } catch (_) { /* ignore */ }
+        if (entry) {
+          rootEntries.push(entry);
+          continue;
+        }
+        try {
+          const f = typeof item.getAsFile === 'function' ? item.getAsFile() : null;
+          if (f) flatFiles.push(f);
+        } catch (_) { /* ignore */ }
+      }
+      if (!rootEntries.length && !flatFiles.length) {
+        Array.from((dataTransfer && dataTransfer.files) || []).forEach((f) => flatFiles.push(f));
+      }
+      return { rootEntries, flatFiles };
+    }
+
+    async function collectDropEntries(snapshot, destDir) {
       const files = [];
       const dirs = new Set();
-      const items = dataTransfer.items ? Array.from(dataTransfer.items) : [];
+      const rootEntries = (snapshot && snapshot.rootEntries) || [];
+      const flatFiles = (snapshot && snapshot.flatFiles) || [];
 
       async function walkEntry(entry, parentRel) {
         if (!entry) return;
@@ -3538,24 +3862,14 @@ CMD ["sh"]
         }
       }
 
-      if (items.length && items.some((it) => typeof it.webkitGetAsEntry === 'function' && it.webkitGetAsEntry())) {
-        for (const item of items) {
-          if (item.kind !== 'file') continue;
-          const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
-          if (entry) await walkEntry(entry, '');
+      if (rootEntries.length) {
+        for (const entry of rootEntries) {
+          await walkEntry(entry, '');
         }
       } else {
-        Array.from(dataTransfer.files || []).forEach((file) => {
+        flatFiles.forEach((file) => {
           const rel = file.webkitRelativePath || file.name;
           files.push({ relPath: rel, file });
-          const parts = String(rel).split('/');
-          if (parts.length > 1) {
-            let acc = '';
-            for (let i = 0; i < parts.length - 1; i += 1) {
-              acc = acc ? `${acc}/${parts[i]}` : parts[i];
-              dirs.add(acc);
-            }
-          }
         });
       }
 
@@ -3638,24 +3952,29 @@ CMD ["sh"]
       };
     }
 
-    async function uploadDropped(dataTransfer) {
+    async function uploadDropped(snapshotOrDt) {
       if (volUploadBusy) return;
+      // Accept a pre-built snapshot (preferred) or raw DataTransfer (legacy)
+      const snapshot = snapshotOrDt && Array.isArray(snapshotOrDt.rootEntries)
+        ? snapshotOrDt
+        : snapshotDataTransfer(snapshotOrDt);
+      if (!snapshot.rootEntries.length && !snapshot.flatFiles.length) return;
       volUploadBusy = true;
       const errBox = document.getElementById('vol-err');
       if (errBox) errBox.innerHTML = '';
       const modal = openVolumeUploadModal();
       try {
         modal.setProgress({ done: 0, total: 1, label: '', phase: 'Analyse des fichiers…' });
-        const payload = await collectDropEntries(dataTransfer, currentPath);
+        const payload = await collectDropEntries(snapshot, currentPath);
         if (!payload.files.length && !payload.dirs.length) {
           closeAppModal();
           return;
         }
-        // Tous types MIME / extensions acceptés (binaire inclus via base64)
-        const maxBytes = 2 * 1000 * 1000;
+        // Tous types MIME / extensions — limite 300 Mo (upload binaire)
+        const maxBytes = 300 * 1000 * 1000;
         for (const { file, relPath } of payload.files) {
           if (file.size > maxBytes) {
-            throw new Error(`« ${relPath} » dépasse 2 Mo (limite d’upload)`);
+            throw new Error(`« ${relPath} » dépasse 300 Mo (limite d’upload)`);
           }
         }
         let done = 0;
@@ -3679,18 +3998,21 @@ CMD ["sh"]
         for (const { file, relPath } of payload.files) {
           done += 1;
           const typeHint = file.type ? ` (${file.type})` : '';
+          const sizeHint = file.size >= 1000 * 1000
+            ? ` · ${(file.size / (1000 * 1000)).toFixed(1)} Mo`
+            : '';
           modal.setProgress({
             done,
             total,
-            label: `${relPath}${typeHint}`,
+            label: `${relPath}${typeHint}${sizeHint}`,
             phase: 'Envoi des fichiers…',
           });
-          const b64 = await fileToBase64(file);
-          await Api.volumeWriteFile(volumeName, joinVolPath(currentPath, relPath), {
-            Content: b64,
-            Encoding: 'base64',
-            CreateOnly: false,
-          });
+          await Api.volumeUploadFile(
+            volumeName,
+            joinVolPath(currentPath, relPath),
+            file,
+            { CreateOnly: false },
+          );
         }
         modal.setProgress({ done: total, total, label: '', phase: 'Actualisation…' });
         await render(currentPath);
@@ -3729,12 +4051,15 @@ CMD ["sh"]
         dragDepth = Math.max(0, dragDepth - 1);
         if (dragDepth === 0) explorer.classList.remove('is-dragover');
       };
-      const onDrop = async (ev) => {
+      const onDrop = (ev) => {
         if (!hasFilesType(ev.dataTransfer)) return;
         ev.preventDefault();
+        ev.stopPropagation();
         dragDepth = 0;
         explorer.classList.remove('is-dragover');
-        await uploadDropped(ev.dataTransfer);
+        // Do not await here: snapshot must run in the same sync turn as the drop event
+        const snapshot = snapshotDataTransfer(ev.dataTransfer);
+        void uploadDropped(snapshot);
       };
       explorer.addEventListener('dragenter', onDragEnter);
       explorer.addEventListener('dragover', onDragOver);
@@ -3757,7 +4082,7 @@ CMD ["sh"]
         <div id="vol-err"></div>
         ${volumeBreadcrumbs(volumeName, path)}
         <div class="table-wrap vol-explorer" id="vol-explorer">
-          <div class="vol-drop-hint">Déposez tout type de fichier ou dossier ici</div>
+          <div class="vol-drop-hint">Déposez un ou plusieurs fichiers / dossiers ici</div>
           <table class="data">
             <thead><tr><th>Nom</th><th>Taille</th><th>Modifié</th><th></th></tr></thead>
             <tbody id="vol-rows"><tr><td colspan="4" class="muted">Chargement…</td></tr></tbody>
@@ -4212,6 +4537,8 @@ CMD ["sh"]
     try {
       const s = await Api.settings();
       state.publicUrl = s.PublicURL || s.HostURL || '';
+      if (s.MetricsChartHours != null) state.metricsChartHours = Number(s.MetricsChartHours) || 24;
+      if (s.MetricsRetentionDays != null) state.metricsRetentionDays = Number(s.MetricsRetentionDays) || 90;
     } catch (_) {
       state.publicUrl = '';
     }
@@ -4369,7 +4696,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.2', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.3', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -4975,6 +5302,8 @@ CMD ["sh"]
   async function viewSettings() {
     await loadPublicUrl();
     const fallback = `${window.location.protocol}//${window.location.hostname}`;
+    const chartHours = metricChartHours();
+    const retentionDays = metricRetentionDays();
     root.innerHTML = shell('Paramètres', `
       ${pageHeader('Paramètres', false)}
       <div id="settings-err"></div>
@@ -4986,7 +5315,7 @@ CMD ["sh"]
           <button type="button" class="btn ${state.theme === 'light' ? 'btn-info' : ''}" id="theme-light">Clair</button>
         </div>
       </div>
-      <div class="panel" style="max-width:720px">
+      <div class="panel" style="max-width:720px; margin-bottom:16px">
         <div class="section-title" style="margin-top:0">URL publique / hôte</div>
         <p class="muted" style="margin:0 0 14px">
           URL de base utilisée pour ouvrir les ports publiés (liens dans Conteneurs).
@@ -4999,6 +5328,23 @@ CMD ["sh"]
         <div class="info-box">
           Exemple : avec l'URL publique <code>https://nas.lan</code>, un port publié <code>8080</code> devient
           <code>https://nas.lan:8080</code>.
+        </div>
+      </div>
+      <div class="panel" style="max-width:720px">
+        <div class="section-title" style="margin-top:0">Historique &amp; courbes</div>
+        <p class="muted" style="margin:0 0 14px">
+          Relevés du tableau de bord stockés en SQLite. Les courbes affichent une fenêtre glissante ;
+          au-delà de la rétention, les anciens points sont purgés.
+        </p>
+        <div class="form-group">
+          <label class="field-label" for="metrics-chart-hours">Fenêtre des courbes (heures)</label>
+          <input id="metrics-chart-hours" type="number" min="1" max="168" step="1" value="${esc(chartHours)}" placeholder="24">
+          <p class="field-hint muted">Ex. 24 = dernières 24 h sur le dashboard (1–168).</p>
+        </div>
+        <div class="form-group">
+          <label class="field-label" for="metrics-retention-days">Rétention en base (jours)</label>
+          <input id="metrics-retention-days" type="number" min="7" max="365" step="1" value="${esc(retentionDays)}" placeholder="90">
+          <p class="field-hint muted">Conservation des relevés (7–365). Défaut 90 jours.</p>
         </div>
         <div class="actions-bar">
           <button class="btn btn-primary" id="save-settings">Enregistrer</button>
@@ -5015,11 +5361,29 @@ CMD ["sh"]
     };
     onBusyClick(document.getElementById('save-settings'), async () => {
       const value = document.getElementById('public-url').value.trim();
+      const hours = parseInt(document.getElementById('metrics-chart-hours').value, 10);
+      const days = parseInt(document.getElementById('metrics-retention-days').value, 10);
       const errBox = document.getElementById('settings-err');
       errBox.innerHTML = '';
+      if (!Number.isFinite(hours) || hours < 1 || hours > 168) {
+        errBox.innerHTML = `<div class="error-box">Fenêtre des courbes : entre 1 et 168 heures.</div>`;
+        return;
+      }
+      if (!Number.isFinite(days) || days < 7 || days > 365) {
+        errBox.innerHTML = `<div class="error-box">Rétention : entre 7 et 365 jours.</div>`;
+        return;
+      }
       try {
-        const saved = await Api.updateSettings({ PublicURL: value });
+        const saved = await Api.updateSettings({
+          PublicURL: value,
+          MetricsChartHours: hours,
+          MetricsRetentionDays: days,
+        });
         state.publicUrl = saved.PublicURL || '';
+        state.metricsChartHours = Number(saved.MetricsChartHours) || hours;
+        state.metricsRetentionDays = Number(saved.MetricsRetentionDays) || days;
+        metricCache.scope = '';
+        metricCache.series = [];
         errBox.innerHTML = `<div class="info-box">Paramètres enregistrés.</div>`;
       } catch (err) {
         errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
@@ -5292,7 +5656,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.2</strong> — volumes agents, drag-and-drop, TLS pin & health.</p>
+          <p class="muted">Version <strong>1.4.3</strong> — historique dashboard, volumes agents, TLS pin.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

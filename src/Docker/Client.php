@@ -84,7 +84,7 @@ final class Client
             CURLOPT_UNIX_SOCKET_PATH => $this->socketPath,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER => true,
-            CURLOPT_TIMEOUT => 300,
+            CURLOPT_TIMEOUT => 900,
             CURLOPT_HTTPHEADER => $headerLines,
         ]);
 
@@ -120,7 +120,7 @@ final class Client
             CURLOPT_CUSTOMREQUEST => strtoupper($method),
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER => true,
-            CURLOPT_TIMEOUT => 300,
+            CURLOPT_TIMEOUT => 900,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_HTTPHEADER => $headerLines,
             // Pinning is enforced via AgentTls::assertPinned above (self-signed agents)

@@ -79,6 +79,15 @@ const Api = (() => {
     dockerOn,
     status: () => request('/api/status'),
     host: () => request('/api/system/host'),
+    metricsHistory: (scope = 'ep:1', opts = {}) => {
+      const q = new URLSearchParams({ scope: String(scope || 'ep:1') });
+      if (opts.hours != null) q.set('hours', String(opts.hours));
+      else q.set('days', String(opts.days != null ? opts.days : 90));
+      q.set('points', String(opts.points != null ? opts.points : 180));
+      return request(`/api/metrics/history?${q.toString()}`);
+    },
+    metricsSample: (payload) =>
+      request('/api/metrics/sample', { method: 'POST', body: JSON.stringify(payload) }),
     adminCheck: () => request('/api/users/admin/check'),
     adminInit: (Username, Password) =>
       request('/api/users/admin/init', { method: 'POST', body: JSON.stringify({ Username, Password }) }),
@@ -203,6 +212,17 @@ const Api = (() => {
           CreateOnly: opts.CreateOnly === undefined ? true : !!opts.CreateOnly,
         }),
       }),
+    /** Binary upload (File/Blob/ArrayBuffer) — up to 300 Mo. */
+    volumeUploadFile: (name, Path, blob, opts = {}) => {
+      const q = new URLSearchParams({ path: Path });
+      if (opts.CreateOnly) q.set('createOnly', '1');
+      return request(`${Api.volumeBase(name)}/upload?${q.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: blob,
+        raw: true,
+      });
+    },
     volumeMkdir: (name, Path) =>
       request(`${Api.volumeBase(name)}/mkdir`, {
         method: 'POST',
