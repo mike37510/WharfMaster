@@ -1,6 +1,6 @@
 # WharfMaster
 
-**WharfMaster** est une interface web de gestion Docker : conteneurs, images, volumes, réseaux, stacks Compose et registres — avec isolation multi-utilisateurs et une API compatible Portainer CE.
+**WharfMaster** est une interface web de gestion Docker : conteneurs, images, volumes, réseaux, stacks Compose et registres — avec **équipes**, **ACL par nœud**, **SSO Active Directory**, **scheduler**, **scan CVE Trivy**, isolation multi-utilisateurs et une API compatible Portainer CE.
 
 | | |
 |---|---|
@@ -42,18 +42,38 @@
 
 - **Tableau de bord** — stats, conteneurs, ressources hôte (CPU / RAM / disque), activité ; vue **Tous les nœuds** agrégée
 - **Conteneurs** — création, start / stop / restart, logs (suivi live, recherche, export), console, inspect
-- **Images** — recherche locale + Docker Hub, pull, build Dockerfile
+- **Images** — recherche locale + Docker Hub, pull, build Dockerfile, **pastilles CVE** (Trivy)
 - **Volumes** — création, explorateur de fichiers (créer / renommer / supprimer au clic droit)
-- **Réseaux & stacks Compose** — éditeur YAML, variables `.env`, déploiement local **et sur agents**
+- **Réseaux & stacks Compose** — éditeur YAML, variables `.env`, pull forcé, indicateur d’images à jour, déploiement local **et sur agents**
 - **Registres** — Docker Hub / Registry V2, parcours dépôts & tags, pull
 - **Utilisateurs** — rôles admin / utilisateur, isolation par labels `dockermanager.owner*`
-- **Équipes & ACL** — équipes + membres ; droits `read` / `operate` / `admin` par nœud (user ou équipe)
-- **SSO Active Directory / LDAP** — login domaine, sync groupes → équipes (Paramètres → Authentification)
-- **Scheduler** — planifications cron start / stop / restart de stacks
-- **Scan CVE Trivy** — pastilles Images, avis non bloquant à la création, interrupteur Paramètres
+- **Équipes** — CRUD, recherche, ajout / retrait de membres, mapping groupe AD (Paramètres → Équipes)
+- **ACL par nœud** — droits `lecture` / `opération` / `admin nœud` pour un **user** ou une **équipe** (Paramètres → Nœuds → Accès)
+- **SSO Active Directory / LDAP** — host, TLS/LDAPS, bind, filtre ; provision users + sync groupes → équipes (Paramètres → Authentification)
+- **Scheduler** — cron start / stop / restart **par stack** (détail stack → Planifications) + sidecar Compose
+- **Scan CVE Trivy** — scan manuel, avis non bloquant à la création conteneur / stack, interrupteur global (Paramètres → Général)
+- **Paramètres** — sous-menus : Général, Authentification, Registres, Nœuds, Utilisateurs, Équipes ; backup ZIP
 - **Journaux** — audit applicatif (connexions, actions Docker / stacks / utilisateurs)
-- **Nœuds (multinode)** — agents HTTPS, token de jointure, édition / accès, sélecteur (nœud ou **Tous**), TLS, stacks distantes
+- **Nœuds (multinode)** — agents HTTPS, modal d’ajout, édition (nom / URL), ping, activer / désactiver, délier, TLS pin
 - **Sécurité** — rate-limit login, politique Compose résolue (`docker compose config`), proxy Docker restreint pour les non-admins
+- **API** — compatible **Portainer CE** (teams, memberships, policies, LDAPSettings…) + extensions WharfMaster (`/api/acls`, `/api/schedules`, scans Trivy)
+
+### Équipes & droits d’accès (2.0)
+
+1. Créer des **équipes** et y ajouter des utilisateurs (Paramètres → Équipes).
+2. Sur chaque **nœud**, icône **Accès** : rechercher un user ou une équipe → attribuer `lecture` / `opération` / `admin nœud`.
+3. Les admins globaux passent toujours ; sans ACL explicite, les users non-admin conservent le défaut **opération**.
+
+### Scheduler (2.0)
+
+- Ouvrir une **stack** → section **Planifications** → *Nouvelle planification* (expression cron + action).
+- Le service Compose `scheduler` appelle périodiquement `POST /api/schedules/run-due` (clé API provisionnée automatiquement).
+
+### Scan CVE Trivy (2.0)
+
+- Activer / couper dans **Paramètres → Général**.
+- Pastilles sur **Images** + scan à la demande.
+- À la création d’un conteneur ou au déploiement d’une stack : contrôle soft (`/images/advise`) — **jamais bloquant** si Trivy est KO.
 
 ---
 
@@ -126,7 +146,7 @@ Ouvrir **http://localhost:9000/app** (ou `WHARFMASTER_PORT`) → créer le compt
 | Fichier | Rôle |
 |---------|------|
 | [`Dockerfile`](Dockerfile) | Image Apache + PHP 8.3 + Docker CLI / Compose |
-| [`docker-compose.yml`](docker-compose.yml) | Port `9000`, volume données, montage du socket |
+| [`docker-compose.yml`](docker-compose.yml) | Port `9000`, volume données, socket Docker, service **scheduler** |
 | [`.env.example`](.env.example) | `WHARFMASTER_PORT`, `DOCKER_GID`, `DOCKER_SOCK_PATH` |
 | [`deploy/docker-entrypoint.sh`](deploy/docker-entrypoint.sh) | Prépare `data/` + droits socket |
 
@@ -238,8 +258,10 @@ Il n’y a **pas** de mot de passe par défaut : vous le choisissez à l’initi
 
 ### Comptes utilisateurs
 
-Un **admin** peut créer d’autres utilisateurs dans **Utilisateurs** (rôle admin ou utilisateur).  
-Les non-admins ne voient que leurs ressources (labels propriétaire / stacks personnelles).
+Un **admin** peut créer d’autres utilisateurs dans **Paramètres → Utilisateurs** (rôle admin ou utilisateur).  
+Les non-admins ne voient que leurs ressources (labels propriétaire / stacks personnelles) et les nœuds autorisés par ACL.
+
+SSO optionnel : **Paramètres → Authentification** (LDAP / Active Directory).
 
 ---
 
