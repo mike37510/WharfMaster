@@ -38,6 +38,13 @@
       networks: 1,
       stacks: 1,
     },
+    sorts: {
+      containers: { key: 'name', dir: 'asc' },
+      images: { key: 'name', dir: 'asc' },
+      volumes: { key: 'name', dir: 'asc' },
+      networks: { key: 'name', dir: 'asc' },
+      stacks: { key: 'name', dir: 'asc' },
+    },
     pageSize: 20,
     theme: readTheme(),
     containerTab: 'overview',
@@ -1269,6 +1276,58 @@ CMD ["sh"]
     bindSearch(key, { pageSize: state.pageSize || 20 });
   }
 
+  function getSort(view) {
+    return state.sorts[view] || { key: 'name', dir: 'asc' };
+  }
+
+  function cmpSortValues(a, b, dir) {
+    const mul = dir === 'desc' ? -1 : 1;
+    if (typeof a === 'number' && typeof b === 'number' && Number.isFinite(a) && Number.isFinite(b)) {
+      return (a - b) * mul;
+    }
+    return String(a ?? '').localeCompare(String(b ?? ''), 'fr', {
+      sensitivity: 'base',
+      numeric: true,
+    }) * mul;
+  }
+
+  /** @param {list} list @param {string} view @param {Record<string, function>} getters */
+  function sortItems(list, view, getters) {
+    const { key, dir } = getSort(view);
+    const get = getters[key] || getters.name;
+    if (typeof get !== 'function') return [...list];
+    return [...list].sort((a, b) => cmpSortValues(get(a), get(b), dir));
+  }
+
+  function sortTh(label, key, view, opts = {}) {
+    const cur = getSort(view);
+    const active = cur.key === key;
+    const arrow = active ? (cur.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    const tip = opts.title || `Trier par ${label}`;
+    return `<th class="sortable${active ? ' is-sorted' : ''}" data-sort-key="${esc(key)}" data-sort-view="${esc(view)}" title="${esc(tip)}" role="columnheader" tabindex="0">${esc(label)}<span class="sort-ind" aria-hidden="true">${arrow}</span></th>`;
+  }
+
+  function bindTableSort(view, reloadFn) {
+    root.querySelectorAll(`th.sortable[data-sort-view="${CSS.escape(view)}"]`).forEach((th) => {
+      const activate = () => {
+        const key = th.getAttribute('data-sort-key') || 'name';
+        const cur = getSort(view);
+        state.sorts[view] = {
+          key,
+          dir: cur.key === key && cur.dir === 'asc' ? 'desc' : 'asc',
+        };
+        if (typeof reloadFn === 'function') reloadFn();
+      };
+      th.addEventListener('click', activate);
+      th.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          activate();
+        }
+      });
+    });
+  }
+
   function updateFilterCount(shown, total, allTotal) {
     const el = document.getElementById('filter-count');
     if (!el) return;
@@ -2434,7 +2493,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.8</div>
+            <div class="brand-ver">v1.5.0</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -3316,8 +3375,17 @@ CMD ["sh"]
       list = (await Api.docker('/containers/json?all=true')) || [];
     }
 
+    const containerName = (c) => (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id));
+    list = sortItems(list, 'containers', {
+      name: containerName,
+      image: (c) => c.Image || '',
+      state: (c) => String(c.State || ''),
+      node: (c) => c._nodeName || '',
+      ports: (c) => formatPorts(c.Ports || []),
+    });
+
     const rows = list.map((c) => {
-      const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : shortId(c.Id));
+      const name = containerName(c);
       const st = String(c.State || '').toLowerCase();
       const isRunning = st === 'running' || st === 'restarting';
       const rowCls = isRunning ? '' : 'row-stopped';
@@ -3328,8 +3396,8 @@ CMD ["sh"]
           ${iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs conteneur', icon: 'logs' })}
           ${iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
           ${iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
-          ${iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: true })}
-          ${iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop' })}
+          ${iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
+          ${iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
           ${iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
           ${iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div>`;
@@ -3361,13 +3429,21 @@ CMD ["sh"]
       )}
       <div class="table-wrap">
         <table class="data">
-          <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>Image</th><th>État</th><th>Ports publiés</th><th>Actions</th></tr></thead>
+          <thead><tr>
+            ${all ? sortTh('Nœud', 'node', 'containers') : ''}
+            ${sortTh('Nom', 'name', 'containers')}
+            ${sortTh('Image', 'image', 'containers')}
+            ${sortTh('État', 'state', 'containers')}
+            ${sortTh('Ports publiés', 'ports', 'containers')}
+            <th>Actions</th>
+          </tr></thead>
           <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun conteneur</td></tr>`}</tbody>
         </table>
       </div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Gérez vos conteneurs Docker' });
 
     bindRefresh();
     bindPagedSearch('containers');
+    bindTableSort('containers', () => viewContainers());
     if (!all) {
       bindModalActions();
       document.getElementById('create-container').onclick = () => openCreateContainerModal();
@@ -3430,8 +3506,8 @@ CMD ["sh"]
         ${iconBtn({ modal: 'logs', id, name, running, title: 'Logs conteneur', icon: 'logs' })}
         ${iconBtn({ modal: 'console', id, name, running, title: 'Console', icon: 'console' })}
         ${iconBtn({ modal: 'inspect', id, name, running, title: 'Inspecter', icon: 'inspect' })}
-        ${iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: true })}
-        ${iconBtn({ act: 'stop', title: 'Arrêter', icon: 'stop' })}
+        ${iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: !running })}
+        ${iconBtn({ act: 'stop', title: 'Arrêter', icon: 'stop', danger: running })}
         ${iconBtn({ act: 'restart', title: 'Redémarrer', icon: 'restart' })}
         ${iconBtn({ act: 'remove', title: 'Supprimer', icon: 'remove', danger: true })}
         <div class="spacer"></div>
@@ -3782,12 +3858,27 @@ CMD ["sh"]
     }
 
     const usageByKey = new Map();
-    const rows = list.map((img, idx) => {
-      const tags = imageTagsLabel(img);
-      const sizeMb = ((img.Size || 0) / (1024 * 1024)).toFixed(1);
+    list.forEach((img, idx) => {
       const users = containersUsingImage(img, containers);
       const key = `${img._nodeId || 0}:${img.Id || idx}`;
-      usageByKey.set(key, { img, users });
+      usageByKey.set(key, { img, users, key });
+      img._usageCount = users.length;
+      img._tagsLabel = imageTagsLabel(img);
+      img._sortKey = key;
+    });
+    list = sortItems(list, 'images', {
+      name: (img) => img._tagsLabel || '',
+      id: (img) => img.Id || '',
+      size: (img) => Number(img.Size) || 0,
+      usage: (img) => Number(img._usageCount) || 0,
+      node: (img) => img._nodeName || '',
+    });
+    const rows = list.map((img) => {
+      const tags = img._tagsLabel || imageTagsLabel(img);
+      const sizeMb = ((img.Size || 0) / (1024 * 1024)).toFixed(1);
+      const entry = usageByKey.get(img._sortKey) || { users: [] };
+      const users = entry.users || [];
+      const key = img._sortKey;
       const usageCell = users.length
         ? `<button type="button" class="badge badge-inuse img-usage-btn" data-img-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
         : `<span class="badge badge-unused">Inutilisé</span>`;
@@ -3814,11 +3905,19 @@ CMD ["sh"]
         all ? '' : `${createBtn('build-image', 'Dockerfile / Build')}${createBtn('pull-image', 'Pull une image')}`,
       )}
       <div class="table-wrap"><table class="data">
-        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Tags</th><th>Usage</th><th>Taille</th><th></th></tr></thead>
+        <thead><tr>
+          ${all ? sortTh('Nœud', 'node', 'images') : ''}
+          ${sortTh('ID', 'id', 'images')}
+          ${sortTh('Tags', 'name', 'images')}
+          ${sortTh('Usage', 'usage', 'images')}
+          ${sortTh('Taille', 'size', 'images')}
+          <th></th>
+        </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune image</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Images Docker locales' });
     bindRefresh();
     bindPagedSearch('images');
+    bindTableSort('images', () => viewImages());
     root.querySelectorAll('.img-usage-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const entry = usageByKey.get(btn.dataset.imgKey);
@@ -3866,10 +3965,23 @@ CMD ["sh"]
     }
 
     const usageByKey = new Map();
-    const rows = volumes.map((v, idx) => {
+    volumes.forEach((v, idx) => {
       const users = containersUsingVolume(v, containers);
       const key = `${v._nodeId || 0}:${v.Name || idx}`;
       usageByKey.set(key, { vol: v, users });
+      v._usageCount = users.length;
+      v._sortKey = key;
+    });
+    volumes = sortItems(volumes, 'volumes', {
+      name: (v) => v.Name || '',
+      driver: (v) => v.Driver || '',
+      usage: (v) => Number(v._usageCount) || 0,
+      mount: (v) => v.Mountpoint || '',
+      node: (v) => v._nodeName || '',
+    });
+    const rows = volumes.map((v) => {
+      const users = (usageByKey.get(v._sortKey) || {}).users || [];
+      const key = v._sortKey;
       const usageCell = users.length
         ? `<button type="button" class="badge badge-inuse img-usage-btn" data-vol-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
         : `<span class="badge badge-unused">Inutilisé</span>`;
@@ -3903,11 +4015,19 @@ CMD ["sh"]
         <span class="muted mono" id="filter-count">${volumes.length} / ${volumes.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>Pilote</th><th>Usage</th><th>Point de montage</th><th></th></tr></thead>
+        <thead><tr>
+          ${all ? sortTh('Nœud', 'node', 'volumes') : ''}
+          ${sortTh('Nom', 'name', 'volumes')}
+          ${sortTh('Pilote', 'driver', 'volumes')}
+          ${sortTh('Usage', 'usage', 'volumes')}
+          ${sortTh('Point de montage', 'mount', 'volumes')}
+          <th></th>
+        </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Volumes Docker' });
     bindRefresh();
     bindPagedSearch('volumes');
+    bindTableSort('volumes', () => viewVolumes());
     root.querySelectorAll('[data-vol-key]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const entry = usageByKey.get(btn.dataset.volKey);
@@ -4555,10 +4675,24 @@ CMD ["sh"]
     }
 
     const usageByKey = new Map();
-    const rows = list.map((n, idx) => {
+    list.forEach((n, idx) => {
       const users = containersUsingNetwork(n, containers);
       const key = `${n._nodeId || 0}:${n.Id || idx}`;
       usageByKey.set(key, { net: n, users });
+      n._usageCount = users.length;
+      n._sortKey = key;
+    });
+    list = sortItems(list, 'networks', {
+      name: (n) => n.Name || '',
+      id: (n) => n.Id || '',
+      driver: (n) => n.Driver || '',
+      usage: (n) => Number(n._usageCount) || 0,
+      scope: (n) => n.Scope || '',
+      node: (n) => n._nodeName || '',
+    });
+    const rows = list.map((n) => {
+      const users = (usageByKey.get(n._sortKey) || {}).users || [];
+      const key = n._sortKey;
       const usageCell = users.length
         ? `<button type="button" class="badge badge-inuse img-usage-btn" data-net-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
         : `<span class="badge badge-unused">Inutilisé</span>`;
@@ -4588,11 +4722,20 @@ CMD ["sh"]
         <span class="muted mono" id="filter-count">${list.length} / ${list.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>ID</th><th>Nom</th><th>Pilote</th><th>Usage</th><th>Portée</th><th></th></tr></thead>
+        <thead><tr>
+          ${all ? sortTh('Nœud', 'node', 'networks') : ''}
+          ${sortTh('ID', 'id', 'networks')}
+          ${sortTh('Nom', 'name', 'networks')}
+          ${sortTh('Pilote', 'driver', 'networks')}
+          ${sortTh('Usage', 'usage', 'networks')}
+          ${sortTh('Portée', 'scope', 'networks')}
+          <th></th>
+        </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun réseau</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Réseaux Docker' });
     bindRefresh();
     bindPagedSearch('networks');
+    bindTableSort('networks', () => viewNetworks());
     root.querySelectorAll('[data-net-key]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const entry = usageByKey.get(btn.dataset.netKey);
@@ -4636,32 +4779,44 @@ CMD ["sh"]
       return;
     }
     const stacks = await Api.stacks();
-    const list = stacks || [];
+    let list = stacks || [];
     const stackStatusLabel = (st) => (Number(st) === 1 ? 'running' : 'exited');
+    list = sortItems(list, 'stacks', {
+      name: (s) => s.Name || '',
+      state: (s) => stackStatusLabel(s.Status),
+      owner: (s) => s.CreatedBy || '',
+      node: (s) => endpointLabel(s.EndpointId),
+      id: (s) => Number(s.Id) || 0,
+    });
     const rows = list.map((s) => {
       const node = endpointLabel(s.EndpointId);
       const stLabel = stackStatusLabel(s.Status);
       const search = `${s.Id} ${s.Name} ${node} ${s.CreatedBy || ''} ${stLabel}`.toLowerCase();
       // Actions toujours disponibles (API liée à l’id stack / son nœud)
+      const isRunning = stLabel === 'running';
       const actions = `<div class="quick-actions">
         ${iconBtn({ tag: 'a', href: `#stacks/${s.Id}`, title: 'Ouvrir', icon: 'edit' })}
-        ${iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: true })}
-        ${iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop' })}
+        ${iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
+        ${iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
         ${iconBtn({ act: 'restart', id: s.Id, title: 'Redémarrer', icon: 'restart' })}
         ${iconBtn({ act: 'remove', id: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}
       </div>`;
-      return `<tr data-search="${esc(search)}">
+      const rowCls = isRunning ? '' : 'row-stopped';
+      return `<tr class="${rowCls}" data-search="${esc(search)}" data-stack-id="${esc(s.Id)}">
       ${all ? `<td class="muted">${esc(node)}</td>` : ''}
       <td class="name-cell">
         <strong><a href="#stacks/${s.Id}">${esc(s.Name)}</a></strong>
         <span class="id">#${esc(s.Id)}</span>
       </td>
       <td>${badge(stLabel)}</td>
+      <td class="img-upd-cell" data-upd="${esc(s.Id)}">
+        <span class="img-upd is-loading" title="Vérification des images…"><span class="img-upd-dot"></span></span>
+      </td>
       <td>${esc(s.CreatedBy || '')}</td>
       <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 5 : 4;
+    const colSpan = all ? 6 : 5;
     root.innerHTML = shell('Stacks', `
       ${pageHeader(all ? 'Stacks — tous les nœuds' : 'Stacks')}
       ${all ? pickNodeGuardHtml() : ''}
@@ -4671,14 +4826,24 @@ CMD ["sh"]
           <span class="btn-ico">${ico('plus')}</span><span>Créer une stack</span>
         </a>`}
         <div class="spacer"></div>
+        <span class="muted" style="font-size:12px">● vert = à jour · ● orange = mise à jour dispo · cache 24 h</span>
+        <button type="button" class="btn btn-sm" id="stack-upd-refresh" title="Revérifier les images maintenant">Rafraîchir images</button>
         <span class="muted mono" id="filter-count">${list.length} / ${list.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
-        <thead><tr>${all ? '<th>Nœud</th>' : ''}<th>Nom</th><th>État</th><th>Créé par</th><th>Actions</th></tr></thead>
+        <thead><tr>
+          ${all ? sortTh('Nœud', 'node', 'stacks') : ''}
+          ${sortTh('Nom', 'name', 'stacks')}
+          ${sortTh('État', 'state', 'stacks')}
+          <th title="Images du registre">Images</th>
+          ${sortTh('Créé par', 'owner', 'stacks')}
+          <th>Actions</th>
+        </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée' : 'Projets Compose' });
     bindRefresh();
     bindPagedSearch('stacks');
+    bindTableSort('stacks', () => viewStacks());
     root.querySelectorAll('[data-act]').forEach((btn) => {
       const act = btn.dataset.act;
       const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;
@@ -4690,6 +4855,52 @@ CMD ["sh"]
         else if (act === 'remove') await Api.deleteStack(id);
       }, { confirm: confirmMsg, reload: true });
     });
+    document.getElementById('stack-upd-refresh')?.addEventListener('click', () => {
+      root.querySelectorAll('[data-upd]').forEach((cell) => {
+        cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span>`;
+      });
+      loadStackUpdateIndicators(true);
+    });
+    loadStackUpdateIndicators(false);
+  }
+
+  function stackUpdatePill(status, updateCount, title) {
+    const st = status || 'unknown';
+    const cls = st === 'update' ? 'is-update' : (st === 'fresh' || st === 'pinned' ? 'is-fresh' : 'is-unknown');
+    const label = st === 'update'
+      ? (updateCount > 1 ? `${updateCount} mises à jour` : 'Mise à jour')
+      : (st === 'fresh' || st === 'pinned' ? 'À jour' : '—');
+    return `<span class="img-upd ${cls}" title="${esc(title || label)}"><span class="img-upd-dot"></span><span class="img-upd-lbl">${esc(label)}</span></span>`;
+  }
+
+  async function loadStackUpdateIndicators(refresh = false) {
+    try {
+      const data = await Api.stackUpdates(!!refresh);
+      const map = data?.Updates || {};
+      Object.keys(map).forEach((id) => {
+        const cell = root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
+        if (!cell) return;
+        const u = map[id] || {};
+        const imgs = u.Images || [];
+        const lines = imgs.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`);
+        let title = lines.length ? lines.join('\n') : (u.Error || 'Aucun contrôle');
+        if (u.FromCache && u.CheckedAt) {
+          title += `\n(cache · vérifié ${new Date(u.CheckedAt * 1000).toLocaleString()})`;
+        }
+        cell.innerHTML = stackUpdatePill(u.Status, u.UpdateCount || 0, title);
+      });
+      root.querySelectorAll('[data-upd] .img-upd.is-loading').forEach((el) => {
+        el.className = 'img-upd is-unknown';
+        el.title = 'Contrôle indisponible';
+        const lbl = el.querySelector('.img-upd-lbl');
+        if (lbl) lbl.textContent = '—';
+        else el.insertAdjacentHTML('beforeend', '<span class="img-upd-lbl">—</span>');
+      });
+    } catch {
+      root.querySelectorAll('[data-upd]').forEach((cell) => {
+        cell.innerHTML = stackUpdatePill('unknown', 0, 'Contrôle indisponible');
+      });
+    }
   }
 
   function parseDotEnv(text) {
@@ -4921,6 +5132,14 @@ CMD ["sh"]
       <div class="env-list" id="env-list"></div>
       <div class="muted" id="env-empty" style="font-size:13px;margin-top:6px">Aucune variable</div>
 
+      <div class="form-group" style="margin-top:18px">
+        <label class="field-inline" style="gap:8px;cursor:pointer">
+          <input type="checkbox" id="stack-pull" ${isEdit ? 'checked' : ''}>
+          <span>Forcer le pull des images depuis le registre</span>
+        </label>
+        <p class="field-hint muted">Utile pour une mise à jour (<code>latest</code> ou tag flottant). Lance <code>docker compose up --pull always</code>.</p>
+      </div>
+
       <div class="actions-bar">
         <button class="btn btn-primary" id="stack-save">${isEdit ? 'Mettre à jour la stack' : 'Déployer la stack'}</button>
         <a class="btn" href="#stacks" style="margin-left:8px">Annuler</a>
@@ -5045,9 +5264,10 @@ CMD ["sh"]
         if (errBox) errBox.innerHTML = `<div class="error-box">${esc(errors.join('\n'))}</div>`;
         return;
       }
+      const pullImages = !!document.getElementById('stack-pull')?.checked;
       try {
-        if (isEdit) await Api.updateStack(existing.Id, content, Env);
-        else await Api.createStack(name, content, Env);
+        if (isEdit) await Api.updateStack(existing.Id, content, Env, pullImages);
+        else await Api.createStack(name, content, Env, pullImages);
         location.hash = '#stacks';
       } catch (err) {
         if (errBox) {
@@ -5067,23 +5287,34 @@ CMD ["sh"]
     }
     const [stack, file] = await Promise.all([Api.stack(id), Api.stackFile(id)]);
     const stLabel = Number(stack.Status) === 1 ? 'running' : 'exited';
+    const stackRunning = stLabel === 'running';
     root.innerHTML = shell(`Stack · ${stack.Name}`, `
       ${pageHeader(stack.Name, false)}
       <div class="toolbar">
         ${iconBtn({ tag: 'a', href: '#stacks', title: 'Retour', icon: 'back' })}
         ${iconBtn({ elId: 'edit', title: 'Éditeur', icon: 'edit', info: true })}
-        ${iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: true })}
-        ${iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop' })}
+        ${iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: !stackRunning })}
+        ${iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop', danger: stackRunning })}
         ${iconBtn({ act: 'restart', id: stack.Id, title: 'Redémarrer', icon: 'restart' })}
+        ${iconBtn({ elId: 'stack-pull-redeploy', title: 'Pull images + redéployer', icon: 'pull' })}
         ${iconBtn({ act: 'remove', id: stack.Id, title: 'Supprimer', icon: 'remove', danger: true })}
       </div>
+      <div id="stack-detail-err"></div>
       <div class="panel" style="margin-bottom:1rem">
         <dl class="kv">
           <dt>Id</dt><dd>${stack.Id}</dd>
           <dt>Type</dt><dd>Compose</dd>
           <dt>Statut</dt><dd>${badge(stLabel)}</dd>
+          <dt>Images</dt><dd id="stack-upd-summary"><span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span></dd>
           <dt>Nœud</dt><dd>${esc(endpointLabel(stack.EndpointId))} <span class="muted">(#${esc(stack.EndpointId)})</span></dd>
         </dl>
+      </div>
+      <div class="section-title">Images des services</div>
+      <div class="table-wrap" style="margin-bottom:1rem">
+        <table class="data" id="stack-upd-table">
+          <thead><tr><th>Service</th><th>Image</th><th>État</th><th>Détail</th></tr></thead>
+          <tbody><tr><td colspan="4" class="muted">Vérification des digests…</td></tr></tbody>
+        </table>
       </div>
       <div class="section-title">Fichier Compose</div>
       <pre class="compose-preview cm-s-wharf" id="compose-preview"></pre>`);
@@ -5098,6 +5329,17 @@ CMD ["sh"]
     }
     document.getElementById('edit').onclick = () =>
       showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
+    onBusyClick(document.getElementById('stack-pull-redeploy'), async () => {
+      const errBox = document.getElementById('stack-detail-err');
+      if (errBox) errBox.innerHTML = '';
+      try {
+        await Api.updateStack(stack.Id, file.StackFileContent || '', stack.Env || [], true);
+        if (errBox) errBox.innerHTML = `<div class="info-box">Images tirées et stack redéployée.</div>`;
+        await viewStackDetail(id);
+      } catch (err) {
+        if (errBox) errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      }
+    }, { minMs: 400 });
     root.querySelectorAll('[data-act]').forEach((btn) => {
       const act = btn.dataset.act;
       const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;
@@ -5114,6 +5356,30 @@ CMD ["sh"]
         await viewStackDetail(id);
       }, { confirm: confirmMsg, minMs: 300 });
     });
+    try {
+      const upd = await Api.stackUpdate(id);
+      const sum = document.getElementById('stack-upd-summary');
+      if (sum) sum.innerHTML = stackUpdatePill(upd.Status, upd.UpdateCount || 0, `${upd.Checked || 0} image(s) contrôlée(s)`);
+      const tb = document.querySelector('#stack-upd-table tbody');
+      const imgs = upd.Images || [];
+      if (tb) {
+        if (!imgs.length) {
+          tb.innerHTML = `<tr><td colspan="4" class="muted">Aucune image à contrôler</td></tr>`;
+        } else {
+          tb.innerHTML = imgs.map((i) => `<tr>
+            <td class="mono">${esc(i.Service)}</td>
+            <td class="mono">${esc(i.Image)}</td>
+            <td>${stackUpdatePill(i.Status, i.Status === 'update' ? 1 : 0, i.Detail || '')}</td>
+            <td class="muted">${esc(i.Detail || '')}</td>
+          </tr>`).join('');
+        }
+      }
+    } catch (err) {
+      const sum = document.getElementById('stack-upd-summary');
+      if (sum) sum.innerHTML = stackUpdatePill('unknown', 0, err.message || 'Erreur');
+      const tb = document.querySelector('#stack-upd-table tbody');
+      if (tb) tb.innerHTML = `<tr><td colspan="4" class="error-box">${esc(err.message || 'Contrôle impossible')}</td></tr>`;
+    }
   }
 
   async function loadPublicUrl() {
@@ -5279,7 +5545,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.8', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.5.0', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -6315,7 +6581,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.8</strong> — catalogue Harness/Gitness, e-mail + jeton.</p>
+          <p class="muted">Version <strong>1.5.0</strong> — maj images stacks, pull forcé, tri des listes.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

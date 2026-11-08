@@ -2,6 +2,22 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.5.0] — 2026-11-08
+
+### Ajouté
+- **Stacks — indicateur d’images** : pastille **verte** (à jour) / **orange** (nouvelle image sur le registre)
+  - comparaison digest local vs registre (tags flottants type `latest`)
+  - colonne Images dans la liste + détail par service
+  - **cache 24 h** + bouton « Rafraîchir images »
+- **Stacks — forcer le pull** à la création / mise à jour (`docker compose up --pull always`)
+  - case à cocher dans l’éditeur + bouton pull sur le détail
+- **Tri des tableaux** (conteneurs, stacks, images, réseaux, volumes) : clic sur les en-têtes, défaut A→Z sur le nom
+- Boutons start/stop **contextuels** (vert si arrêté, rouge si démarré) sur conteneurs et stacks
+- Lignes des **stacks arrêtées** teintées comme les conteneurs
+
+### Corrigé
+- Injection des labels Compose : plus de clés YAML en double (`mapping key already defined`)
+
 ## [1.4.8] — 2026-11-08
 
 ### Corrigé

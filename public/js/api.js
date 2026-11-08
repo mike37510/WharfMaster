@@ -193,17 +193,21 @@ const Api = (() => {
     deleteDockerfile: (name) =>
       request(`/api/dockerfiles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
     stacks: () => request(`/api/stacks?endpointId=${getEndpointId()}`),
+    stackUpdates: (refresh = false) =>
+      request(`/api/stacks/updates?endpointId=${getEndpointId()}${refresh ? '&refresh=1' : ''}`),
+    stackUpdate: (id, refresh = false) =>
+      request(`/api/stacks/${id}/updates${refresh ? '?refresh=1' : ''}`),
     stack: (id) => request(`/api/stacks/${id}`),
     stackFile: (id) => request(`/api/stacks/${id}/file`),
-    createStack: (Name, StackFileContent, Env = []) =>
+    createStack: (Name, StackFileContent, Env = [], PullImages = false) =>
       request(`/api/stacks/create/standalone/string?endpointId=${getEndpointId()}`, {
         method: 'POST',
-        body: JSON.stringify({ Name, StackFileContent, Env }),
+        body: JSON.stringify({ Name, StackFileContent, Env, PullImages: !!PullImages }),
       }),
-    updateStack: (id, StackFileContent, Env = []) =>
+    updateStack: (id, StackFileContent, Env = [], PullImages = false) =>
       request(`/api/stacks/${id}?endpointId=${getEndpointId()}`, {
         method: 'PUT',
-        body: JSON.stringify({ StackFileContent, Env, prune: true }),
+        body: JSON.stringify({ StackFileContent, Env, prune: true, PullImages: !!PullImages }),
       }),
     deleteStack: (id) =>
       request(`/api/stacks/${id}?endpointId=${getEndpointId()}`, { method: 'DELETE' }),

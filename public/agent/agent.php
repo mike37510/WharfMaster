@@ -285,6 +285,7 @@ if (str_starts_with($path, '/compose')) {
             if (!is_array($env)) {
                 $env = [];
             }
+            $pull = !empty($body['pull']) || !empty($body['Pull']) || !empty($body['pullImages']) || !empty($body['PullImages']);
             if ($composeFileContent === '') {
                 agent_json(['ok' => false, 'message' => 'composeFile requis'], 400);
             }
@@ -297,7 +298,12 @@ if (str_starts_with($path, '/compose')) {
                 throw new RuntimeException("Impossible d'écrire le fichier Compose");
             }
             agent_write_env_file($projectPath, $env);
-            $out = agent_run_compose($socket, $projectPath, $name, $filePath, ['up', '-d', '--remove-orphans'], $env);
+            $upArgs = ['up', '-d', '--remove-orphans'];
+            if ($pull) {
+                $upArgs[] = '--pull';
+                $upArgs[] = 'always';
+            }
+            $out = agent_run_compose($socket, $projectPath, $name, $filePath, $upArgs, $env);
             agent_json(['ok' => true, 'name' => $name, 'output' => $out]);
         }
 

@@ -122,6 +122,8 @@ final class Ownership
 
     /**
      * Inject owner labels under every Compose service (best-effort YAML edit).
+     * Merges into existing `labels:` maps and deduplicates keys (Compose rejects duplicates).
+     *
      * @param array<string, string> $labels
      */
     public static function injectComposeServiceLabels(string $composeYaml, array $labels): string
@@ -129,68 +131,124 @@ final class Ownership
         if ($labels === [] || trim($composeYaml) === '') {
             return $composeYaml;
         }
-        $labelBlock = "    labels:\n";
-        foreach ($labels as $k => $v) {
-            $labelBlock .= '      ' . $k . ': "' . addcslashes((string) $v, "\\\"") . "\"\n";
-        }
 
         $lines = preg_split("/\r\n|\n|\r/", $composeYaml) ?: [];
         $out = [];
         $inServices = false;
         $servicesIndent = 0;
-        $pendingService = false;
-        $serviceIndent = 0;
+        $i = 0;
+        $n = count($lines);
 
-        foreach ($lines as $line) {
+        while ($i < $n) {
+            $line = $lines[$i];
+
             if (preg_match('/^( *)services\s*:\s*$/', $line, $m)) {
                 $inServices = true;
                 $servicesIndent = strlen($m[1]);
                 $out[] = $line;
+                $i++;
                 continue;
             }
+
             if ($inServices && preg_match('/^( *)(\S[^:]*):\s*$/', $line, $m)) {
                 $indent = strlen($m[1]);
                 if ($indent <= $servicesIndent) {
-                    // left services section
-                    if ($pendingService) {
-                        $out[] = rtrim($labelBlock);
-                        $pendingService = false;
-                    }
                     $inServices = false;
                     $out[] = $line;
+                    $i++;
                     continue;
                 }
                 if ($indent === $servicesIndent + 2) {
-                    if ($pendingService) {
-                        $out[] = rtrim($labelBlock);
-                    }
-                    $pendingService = true;
-                    $serviceIndent = $indent;
+                    // Service block: consume properties, merge labels uniquely, re-emit
                     $out[] = $line;
+                    $i++;
+                    $serviceIndent = $indent;
+                    $propIndent = $serviceIndent + 2;
+                    $labelIndent = $propIndent + 2;
+                    /** @var array<string, string> $labelsMap */
+                    $labelsMap = [];
+                    /** @var list<string> $labelOrder */
+                    $labelOrder = [];
+                    /** @var list<string> $otherProps */
+                    $otherProps = [];
+
+                    while ($i < $n) {
+                        $prop = $lines[$i];
+                        if (preg_match('/^( *)\S/', $prop, $pm)) {
+                            $pi = strlen($pm[1]);
+                            if ($pi <= $serviceIndent) {
+                                break;
+                            }
+                            if ($pi === $propIndent && preg_match('/^( *)labels\s*:\s*$/', $prop)) {
+                                $i++;
+                                while ($i < $n) {
+                                    $ll = $lines[$i];
+                                    if (trim($ll) === '') {
+                                        $i++;
+                                        continue;
+                                    }
+                                    if (preg_match('/^( *)([^#:\s][^:]*):\s*(.*)$/', $ll, $lm)) {
+                                        $li = strlen($lm[1]);
+                                        if ($li <= $propIndent) {
+                                            break;
+                                        }
+                                        if ($li === $labelIndent) {
+                                            $key = trim($lm[2]);
+                                            $val = trim($lm[3]);
+                                            if ($key !== '') {
+                                                if (!array_key_exists($key, $labelsMap)) {
+                                                    $labelOrder[] = $key;
+                                                }
+                                                $labelsMap[$key] = $val; // last wins (dedupe)
+                                            }
+                                            $i++;
+                                            continue;
+                                        }
+                                    }
+                                    // Nested content under a label value — keep with previous key as opaque lines
+                                    if (preg_match('/^( *)\S/', $ll, $xm) && strlen($xm[1]) > $labelIndent) {
+                                        $i++;
+                                        continue;
+                                    }
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+                        $otherProps[] = $prop;
+                        $i++;
+                    }
+
+                    foreach ($labels as $k => $v) {
+                        $key = (string) $k;
+                        $labelsMap[$key] = '"' . addcslashes((string) $v, "\\\"") . '"';
+                        if (!in_array($key, $labelOrder, true)) {
+                            $labelOrder[] = $key;
+                        }
+                    }
+
+                    $out[] = str_repeat(' ', $propIndent) . 'labels:';
+                    foreach ($labelOrder as $key) {
+                        if (!array_key_exists($key, $labelsMap)) {
+                            continue;
+                        }
+                        $out[] = str_repeat(' ', $labelIndent) . $key . ': ' . $labelsMap[$key];
+                    }
+                    foreach ($otherProps as $prop) {
+                        $out[] = $prop;
+                    }
                     continue;
                 }
             }
-            if ($pendingService && preg_match('/^( *)labels\s*:\s*$/', $line, $m) && strlen($m[1]) === $serviceIndent + 2) {
-                // merge into existing labels block
-                $out[] = $line;
-                foreach ($labels as $k => $v) {
-                    $out[] = str_repeat(' ', $serviceIndent + 4) . $k . ': "' . addcslashes((string) $v, "\\\"") . '"';
-                }
-                $pendingService = false;
-                continue;
-            }
-            if ($pendingService && preg_match('/^( *)\S/', $line, $m) && strlen($m[1]) === $serviceIndent + 2) {
-                // first property of service — insert labels before it
-                $out[] = rtrim($labelBlock);
-                $pendingService = false;
-                $out[] = $line;
-                continue;
-            }
+
             $out[] = $line;
+            $i++;
         }
-        if ($pendingService) {
-            $out[] = rtrim($labelBlock);
+
+        $joined = implode("\n", $out);
+        if (str_ends_with($composeYaml, "\n") && !str_ends_with($joined, "\n")) {
+            $joined .= "\n";
         }
-        return implode("\n", $out) . (str_ends_with($composeYaml, "\n") ? "\n" : '');
+        return $joined;
     }
 }

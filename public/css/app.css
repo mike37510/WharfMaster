@@ -1102,6 +1102,22 @@ table.data th {
   text-transform: uppercase;
   letter-spacing: .04em;
 }
+table.data th.sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+table.data th.sortable:hover {
+  color: var(--text);
+}
+table.data th.sortable.is-sorted {
+  color: var(--accent, #38bdf8);
+}
+table.data th.sortable .sort-ind {
+  font-size: 9px;
+  margin-left: 4px;
+  opacity: 0.85;
+}
 table.data tr:hover td { background: rgba(59, 130, 246, 0.04); }
 table.data tr.row-stopped td {
   background: rgba(248, 113, 113, 0.10);
@@ -2638,6 +2654,56 @@ td.actions {
   margin-top: 22px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
+}
+
+/* Stack image update indicators */
+.img-upd {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.img-upd-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.img-upd.is-fresh {
+  color: var(--success);
+}
+.img-upd.is-fresh .img-upd-dot {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-soft);
+}
+.img-upd.is-update {
+  color: #d97706;
+}
+.img-upd.is-update .img-upd-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.22);
+}
+.img-upd.is-unknown .img-upd-dot {
+  background: var(--border-strong, var(--border));
+}
+.img-upd.is-loading .img-upd-dot {
+  background: var(--muted);
+  animation: img-upd-pulse 1s ease-in-out infinite;
+}
+@keyframes img-upd-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .img-upd.is-loading .img-upd-dot { animation: none; }
+}
+.img-upd-cell {
+  width: 1%;
+  white-space: nowrap;
 }
 
 @media (max-width: 900px) {

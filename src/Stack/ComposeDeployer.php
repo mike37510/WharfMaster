@@ -115,11 +115,19 @@ final class ComposeDeployer
         }
     }
 
-    /** @param list<array{name?:string,value?:string}|array{Name?:string,Value?:string}> $env */
-    public function up(string $projectPath, string $projectName, array $env = []): void
+    /**
+     * @param list<array{name?:string,value?:string}|array{Name?:string,Value?:string}> $env
+     * @param bool $pull Force remote image pull (`docker compose up --pull always`)
+     */
+    public function up(string $projectPath, string $projectName, array $env = [], bool $pull = false): void
     {
         $this->writeEnvFile($projectPath, $env);
-        $this->runCompose($projectPath, $projectName, ['up', '-d', '--remove-orphans'], $env);
+        $args = ['up', '-d', '--remove-orphans'];
+        if ($pull) {
+            $args[] = '--pull';
+            $args[] = 'always';
+        }
+        $this->runCompose($projectPath, $projectName, $args, $env);
     }
 
     /** @param list<array{name?:string,value?:string}|array{Name?:string,Value?:string}> $env */

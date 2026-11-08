@@ -24,13 +24,19 @@ final class AgentComposeClient
      * @param list<array{name?:string,value?:string,Name?:string,Value?:string}> $env
      * @return array<string, mixed>
      */
-    public function up(string $name, string $composeFile, array $env = [], string $entryPoint = 'docker-compose.yml'): array
-    {
+    public function up(
+        string $name,
+        string $composeFile,
+        array $env = [],
+        string $entryPoint = 'docker-compose.yml',
+        bool $pull = false,
+    ): array {
         return $this->post('/compose/up', [
             'name' => $name,
             'composeFile' => $composeFile,
             'env' => $env,
             'entryPoint' => $entryPoint,
+            'pull' => $pull,
         ], 900);
     }
 

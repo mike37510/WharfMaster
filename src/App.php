@@ -19,6 +19,7 @@ use App\Security\PasswordPolicy;
 use App\Security\RateLimiter;
 use App\Security\SecretBox;
 use App\Stack\ComposeDeployer;
+use App\Stack\ImageUpdateChecker;
 use App\Storage\Database;
 use App\Storage\Repositories;
 
@@ -28,6 +29,7 @@ final class App
     private Jwt $jwt;
     private DockerClient $docker;
     private ComposeDeployer $compose;
+    private ImageUpdateChecker $imageUpdates;
     private ImageBuilder $imageBuilder;
     private VolumeBrowser $volumeBrowser;
     private DockerScope $dockerScope;
@@ -50,6 +52,8 @@ final class App
             $config['docker_bin'],
             $config['compose_bin'],
         );
+        $cacheDir = dirname((string) $config['sqlite_path']) . '/image_digest_cache';
+        $this->imageUpdates = new ImageUpdateChecker($this->compose, $cacheDir);
         $this->imageBuilder = new ImageBuilder(
             $this->docker,
             (string) $config['dockerfiles_dir'],
@@ -378,6 +382,14 @@ final class App
 
         if ($path === '/api/stacks' && $method === 'GET') {
             return $this->listStacks($request, $user);
+        }
+
+        if ($path === '/api/stacks/updates' && $method === 'GET') {
+            return $this->listStackImageUpdates($request, $user);
+        }
+
+        if (preg_match('#^/api/stacks/(\d+)/updates$#', $path, $m) && $method === 'GET') {
+            return $this->getStackImageUpdates((int) $m[1], $request, $user);
         }
 
         if ($path === '/api/stacks/create/standalone/string' && $method === 'POST') {
@@ -747,6 +759,117 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
+    private function listStackImageUpdates(Request $request, array $user): Response
+    {
+        $endpointId = $request->query('endpointId');
+        $filter = null;
+        if ($endpointId !== null && (int) $endpointId > 0) {
+            $filter = (int) $endpointId;
+        }
+        $rows = $this->repo->listStacksForUser(
+            Ownership::username($user),
+            Ownership::isAdmin($user),
+            $filter,
+        );
+        $registries = $this->registriesWithPasswordsForUser($user);
+        $force = $this->wantsStackUpdateRefresh($request);
+        $out = [];
+        $dockerByEp = [];
+        foreach ($rows as $stack) {
+            $sid = (int) ($stack['id'] ?? 0);
+            $eid = (int) ($stack['endpoint_id'] ?? 0);
+            try {
+                if (!isset($dockerByEp[$eid])) {
+                    $ep = $this->repo->getEndpoint($eid);
+                    if (!$ep) {
+                        $out[(string) $sid] = [
+                            'Status' => 'unknown',
+                            'UpdateCount' => 0,
+                            'Checked' => 0,
+                            'Images' => [],
+                            'FromCache' => false,
+                        ];
+                        continue;
+                    }
+                    $dockerByEp[$eid] = $this->dockerForEndpoint($ep);
+                }
+                $out[(string) $sid] = $this->imageUpdates->checkStack(
+                    $stack,
+                    $dockerByEp[$eid],
+                    $registries,
+                    $force,
+                );
+            } catch (\Throwable $e) {
+                $out[(string) $sid] = [
+                    'Status' => 'unknown',
+                    'UpdateCount' => 0,
+                    'Checked' => 0,
+                    'Images' => [],
+                    'FromCache' => false,
+                    'Error' => $e->getMessage(),
+                ];
+            }
+        }
+        return Response::json([
+            'Updates' => $out,
+            'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
+            'Forced' => $force,
+        ]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function getStackImageUpdates(int $id, Request $request, array $user): Response
+    {
+        $stack = $this->repo->getStack($id);
+        if (!$stack || !$this->canAccessStack($stack, $user)) {
+            return Response::error('Stack introuvable', 404);
+        }
+        $ep = $this->repo->getEndpoint((int) $stack['endpoint_id']);
+        if (!$ep) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $force = $this->wantsStackUpdateRefresh($request);
+        try {
+            $data = $this->imageUpdates->checkStack(
+                $stack,
+                $this->dockerForEndpoint($ep),
+                $this->registriesWithPasswordsForUser($user),
+                $force,
+            );
+            return Response::json($data);
+        } catch (\Throwable $e) {
+            return Response::error($e->getMessage(), 502);
+        }
+    }
+
+    private function wantsStackUpdateRefresh(Request $request): bool
+    {
+        $q = strtolower((string) ($request->query('refresh') ?? $request->query('force') ?? ''));
+        return in_array($q, ['1', 'true', 'yes'], true);
+    }
+
+    /**
+     * Registries with decrypted passwords for digest probes.
+     * @param array{id:int,username:string,role:int} $user
+     * @return list<array<string, mixed>>
+     */
+    private function registriesWithPasswordsForUser(array $user): array
+    {
+        $rows = $this->repo->listRegistriesForUser(
+            Ownership::userId($user),
+            Ownership::isAdmin($user),
+        );
+        $out = [];
+        foreach ($rows as $row) {
+            $full = $this->repo->getRegistry((int) $row['id']);
+            if ($full) {
+                $out[] = $full;
+            }
+        }
+        return $out;
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
     private function getStack(int $id, array $user): Response
     {
         $stack = $this->repo->getStack($id);
@@ -815,11 +938,12 @@ final class App
             $mirrorKey = $isAgent ? ('ep' . $endpointId . '_' . $name) : $name;
             $projectPath = $this->compose->writeComposeFile($mirrorKey, $content, $entryPoint);
             $this->compose->writeEnvFile($projectPath, $env);
+            $pullImages = !empty($body['PullImages']) || !empty($body['pullImages']) || !empty($body['Pull']);
             if ($isAgent) {
-                $this->agentComposeClient($ep)->up($name, $content, $env, $entryPoint);
+                $this->agentComposeClient($ep)->up($name, $content, $env, $entryPoint, $pullImages);
                 $deployedOnAgent = true;
             } else {
-                $this->compose->up($projectPath, $name, $env);
+                $this->compose->up($projectPath, $name, $env, $pullImages);
             }
             $row = $this->repo->createStack(
                 $name,
@@ -829,6 +953,7 @@ final class App
                 $env,
                 (string) $user['username'],
             );
+            $this->imageUpdates->invalidateStack((int) ($row['id'] ?? 0));
         } catch (\Throwable $e) {
             if ($deployedOnAgent && is_array($ep ?? null)) {
                 try {
@@ -893,19 +1018,22 @@ final class App
                 (string) $stack['entry_point'],
             );
             $this->compose->writeEnvFile($stack['project_path'], $env);
+            $pullImages = !empty($body['PullImages']) || !empty($body['pullImages']) || !empty($body['Pull']);
             if ($isAgent) {
                 $this->agentComposeClient($ep)->up(
                     (string) $stack['name'],
                     $content,
                     $env,
                     (string) $stack['entry_point'],
+                    $pullImages,
                 );
             } else {
-                $this->compose->up($stack['project_path'], $stack['name'], $env);
+                $this->compose->up($stack['project_path'], $stack['name'], $env, $pullImages);
             }
             $row = $this->repo->updateStack($id, $env, (string) $user['username']);
             $this->repo->setStackStatus($id, 1);
             $row = $this->repo->getStack($id) ?? $row;
+            $this->imageUpdates->invalidateStack($id);
         } catch (\Throwable $e) {
             return Response::error($e->getMessage(), 500);
         }
@@ -941,6 +1069,7 @@ final class App
             }
             $this->compose->removeProjectDir($stack['project_path']);
             $this->repo->deleteStack($id);
+            $this->imageUpdates->invalidateStack($id);
         } catch (\Throwable $e) {
             return Response::error($e->getMessage(), 500);
         }
@@ -1632,7 +1761,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.4.8',
+                'User-Agent: WharfMaster/1.5.0',
             ],
         ]);
         $body = curl_exec($ch);
@@ -2622,7 +2751,7 @@ MD;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.8');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.5.0');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)
