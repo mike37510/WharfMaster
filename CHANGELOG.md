@@ -2,6 +2,15 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.4.8] — 2026-11-08
+
+### Corrigé
+- Registres **Harness / Gitness** (`harness.vincz.fr`, etc.) :
+  - login **e-mail + jeton** (Basic) pris en charge
+  - realm Bearer interne (IP privée) réécrit vers l’URL publique
+  - catalogue via l’API Gitness (pas de `/v2/_catalog` côté Harness)
+  - jeton sans `scope` en query (sinon 404 Gitness)
+
 ## [1.4.7] — 2026-11-08
 
 ### Corrigé

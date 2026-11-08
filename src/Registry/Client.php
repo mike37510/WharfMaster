@@ -153,6 +153,10 @@ final class Client
     /** @return array{Repositories: list<array{Name:string,Description:string,StarCount:int,PullCount:int,Official:bool}>, Query:string} */
     private function v2Catalog(string $query, int $limit): array
     {
+        // Harness/Gitness: /v2/_catalog is not implemented — use their REST API.
+        if ($this->supportsGitnessApi()) {
+            return $this->gitnessListRepositories($query, $limit);
+        }
         $base = $this->baseUrl();
         $n = min(1000, max(1, $limit));
         $data = $this->registryRequest('GET', $base . '/v2/_catalog?n=' . $n);
@@ -177,6 +181,136 @@ final class Client
             'Official' => false,
         ], $all);
         return ['Repositories' => $repos, 'Query' => $query];
+    }
+
+    /** @return list<string> */
+    private function basicAuthHeaders(): array
+    {
+        $user = trim((string) ($this->registry['username'] ?? ''));
+        $pass = (string) ($this->registry['password'] ?? '');
+        if ($user === '' && $pass === '') {
+            return [];
+        }
+        return ['Authorization: Basic ' . base64_encode($user . ':' . $pass)];
+    }
+
+    private function supportsGitnessApi(): bool
+    {
+        $headers = $this->basicAuthHeaders();
+        if ($headers === []) {
+            return false;
+        }
+        try {
+            $data = $this->httpJson($this->baseUrl() . '/api/v1/user', $headers, 8);
+            return isset($data['id']) || isset($data['uid']) || isset($data['email']);
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * @return array{Repositories: list<array{Name:string,Description:string,StarCount:int,PullCount:int,Official:bool}>, Query:string}
+     */
+    private function gitnessListRepositories(string $query, int $limit): array
+    {
+        $base = $this->baseUrl();
+        $headers = $this->basicAuthHeaders();
+        try {
+            $memberships = $this->httpJson($base . '/api/v1/user/memberships', $headers, 12);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('API Gitness (memberships) : ' . $e->getMessage(), 502);
+        }
+        if (!is_array($memberships)) {
+            $memberships = [];
+        }
+        $repos = [];
+        $seen = [];
+        foreach ($memberships as $membership) {
+            if (!is_array($membership)) {
+                continue;
+            }
+            $space = (string) ($membership['space']['path'] ?? $membership['space']['identifier'] ?? '');
+            if ($space === '') {
+                continue;
+            }
+            $page = 1;
+            while (count($repos) < $limit && $page <= 20) {
+                $url = $base . '/api/v1/spaces/' . rawurlencode($space)
+                    . '/artifacts?page=' . $page . '&limit=' . min(50, max($limit, 10));
+                try {
+                    $data = $this->httpJson($url, $headers, 15);
+                } catch (\Throwable) {
+                    break;
+                }
+                $arts = $data['data']['artifacts'] ?? [];
+                if (!is_array($arts) || $arts === []) {
+                    break;
+                }
+                foreach ($arts as $art) {
+                    if (!is_array($art)) {
+                        continue;
+                    }
+                    $pkg = strtoupper((string) ($art['packageType'] ?? 'DOCKER'));
+                    if ($pkg !== 'DOCKER' && $pkg !== 'HELM') {
+                        continue;
+                    }
+                    $name = $this->gitnessArtifactRepoName($art, $space);
+                    if ($name === '' || isset($seen[$name])) {
+                        continue;
+                    }
+                    $seen[$name] = true;
+                    $repos[] = [
+                        'Name' => $name,
+                        'Description' => (string) ($art['registryIdentifier'] ?? ''),
+                        'StarCount' => 0,
+                        'PullCount' => (int) ($art['downloadsCount'] ?? 0),
+                        'Official' => false,
+                    ];
+                    if (count($repos) >= $limit) {
+                        break 2;
+                    }
+                }
+                $pageCount = (int) ($data['data']['pageCount'] ?? 1);
+                if ($page >= $pageCount) {
+                    break;
+                }
+                $page++;
+            }
+        }
+        $q = strtolower(trim($query));
+        if ($q !== '') {
+            $repos = array_values(array_filter(
+                $repos,
+                static fn(array $r): bool => str_contains(strtolower($r['Name']), $q)
+            ));
+        }
+        usort($repos, static fn(array $a, array $b): int => strcmp($a['Name'], $b['Name']));
+        return ['Repositories' => array_slice($repos, 0, $limit), 'Query' => $query];
+    }
+
+    /** @param array<string, mixed> $art */
+    private function gitnessArtifactRepoName(array $art, string $space): string
+    {
+        $pull = (string) ($art['pullCommand'] ?? '');
+        if (preg_match('#docker\s+pull\s+(\S+)#i', $pull, $m)) {
+            $ref = $m[1];
+            // host/path:tag → path (drop host + tag)
+            if (preg_match('#^[^/]+/(.+)$#', $ref, $rm) && str_contains($rm[1], '/')) {
+                $path = $rm[1];
+            } else {
+                $path = $ref;
+            }
+            if (preg_match('#^(.+):([^:/]+)$#', $path, $tm)) {
+                return $tm[1];
+            }
+            return $path;
+        }
+        $reg = (string) ($art['registryIdentifier'] ?? '');
+        $name = (string) ($art['name'] ?? '');
+        if ($reg === '' || $name === '') {
+            return '';
+        }
+        return strtolower($space) . '/' . $reg . '/' . $name;
     }
 
     /** @return array{Name:string,Tags:list<array{Name:string,Size:int,LastUpdated:string}>} */
@@ -252,7 +386,7 @@ final class Client
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_TIMEOUT => 20,
             CURLOPT_HEADER => true,
-            CURLOPT_HTTPHEADER => array_merge($headers, ['User-Agent: WharfMaster/1.4.7']),
+            CURLOPT_HTTPHEADER => array_merge($headers, ['User-Agent: WharfMaster/1.4.8']),
         ]);
         $raw = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -266,10 +400,18 @@ final class Client
         $body = substr($raw, $headerSize);
 
         if ($status === 401 && $bearer === null) {
-            $token = $this->fetchBearerToken($headerBlob, $url);
+            try {
+                $token = $this->fetchBearerToken($headerBlob, $url);
+            } catch (\Throwable $e) {
+                throw new \RuntimeException($e->getMessage(), $e->getCode() >= 400 ? (int) $e->getCode() : 502);
+            }
             if ($token !== null) {
                 return $this->registryRequest($method, $url, $token);
             }
+            throw new \RuntimeException(
+                'Authentification registre refusée (401). Vérifiez email/utilisateur et jeton, et que le realm Bearer est joignable.',
+                401
+            );
         }
         if ($status >= 400) {
             $msg = trim($body) !== '' ? trim($body) : ('HTTP ' . $status);
@@ -300,30 +442,101 @@ final class Client
         if ($realm === '') {
             return null;
         }
+        // Harness/Gitness often advertises an internal realm (private IP).
+        // Remap to the public registry host so token fetch works from outside.
+        $realm = $this->rewriteRealmToRegistryHost($realm);
+        $service = (string) ($params['service'] ?? '');
+        $scope = (string) ($params['scope'] ?? '');
+        // Gitness returns HTTP 404 when `scope` is passed on /v2/token; service alone is enough.
+        $omitScope = $service !== '' && (
+            strcasecmp($service, 'gitness-registry') === 0
+            || str_contains(strtolower($service), 'gitness')
+        );
         $query = [];
-        if (!empty($params['service'])) {
-            $query['service'] = $params['service'];
+        if ($service !== '') {
+            $query['service'] = $service;
         }
-        if (!empty($params['scope'])) {
-            $query['scope'] = $params['scope'];
-        } else {
-            // catalog default scope
-            $query['scope'] = 'registry:catalog:*';
+        if ($scope !== '' && !$omitScope) {
+            $query['scope'] = $scope;
         }
-        $tokenUrl = $realm . (str_contains($realm, '?') ? '&' : '?') . http_build_query($query);
-        $headers = [];
-        $user = (string) ($this->registry['username'] ?? '');
-        $pass = (string) ($this->registry['password'] ?? '');
-        if ($user !== '' || $pass !== '') {
-            $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
-        }
+        $headers = $this->basicAuthHeaders();
+        $lastErr = '';
         try {
-            $data = $this->httpJson($tokenUrl, $headers, 15);
-        } catch (\Throwable) {
-            return null;
+            $data = $this->requestRegistryToken($realm, $query, $headers);
+        } catch (\Throwable $e) {
+            $lastErr = $e->getMessage();
+            $data = null;
+            if (!$omitScope && $scope !== '') {
+                // Some registries reject scope in the query — retry with service only.
+                unset($query['scope']);
+                try {
+                    $data = $this->requestRegistryToken($realm, $query, $headers);
+                } catch (\Throwable $e2) {
+                    $lastErr = $e2->getMessage();
+                    $data = null;
+                }
+            }
+        }
+        if ($data === null) {
+            throw new \RuntimeException(
+                'Impossible d’obtenir un jeton registre (realm ' . $realm . ')'
+                . ($lastErr !== '' ? ' : ' . $lastErr : ''),
+                502
+            );
         }
         $token = (string) ($data['token'] ?? $data['access_token'] ?? '');
         return $token !== '' ? $token : null;
+    }
+
+    /**
+     * @param array<string, string> $query
+     * @param list<string> $headers
+     * @return array<string, mixed>
+     */
+    private function requestRegistryToken(string $realm, array $query, array $headers): array
+    {
+        $tokenUrl = $realm;
+        if ($query !== []) {
+            $tokenUrl .= (str_contains($realm, '?') ? '&' : '?') . http_build_query($query);
+        }
+        return $this->httpJson($tokenUrl, $headers, 15);
+    }
+
+    /**
+     * If WWW-Authenticate realm points to a private/unreachable host, reuse the
+     * registry’s public scheme+host with the realm path (e.g. /v2/token).
+     */
+    private function rewriteRealmToRegistryHost(string $realm): string
+    {
+        $regBase = $this->baseUrl();
+        $regParts = parse_url($regBase);
+        $realmParts = parse_url($realm);
+        if (!is_array($regParts) || !is_array($realmParts)) {
+            return $realm;
+        }
+        $regHost = strtolower((string) ($regParts['host'] ?? ''));
+        $realmHost = strtolower((string) ($realmParts['host'] ?? ''));
+        if ($regHost === '' || $realmHost === '' || $regHost === $realmHost) {
+            return $realm;
+        }
+        $private = filter_var($realmHost, FILTER_VALIDATE_IP)
+            && !filter_var($realmHost, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        // Also remap if realm host differs and looks like an internal hostname
+        $likelyInternal = $private
+            || str_ends_with($realmHost, '.local')
+            || str_ends_with($realmHost, '.internal')
+            || !str_contains($realmHost, '.');
+        if (!$likelyInternal && !$private) {
+            // Different public hosts — keep original (e.g. auth.docker.io)
+            return $realm;
+        }
+        $scheme = (string) ($regParts['scheme'] ?? 'https');
+        $port = isset($regParts['port']) ? ':' . $regParts['port'] : '';
+        $path = (string) ($realmParts['path'] ?? '/v2/token');
+        if ($path === '') {
+            $path = '/v2/token';
+        }
+        return $scheme . '://' . $regHost . $port . $path;
     }
 
     /**
@@ -341,7 +554,7 @@ final class Client
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => array_merge(
-                ['Accept: application/json', 'User-Agent: WharfMaster/1.4.7'],
+                ['Accept: application/json', 'User-Agent: WharfMaster/1.4.8'],
                 $headers
             ),
         ]);

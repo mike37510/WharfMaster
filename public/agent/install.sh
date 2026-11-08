@@ -8,7 +8,7 @@ ADVERTISE=""
 NAME=""
 PORT="9001"
 # Prefer versioned tag (principal injects --image); latest only as last resort
-IMAGE="${WHARFMASTER_AGENT_IMAGE:-ghcr.io/mike37510/wharfmaster-agent:1.4.7}"
+IMAGE="${WHARFMASTER_AGENT_IMAGE:-ghcr.io/mike37510/wharfmaster-agent:1.4.8}"
 CONTAINER_NAME="wharfmaster-agent"
 TLS_CN=""
 TLS_DAYS="365"

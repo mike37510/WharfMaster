@@ -2434,7 +2434,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.7</div>
+            <div class="brand-ver">v1.4.8</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -5279,7 +5279,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.7', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.8', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -5347,12 +5347,13 @@ CMD ["sh"]
             <p class="field-hint muted">Ex. registre local : <code>http://192.168.1.254:5000</code></p>
           </div>
           <div class="form-group">
-            <label class="field-label">Utilisateur</label>
-            <input id="r-user" placeholder="optionnel" autocomplete="username" value="${esc(existing?.Username || '')}">
+            <label class="field-label">Utilisateur / e-mail</label>
+            <input id="r-user" placeholder="user ou email@domaine.tld" autocomplete="username" value="${esc(existing?.Username || '')}">
           </div>
           <div class="form-group">
-            <label class="field-label">Mot de passe / jeton</label>
+            <label class="field-label">Mot de passe / jeton (PAT)</label>
             <input id="r-pass" type="password" placeholder="${isEdit ? 'Laisser vide pour ne pas changer' : 'optionnel'}" autocomplete="${isEdit ? 'new-password' : 'current-password'}">
+            <p class="field-hint muted">E-mail + jeton acceptés (Docker Hub, Harness/Gitness, Registry V2).</p>
             ${isEdit && existing?.Authentication ? '<p class="field-hint muted">Un secret est déjà enregistré. Laissez vide pour le conserver.</p>' : ''}
           </div>
           ${isEdit ? `<div class="form-group">
@@ -5549,7 +5550,9 @@ CMD ["sh"]
         if (!repos.length) {
           const hint = reg.Type === 'hub' && !q
             ? 'Saisissez un terme pour rechercher sur Docker Hub (ex. nginx), ou ajoutez des identifiants pour lister vos dépôts.'
-            : 'Aucun dépôt trouvé';
+            : (q
+              ? 'Aucun dépôt ne correspond au filtre.'
+              : 'Aucun dépôt trouvé. Vérifiez e-mail/jeton, ou saisissez le chemin du dépôt si le registre n’expose pas de catalogue.');
           reposEl.innerHTML = `<div class="muted" style="padding:12px">${esc(hint)}</div>`;
           return;
         }
@@ -6312,7 +6315,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.7</strong> — édition registres, ports internes, install Docker Compose.</p>
+          <p class="muted">Version <strong>1.4.8</strong> — catalogue Harness/Gitness, e-mail + jeton.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
