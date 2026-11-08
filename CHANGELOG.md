@@ -2,6 +2,12 @@
 
 Toutes les dates sont en UTC+1.
 
+## [2.0.1] — 2026-11-08
+
+### Amélioré
+- **Planifications** : formulaire user-friendly (tous les jours / lun–ven / hebdo / horaire) au lieu du cron brut ; résumé en français
+- Badge version console aligné sur **2.0.1**
+
 ## [2.0.0] — 2026-11-08
 
 Release majeure : gouvernance multi-équipes, SSO AD, ACL par nœud, scheduler, scan CVE Trivy, et UX Paramètres / Nœuds revue.

@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.0.0**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.0.1**.
 
 | | |
 |---|---|
@@ -231,7 +231,7 @@ Content-Type: application/json
 ```json
 {
   "ok": true,
-  "version": "2.0.0",
+  "version": "2.0.1",
   "checks": {
     "docker": true,
     "dockerSocket": true,

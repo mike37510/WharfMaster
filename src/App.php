@@ -2029,7 +2029,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/2.0.0',
+                'User-Agent: WharfMaster/2.0.1',
             ],
         ]);
         $body = curl_exec($ch);

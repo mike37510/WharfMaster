@@ -2646,7 +2646,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v2.0.0</div>
+            <div class="brand-ver">v2.0.1</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -6065,7 +6065,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=2.0.0', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=2.0.1', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -7821,7 +7821,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>2.0.0</strong> — équipes, ACL nœuds, SSO AD, scheduler, scan CVE Trivy.</p>
+          <p class="muted">Version <strong>2.0.1</strong> — équipes, ACL nœuds, SSO AD, scheduler, scan CVE Trivy.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
