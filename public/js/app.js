@@ -375,16 +375,16 @@
     const ExposedPorts = {};
     const PortBindings = {};
     String(portsText || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).forEach((line) => {
-      // host:container[/proto] or container[/proto]
+      // host:container[/proto] = publié ; container[/proto] = exposé seulement (pas de PortBindings)
       const m = line.match(/^(?:(\d+(?:-\d+)?):)?(\d+(?:-\d+)?)(?:\/(tcp|udp|sctp))?$/i);
       if (!m) return;
       const proto = (m[3] || 'tcp').toLowerCase();
       const containerPort = `${m[2]}/${proto}`;
       ExposedPorts[containerPort] = {};
+      // Uniquement si un port hôte est fourni — sinon Docker reçoit [{}] qui
+      // devient [[]] via PHP json_decode et casse l’API (PortBinding).
       if (m[1]) {
         PortBindings[containerPort] = [{ HostPort: String(m[1]) }];
-      } else {
-        PortBindings[containerPort] = [{}];
       }
     });
     return { ExposedPorts, PortBindings };
@@ -628,7 +628,8 @@
           </div>
           <div class="form-group">
             <label class="field-label">Ports</label>
-            <input id="c-ports" placeholder="8080:80 ou 80 (un par ligne / virgule)" autocomplete="off">
+            <input id="c-ports" placeholder="8080:80 (publié) ou 80 (interne) — ligne / virgule" autocomplete="off">
+            <p class="field-hint muted" style="margin-top:6px"><code>hôte:conteneur</code> publie ; <code>80</code> ou <code>80/tcp</code> expose seulement en interne.</p>
           </div>
           <div class="form-group">
             <div class="field-label-row">
@@ -2429,7 +2430,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.5</div>
+            <div class="brand-ver">v1.4.6</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -5274,7 +5275,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.5', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.6', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -5301,44 +5302,63 @@ CMD ["sh"]
   }
 
   function openCreateRegistryModal() {
+    openRegistryModal(null);
+  }
+
+  function openEditRegistryModal(reg) {
+    openRegistryModal(reg);
+  }
+
+  /** @param {object|null} existing */
+  function openRegistryModal(existing) {
+    const isEdit = !!(existing && existing.Id);
     closeAppModal();
     const host = modalHost();
+    const type = existing?.Type === 'hub' ? 'hub' : 'v2';
     host.innerHTML = `
       <div class="modal-backdrop">
         <div class="modal modal-form" role="dialog" aria-modal="true">
           <div class="modal-head">
             <div>
-              <h3>Ajouter un registre</h3>
-              <div class="modal-sub">Docker Hub ou Registry V2</div>
+              <h3>${isEdit ? 'Modifier le registre' : 'Ajouter un registre'}</h3>
+              <div class="modal-sub">Docker Hub ou Registry V2 (http/https)</div>
             </div>
             <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
           </div>
           <div id="create-err"></div>
           <div class="form-group">
             <label class="field-label">Nom <span class="req">*</span></label>
-            <input id="r-name" placeholder="Mon registre" autocomplete="off">
+            <input id="r-name" placeholder="Mon registre" autocomplete="off" value="${esc(existing?.Name || '')}">
           </div>
           <div class="form-group">
             <label class="field-label">Type</label>
             <select id="r-type" class="select-block">
-              <option value="hub">Docker Hub</option>
-              <option value="v2">Registry V2</option>
+              <option value="hub"${type === 'hub' ? ' selected' : ''}>Docker Hub</option>
+              <option value="v2"${type === 'v2' ? ' selected' : ''}>Registry V2</option>
             </select>
           </div>
           <div class="form-group" id="r-url-wrap">
             <label class="field-label">URL <span class="req">*</span></label>
-            <input id="r-url" placeholder="https://registry.example.com" autocomplete="off">
+            <input id="r-url" placeholder="http://192.168.1.10:5000 ou https://registry.example.com" autocomplete="off" value="${esc(type === 'hub' ? 'https://docker.io' : (existing?.URL || ''))}">
+            <p class="field-hint muted">Ex. registre local : <code>http://192.168.1.254:5000</code></p>
           </div>
           <div class="form-group">
             <label class="field-label">Utilisateur</label>
-            <input id="r-user" placeholder="optionnel" autocomplete="username">
+            <input id="r-user" placeholder="optionnel" autocomplete="username" value="${esc(existing?.Username || '')}">
           </div>
           <div class="form-group">
             <label class="field-label">Mot de passe / jeton</label>
-            <input id="r-pass" type="password" placeholder="optionnel" autocomplete="current-password">
+            <input id="r-pass" type="password" placeholder="${isEdit ? 'Laisser vide pour ne pas changer' : 'optionnel'}" autocomplete="${isEdit ? 'new-password' : 'current-password'}">
+            ${isEdit && existing?.Authentication ? '<p class="field-hint muted">Un secret est déjà enregistré. Laissez vide pour le conserver.</p>' : ''}
           </div>
+          ${isEdit ? `<div class="form-group">
+            <label class="field-inline" style="gap:8px;cursor:pointer">
+              <input type="checkbox" id="r-clear-pass">
+              <span>Effacer le mot de passe enregistré</span>
+            </label>
+          </div>` : ''}
           <div class="actions-bar">
-            <button type="button" class="btn btn-primary" id="r-save">Ajouter</button>
+            <button type="button" class="btn btn-primary" id="r-save">${isEdit ? 'Enregistrer' : 'Ajouter'}</button>
             <button type="button" class="btn" data-close-modal>Annuler</button>
           </div>
         </div>
@@ -5351,7 +5371,7 @@ CMD ["sh"]
       const hub = typeSel.value === 'hub';
       urlWrap.hidden = hub;
       if (hub) urlInput.value = 'https://docker.io';
-      else if (urlInput.value === 'https://docker.io') urlInput.value = '';
+      else if (urlInput.value === 'https://docker.io') urlInput.value = existing?.URL && existing.Type !== 'hub' ? existing.URL : '';
     };
     typeSel.addEventListener('change', syncType);
     syncType();
@@ -5364,12 +5384,20 @@ CMD ["sh"]
       const URL = Type === 'hub' ? 'https://docker.io' : document.getElementById('r-url').value.trim();
       const Username = document.getElementById('r-user').value.trim();
       const Password = document.getElementById('r-pass').value;
+      const ClearPassword = !!document.getElementById('r-clear-pass')?.checked;
       if (!Name || !URL) {
         errBox.innerHTML = `<div class="error-box">Le nom et l’URL sont requis.</div>`;
         return;
       }
       try {
-        await Api.createRegistry({ Name, URL, Type, Username, Password });
+        if (isEdit) {
+          const payload = { Name, URL, Type, Username };
+          if (ClearPassword) payload.ClearPassword = true;
+          else if (Password) payload.Password = Password;
+          await Api.updateRegistry(existing.Id, payload);
+        } else {
+          await Api.createRegistry({ Name, URL, Type, Username, Password });
+        }
         closeAppModal();
         await route();
       } catch (err) {
@@ -5390,6 +5418,7 @@ CMD ["sh"]
         <td>${r.Authentication ? esc(r.Username || 'authentifié') : '<span class="muted">anonyme</span>'}</td>
         <td class="actions"><div class="quick-actions">
           ${iconBtn({ tag: 'a', href: `#registries/${r.Id}`, title: 'Parcourir', icon: 'search' })}
+          ${iconBtn({ act: 'edit-reg', id: r.Id, title: 'Modifier', icon: 'edit', info: true })}
           ${iconBtn({ del: r.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div></td>
       </tr>`;
@@ -5409,6 +5438,13 @@ CMD ["sh"]
     bindRefresh();
     bindSearch('registries');
     document.getElementById('create-registry').onclick = () => openCreateRegistryModal();
+    const byId = new Map((list || []).map((r) => [String(r.Id), r]));
+    root.querySelectorAll('[data-act="edit-reg"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const reg = byId.get(String(btn.dataset.id));
+        if (reg) openEditRegistryModal(reg);
+      });
+    });
     root.querySelectorAll('[data-del]').forEach((btn) => {
       onBusyClick(btn, async (el) => {
         await Api.deleteRegistry(el.dataset.del);
@@ -5425,6 +5461,7 @@ CMD ["sh"]
       ${pageHeader(reg.Name, false)}
       <div class="toolbar">
         ${iconBtn({ tag: 'a', href: '#registries', title: 'Retour', icon: 'back' })}
+        ${iconBtn({ elId: 'reg-edit', title: 'Modifier la config', icon: 'edit', info: true })}
         <div class="spacer"></div>
         <span class="muted mono">${esc(reg.URL)} · ${reg.Type === 'hub' ? 'Docker Hub' : 'V2'}</span>
       </div>
@@ -5450,6 +5487,7 @@ CMD ["sh"]
     const tagsEl = document.getElementById('reg-tags');
     const repoLabel = document.getElementById('reg-repo-label');
     const qInput = document.getElementById('reg-q');
+    document.getElementById('reg-edit')?.addEventListener('click', () => openEditRegistryModal(reg));
 
     async function loadTags(repo) {
       selectedRepo = repo;
@@ -6270,7 +6308,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.5</strong> — console TTY, Compose colorisé, usage images/volumes/réseaux, pagination.</p>
+          <p class="muted">Version <strong>1.4.6</strong> — édition registres, ports internes, install Docker Compose.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

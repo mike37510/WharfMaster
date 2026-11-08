@@ -2,6 +2,15 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.4.6] — 2026-11-08
+
+### Ajouté
+- **Modification des registres** après création (nom, URL, type, identifiants) ; mot de passe vide = inchangé
+
+### Corrigé
+- Création de conteneur avec **port interne seul** (`80` / `80/tcp`) : plus d’erreur Docker `PortBindings` / JSON invalide
+- Normalisation PHP des bindings vides (`{}` → `[]`) avant envoi à l’API Docker
+
 ## [1.4.5] — 2026-11-08
 
 ### Ajouté

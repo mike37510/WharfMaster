@@ -1291,9 +1291,17 @@ final class App
         $name = trim((string) ($body['Name'] ?? $body['name'] ?? $existing['name']));
         $url = trim((string) ($body['URL'] ?? $body['Url'] ?? $body['url'] ?? $existing['url']));
         $username = trim((string) ($body['Username'] ?? $body['username'] ?? $existing['username']));
-        $password = array_key_exists('Password', $body) || array_key_exists('password', $body)
-            ? (string) ($body['Password'] ?? $body['password'] ?? '')
-            : null;
+        // Mot de passe : absent ou chaîne vide = conserver l’existant ; ClearPassword=true = effacer
+        $password = null;
+        $clearPass = !empty($body['ClearPassword']) || !empty($body['clearPassword']);
+        if ($clearPass) {
+            $password = '';
+        } elseif (array_key_exists('Password', $body) || array_key_exists('password', $body)) {
+            $incoming = (string) ($body['Password'] ?? $body['password'] ?? '');
+            if ($incoming !== '') {
+                $password = $incoming;
+            }
+        }
         $type = strtolower(trim((string) ($body['Type'] ?? $body['type'] ?? $existing['type'])));
         if (!in_array($type, ['hub', 'v2'], true)) {
             $type = 'v2';
@@ -1624,7 +1632,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.4.5',
+                'User-Agent: WharfMaster/1.4.6',
             ],
         ]);
         $body = curl_exec($ch);
@@ -2614,7 +2622,7 @@ MD;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.5');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.6');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)

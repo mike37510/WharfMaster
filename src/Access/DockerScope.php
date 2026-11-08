@@ -199,6 +199,47 @@ final class DockerScope
             if (isset($hc['PortBindings'])) {
                 if (!is_array($hc['PortBindings']) || $hc['PortBindings'] === [] || array_is_list($hc['PortBindings'])) {
                     unset($hc['PortBindings']);
+                } else {
+                    // json_decode(true) turns each binding {} into [] → Docker rejects as PortBinding
+                    foreach ($hc['PortBindings'] as $port => $bindings) {
+                        if (!is_array($bindings)) {
+                            unset($hc['PortBindings'][$port]);
+                            continue;
+                        }
+                        $fixed = [];
+                        foreach ($bindings as $b) {
+                            if ($b === null || $b === [] || (is_array($b) && $b === [])) {
+                                $fixed[] = new \stdClass();
+                                continue;
+                            }
+                            if (!is_array($b)) {
+                                continue;
+                            }
+                            // Skip nested empty-array junk ([[]])
+                            if (array_is_list($b) && $b !== [] && !self::isAssocPortBinding($b)) {
+                                $fixed[] = new \stdClass();
+                                continue;
+                            }
+                            $obj = new \stdClass();
+                            foreach ($b as $k => $v) {
+                                if (!is_int($k) && !is_string($k)) {
+                                    continue;
+                                }
+                                if (is_string($k)) {
+                                    $obj->{$k} = $v;
+                                }
+                            }
+                            $fixed[] = $obj;
+                        }
+                        if ($fixed === []) {
+                            unset($hc['PortBindings'][$port]);
+                        } else {
+                            $hc['PortBindings'][$port] = $fixed;
+                        }
+                    }
+                    if ($hc['PortBindings'] === []) {
+                        unset($hc['PortBindings']);
+                    }
                 }
             }
             // RestartPolicy Name-only maps are fine; empty Volumes/etc. maps → drop
@@ -211,6 +252,17 @@ final class DockerScope
         }
 
         return $body;
+    }
+
+    /** @param array<mixed> $b */
+    private static function isAssocPortBinding(array $b): bool
+    {
+        foreach (array_keys($b) as $k) {
+            if (is_string($k)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
