@@ -161,7 +161,7 @@ final class App
         }
 
         if ($path === '/api/backup' && $method === 'GET') {
-            return $this->downloadBackup($user);
+            return $this->downloadBackup($request, $user);
         }
 
         if ($path === '/api/users' && $method === 'GET') {
@@ -1624,7 +1624,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/1.4.4',
+                'User-Agent: WharfMaster/1.4.5',
             ],
         ]);
         $body = curl_exec($ch);
@@ -2167,25 +2167,44 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
-    private function downloadBackup(array $user): Response
+    private function downloadBackup(Request $request, array $user): Response
     {
         if ($err = $this->requireAdmin($user)) {
             return $err;
         }
+        $format = strtolower(trim((string) ($request->query('format') ?? 'zip')));
+        if ($format === 'sqlite') {
+            return $this->downloadSqliteBackupOnly();
+        }
+        return $this->downloadFullBackupZip($request, $user);
+    }
+
+    private function snapshotSqliteFile(): string
+    {
         $sqlite = (string) ($this->config['sqlite_path'] ?? '');
         if ($sqlite === '' || !is_file($sqlite)) {
-            return Response::error('Base SQLite introuvable', 404);
+            throw new \RuntimeException('Base SQLite introuvable', 404);
         }
-        // Consistent snapshot via SQLite backup API when available
         $tmp = sys_get_temp_dir() . '/wm-backup-' . bin2hex(random_bytes(6)) . '.sqlite';
         try {
             $src = new \PDO('sqlite:' . $sqlite);
             $src->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-            $src->exec("VACUUM INTO " . $src->quote($tmp));
+            $src->exec('VACUUM INTO ' . $src->quote($tmp));
         } catch (\Throwable) {
             if (!@copy($sqlite, $tmp)) {
-                return Response::error('Impossible de créer le backup', 500);
+                throw new \RuntimeException('Impossible de créer le snapshot SQLite', 500);
             }
+        }
+        return $tmp;
+    }
+
+    private function downloadSqliteBackupOnly(): Response
+    {
+        try {
+            $tmp = $this->snapshotSqliteFile();
+        } catch (\Throwable $e) {
+            $status = $e->getCode() >= 400 && $e->getCode() < 600 ? (int) $e->getCode() : 500;
+            return Response::error($e->getMessage(), $status);
         }
         $blob = (string) file_get_contents($tmp);
         @unlink($tmp);
@@ -2196,6 +2215,186 @@ final class App
             'Cache-Control' => 'no-store',
             'Content-Security-Policy' => "default-src 'none'",
         ]);
+    }
+
+    /**
+     * Full disaster-recovery archive: SQLite, Compose stacks, Dockerfiles, JWT secret, manifest.
+     *
+     * @param array{id:int,username:string,role:int} $user
+     */
+    private function downloadFullBackupZip(Request $request, array $user): Response
+    {
+        if (!class_exists(\ZipArchive::class)) {
+            return Response::error('Extension PHP zip indisponible — utilisez ?format=sqlite', 500);
+        }
+
+        $stamp = date('Ymd-His');
+        $rootName = 'wharfmaster-backup-' . $stamp;
+        $zipPath = sys_get_temp_dir() . '/' . $rootName . '-' . bin2hex(random_bytes(4)) . '.zip';
+        $sqliteTmp = null;
+
+        try {
+            $sqliteTmp = $this->snapshotSqliteFile();
+            $zip = new \ZipArchive();
+            if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+                throw new \RuntimeException('Impossible de créer l’archive ZIP', 500);
+            }
+
+            $files = [];
+            $zip->addFile($sqliteTmp, $rootName . '/database/dockermanager.sqlite');
+            $files[] = 'database/dockermanager.sqlite';
+
+            $jwtFile = dirname((string) $this->config['sqlite_path']) . '/jwt.secret';
+            if (is_file($jwtFile)) {
+                $zip->addFile($jwtFile, $rootName . '/secrets/jwt.secret');
+                $files[] = 'secrets/jwt.secret';
+            }
+
+            $composeDir = (string) ($this->config['compose_dir'] ?? '');
+            if ($composeDir !== '' && is_dir($composeDir)) {
+                $added = $this->zipAddDirectory($zip, $composeDir, $rootName . '/compose');
+                $files = array_merge($files, $added);
+            }
+
+            $dfDir = (string) ($this->config['dockerfiles_dir'] ?? '');
+            if ($dfDir !== '' && is_dir($dfDir)) {
+                $added = $this->zipAddDirectory($zip, $dfDir, $rootName . '/dockerfiles');
+                $files = array_merge($files, $added);
+            }
+
+            $settings = $this->formatSettings();
+            $meta = [
+                'app' => 'WharfMaster',
+                'version' => $this->config['version'] ?? null,
+                'createdAt' => date('c'),
+                'createdBy' => $user['username'] ?? null,
+                'format' => 1,
+                'contents' => $files,
+                'settings' => $settings,
+                'config' => [
+                    'app_name' => $this->config['app_name'] ?? 'WharfMaster',
+                    'version' => $this->config['version'] ?? null,
+                    'agent_image' => $this->config['agent_image'] ?? null,
+                    'docker_api_version' => $this->config['docker_api_version'] ?? null,
+                    'compose_dir' => 'data/compose',
+                    'dockerfiles_dir' => 'data/dockerfiles',
+                    'sqlite_path' => 'data/dockermanager.sqlite',
+                ],
+                'notes' => [
+                    'Includes users, endpoints/agents, stacks metadata, registries, audit, metrics, settings (SQLite).',
+                    'Includes on-disk Compose projects and saved Dockerfiles.',
+                    'Includes jwt.secret — keep the archive private.',
+                    'Docker container filesystem / volumes on hosts are NOT included.',
+                ],
+            ];
+            $zip->addFromString(
+                $rootName . '/MANIFEST.json',
+                json_encode($meta, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}'
+            );
+            $zip->addFromString($rootName . '/RESTORE.md', $this->backupRestoreGuide($stamp));
+            $zip->close();
+
+            $blob = (string) file_get_contents($zipPath);
+            $this->audit($user, 'backup.download', 'Téléchargement backup complet (ZIP)', $request, [
+                'format' => 'zip',
+                'bytes' => strlen($blob),
+                'files' => count($files),
+            ]);
+
+            return new Response(200, $blob, [
+                'Content-Type' => 'application/zip',
+                'Content-Disposition' => 'attachment; filename="' . $rootName . '.zip"',
+                'Cache-Control' => 'no-store',
+                'Content-Security-Policy' => "default-src 'none'",
+            ]);
+        } catch (\Throwable $e) {
+            $status = $e->getCode() >= 400 && $e->getCode() < 600 ? (int) $e->getCode() : 500;
+            return Response::error($e->getMessage() !== '' ? $e->getMessage() : 'Échec du backup', $status);
+        } finally {
+            if ($sqliteTmp !== null) {
+                @unlink($sqliteTmp);
+            }
+            @unlink($zipPath);
+        }
+    }
+
+    /**
+     * @return list<string> paths added relative to archive root prefix
+     */
+    private function zipAddDirectory(\ZipArchive $zip, string $dir, string $zipPrefix): array
+    {
+        $added = [];
+        $dir = rtrim($dir, '/');
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($iterator as $fileInfo) {
+            /** @var \SplFileInfo $fileInfo */
+            $full = $fileInfo->getPathname();
+            $rel = substr($full, strlen($dir) + 1);
+            if ($rel === false || $rel === '') {
+                continue;
+            }
+            $rel = str_replace('\\', '/', $rel);
+            $target = $zipPrefix . '/' . $rel;
+            if ($fileInfo->isDir()) {
+                $zip->addEmptyDir($target);
+                continue;
+            }
+            if (!$fileInfo->isFile() || !$fileInfo->isReadable()) {
+                continue;
+            }
+            // Skip hidden paths / logs
+            if (str_starts_with($rel, '.') || str_contains($rel, '/.') || str_ends_with($rel, '.log')) {
+                continue;
+            }
+            $zip->addFile($full, $target);
+            $added[] = preg_replace('#^[^/]+/#', '', $target) ?: $target;
+        }
+        return $added;
+    }
+
+    private function backupRestoreGuide(string $stamp): string
+    {
+        $ver = (string) ($this->config['version'] ?? '');
+        return <<<MD
+# Restauration WharfMaster (backup {$stamp})
+
+Archive générée par WharfMaster {$ver}.
+
+## Contenu
+- `database/dockermanager.sqlite` — utilisateurs, nœuds/agents, stacks, registres, paramètres, audit, métriques
+- `compose/` — fichiers Docker Compose des stacks (miroir local)
+- `dockerfiles/` — Dockerfiles enregistrés dans l’UI
+- `secrets/jwt.secret` — secret JWT (sessions / API)
+- `MANIFEST.json` — métadonnées + aperçu des settings
+
+## Non inclus
+- Données dans les **volumes Docker** / fichiers des conteneurs
+- Images Docker locales
+- Certificats TLS des agents distants (hors empreinte en base)
+
+## Restauration rapide
+1. Arrêter WharfMaster (Apache/PHP ou conteneur).
+2. Remplacer `data/dockermanager.sqlite` par `database/dockermanager.sqlite`.
+3. Restaurer `data/compose/` et `data/dockerfiles/` depuis l’archive.
+4. Restaurer `data/jwt.secret` depuis `secrets/jwt.secret` (permissions `0600`).
+5. Corriger le propriétaire (`www-data` ou utilisateur du conteneur) puis redémarrer.
+
+```bash
+# Exemple (chemins à adapter)
+unzip wharfmaster-backup-{$stamp}.zip
+install -m 600 wharfmaster-backup-{$stamp}/secrets/jwt.secret /var/www/html/data/jwt.secret
+install -m 600 wharfmaster-backup-{$stamp}/database/dockermanager.sqlite /var/www/html/data/dockermanager.sqlite
+rm -rf /var/www/html/data/compose /var/www/html/data/dockerfiles
+cp -a wharfmaster-backup-{$stamp}/compose /var/www/html/data/compose
+cp -a wharfmaster-backup-{$stamp}/dockerfiles /var/www/html/data/dockerfiles
+chown -R www-data:www-data /var/www/html/data
+```
+
+Conservez cette archive hors ligne : elle contient des secrets (JWT, mots de passe registres chiffrés, secrets agents).
+MD;
     }
 
     /** @param array<string, mixed> $ep */
@@ -2415,7 +2614,7 @@ final class App
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.4');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:1.4.5');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)

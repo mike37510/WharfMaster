@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **1.4.4**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **1.4.5**.
 
 | | |
 |---|---|
@@ -94,7 +94,22 @@ Relancer l’install sur le même advertise = **rejoin** (nouveau secret).
 
 ## 4. Installation (rappel)
 
-Prérequis : PHP 8.2+, Apache (`mod_rewrite`), accès socket Docker, binaires `docker` + Compose.
+### Docker Compose (recommandé)
+
+```bash
+git clone https://github.com/mike37510/WharfMaster.git
+cd WharfMaster
+export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999)
+docker compose up -d --build
+# → http://localhost:9000/app
+```
+
+Fichiers : `Dockerfile`, `docker-compose.yml`, `.env.example`. Données dans le volume `wharfmaster-data`.
+
+### Apache sur l’hôte
+
+Prérequis : PHP 8.2+, Apache (`mod_rewrite`, `AllowOverride All`), socket Docker, binaires `docker` + Compose.  
+`DocumentRoot` = racine du dépôt (présence de `app/index.php`). Voir `deploy/apache-vhost.conf` et `README.md`.
 
 ```bash
 git clone https://github.com/mike37510/WharfMaster.git
@@ -102,20 +117,18 @@ cd WharfMaster
 mkdir -p data && chown -R www-data:www-data data && chmod 700 data
 ```
 
-Configurer un VirtualHost sur ce dossier (`AllowOverride All`). Détails : voir `README.md`.
-
 Variables utiles :
 
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.4
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.5
 ```
 
-Backup admin :
+Backup admin (ZIP complet ; `?format=sqlite` = base seule) :
 
 ```bash
-curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.sqlite https://SERVEUR/api/backup
+curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.zip https://SERVEUR/api/backup
 ```
 
 ---
@@ -196,7 +209,7 @@ Content-Type: application/json
 ```json
 {
   "ok": true,
-  "version": "1.4.4",
+  "version": "1.4.5",
   "checks": {
     "docker": true,
     "dockerSocket": true,
@@ -222,7 +235,7 @@ Content-Type: application/json
 | POST | `/api/users/{id}/tokens` | self/admin | Créer clé API |
 | GET | `/api/settings` | user | Paramètres (URL publique…) |
 | PUT | `/api/settings` | admin | Mettre à jour |
-| GET | `/api/backup` | admin | Télécharger SQLite |
+| GET | `/api/backup` | admin | Backup ZIP complet (SQLite, Compose, Dockerfiles, JWT). `?format=sqlite` = base seule |
 | GET | `/api/audit` | user | Journaux (`?limit=&offset=&action=`) |
 | GET | `/api/system/host` | user | Ressources hôte |
 
@@ -373,7 +386,7 @@ Les mots de passe sont stockés chiffrés (`enc:v1:…`) ; l’API de liste n’
 
 ## 12. Agent distant (référence)
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:1.4.4` (ou build local).
+Image : `ghcr.io/mike37510/wharfmaster-agent:1.4.5` (ou build local).
 
 | Chemin agent | Description |
 |--------------|-------------|
@@ -390,7 +403,7 @@ curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:1.4.4
+  --image ghcr.io/mike37510/wharfmaster-agent:1.4.5
 ```
 
 ---

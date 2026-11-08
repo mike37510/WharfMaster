@@ -97,6 +97,39 @@ const Api = (() => {
     settings: () => request('/api/settings'),
     updateSettings: (payload) =>
       request('/api/settings', { method: 'PUT', body: JSON.stringify(payload) }),
+    /** Full ZIP backup (admin). Triggers browser download. */
+    downloadBackup: async (format = 'zip') => {
+      const q = format && format !== 'zip' ? `?format=${encodeURIComponent(format)}` : '';
+      const headers = { Accept: format === 'sqlite' ? 'application/x-sqlite3' : 'application/zip' };
+      const token = getToken();
+      if (token) headers.Authorization = 'Bearer ' + token;
+      const res = await fetch(`/api/backup${q}`, { headers });
+      if (!res.ok) {
+        let msg = res.statusText;
+        try {
+          const data = await res.json();
+          if (data && data.message) msg = data.message;
+        } catch (_) {
+          try { msg = await res.text() || msg; } catch (__) {}
+        }
+        const err = new Error(msg || 'Backup impossible');
+        err.status = res.status;
+        throw err;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="?([^";]+)"?/i);
+      const filename = (m && m[1]) || `wharfmaster-backup.${format === 'sqlite' ? 'sqlite' : 'zip'}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      return { filename, size: blob.size };
+    },
     users: () => request('/api/users'),
     createUser: (Username, Password, Role = 2) =>
       request('/api/users', { method: 'POST', body: JSON.stringify({ Username, Password, Role }) }),

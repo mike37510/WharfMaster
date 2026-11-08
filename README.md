@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.4.4 |
+| **Version** | 1.4.5 |
 | **Console** | `/app` |
 | **Site public** | `/` |
 | **API** | `/api` |
@@ -86,48 +86,110 @@ Fichiers agent : [`agent/`](agent/), script public : [`public/agent/install.sh`]
 
 ## Prérequis
 
-- **PHP 8.2+** avec Apache (`mod_rewrite`, `AllowOverride All`)
-- Accès au **socket Docker** : `/var/run/docker.sock` ou `/var/run/docker.so`
-- Binaires **`docker`** et Compose (`docker compose` ou `docker-compose`)
-- Droits d’écriture Apache sur le dossier `data/` (créé au premier démarrage)
+**Install Docker (recommandé)** — uniquement :
+- Docker Engine + plugin Compose (`docker compose version`)
+- Accès au socket `/var/run/docker.sock`
+
+**Install Apache sur l’hôte** — alternativement :
+- PHP 8.2+ + Apache (`mod_rewrite`, `AllowOverride All`)
+- Socket Docker + binaires `docker` / `docker compose`
+- Droits d’écriture sur `data/`
 
 ---
 
 ## Installation
 
-### 1. Cloner le projet
+### Option A — Docker Compose (recommandé)
+
+Sur une machine avec Docker et un accès Internet **pour le premier build** (image de base + paquets). Ensuite l’application tourne **en local** : code dans l’image, données dans un volume, API Docker via le socket hôte — **pas de re-téléchargement permanent**.
+
+```bash
+git clone https://github.com/mike37510/WharfMaster.git
+cd WharfMaster
+
+# Optionnel : personnaliser le port / le GID
+cp .env.example .env
+# Éditer .env si besoin (WHARFMASTER_PORT, DOCKER_GID)
+
+# GID du groupe propriétaire du socket (obligatoire pour parler à Docker)
+export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999)
+
+docker compose up -d --build
+```
+
+Ouvrir **http://localhost:9000/app** (ou `WHARFMASTER_PORT`) → créer le compte **administrateur**.
+
+| Fichier | Rôle |
+|---------|------|
+| [`Dockerfile`](Dockerfile) | Image Apache + PHP 8.3 + Docker CLI / Compose |
+| [`docker-compose.yml`](docker-compose.yml) | Port `9000`, volume données, montage du socket |
+| [`.env.example`](.env.example) | `WHARFMASTER_PORT`, `DOCKER_GID`, `DOCKER_SOCK_PATH` |
+| [`deploy/docker-entrypoint.sh`](deploy/docker-entrypoint.sh) | Prépare `data/` + droits socket |
+
+**Où sont les données ?** volume Docker nommé `wharfmaster-data` → SQLite, stacks Compose, Dockerfiles, secret JWT.  
+**Backup :** Paramètres (admin) → *Télécharger le backup complet*, ou `GET /api/backup`.
+
+```bash
+docker compose logs -f          # logs
+docker compose ps               # statut
+docker compose pull             # (si image registry un jour)
+docker compose up -d --build    # rebuild après git pull
+docker compose down             # stop (conserve les données)
+docker compose down -v          # stop + SUPPRIME le volume data
+```
+
+**HTTPS / domaine (ex. `dock.exemple.fr`)** : reverse-proxy (Caddy, Traefik, nginx) vers `http://127.0.0.1:9000` — ne pointez pas le domaine vers un Apache hôte vide.
+
+**Dépannage Docker offline dans l’UI :**
+```bash
+stat -c '%g' /var/run/docker.sock   # → mettre la même valeur dans DOCKER_GID
+docker compose up -d --force-recreate
+docker compose exec wharfmaster docker info
+```
+
+### Option B — Apache sur l’hôte
+
+#### 1. Cloner le projet
 
 ```bash
 git clone https://github.com/mike37510/WharfMaster.git
 cd WharfMaster
 ```
 
-### 2. Déployer sous Apache
+#### 2. Déployer sous Apache
 
-Placez le contenu à la racine du DocumentRoot (ex. `/var/www/html`) **ou** configurez un VirtualHost pointant vers ce dossier.
+**Important :** le `DocumentRoot` doit être la **racine du dépôt** (là où se trouvent `api/`, `public/`, `app/`, `.htaccess`) — pas un sous-dossier, pas le parent.
 
-Exemple minimal :
+Exemple (fichier prêt : [`deploy/apache-vhost.conf`](deploy/apache-vhost.conf)) :
+
+```bash
+sudo git clone https://github.com/mike37510/WharfMaster.git /var/www/wharfmaster
+sudo cp /var/www/wharfmaster/deploy/apache-vhost.conf /etc/apache2/sites-available/wharfmaster.conf
+# Éditer ServerName + DocumentRoot si besoin
+sudo a2enmod rewrite headers
+sudo a2ensite wharfmaster
+sudo systemctl reload apache2
+```
 
 ```apache
 <VirtualHost *:80>
     ServerName wharfmaster.example.com
-    DocumentRoot /var/www/html
+    DocumentRoot /var/www/wharfmaster
 
-    <Directory /var/www/html>
+    <Directory /var/www/wharfmaster>
         AllowOverride All
         Require all granted
     </Directory>
 </VirtualHost>
 ```
 
-Activez les modules nécessaires :
+Si `https://…/app` renvoie le **404 Apache** (« The requested URL was not found ») :
+1. Vérifier `DocumentRoot` → doit contenir `ls /chemin/app/index.php`
+2. `sudo a2enmod rewrite && sudo systemctl reload apache2`
+3. `AllowOverride All` sur ce Directory (sinon le `.htaccess` est ignoré)
+4. Derrière un reverse-proxy : proxy vers le bon port (Compose = `9000` par défaut), pas un Apache vide sur le 80 hôte
 
-```bash
-a2enmod rewrite headers
-systemctl reload apache2
-```
-
-### 3. Permissions
+#### 3. Permissions
 
 ```bash
 mkdir -p data
@@ -137,7 +199,7 @@ chmod 700 data
 
 L’utilisateur Apache doit pouvoir lire/écrire le socket Docker (groupe `docker` en général).
 
-### 4. Ouvrir l’application
+#### 4. Ouvrir l’application
 
 | URL | Rôle |
 |-----|------|
@@ -145,7 +207,7 @@ L’utilisateur Apache doit pouvoir lire/écrire le socket Docker (groupe `docke
 | `http://votre-hote/app` | Console WharfMaster |
 | `http://votre-hote/api/status` | Version / InstanceID |
 | `http://votre-hote/api/health` | Santé (docker, compose, `data/`) |
-| `http://votre-hote/api/backup` | Export SQLite (admin, JWT) |
+| `http://votre-hote/api/backup` | Backup ZIP complet admin (SQLite, Compose, Dockerfiles, JWT) |
 
 ---
 
@@ -198,14 +260,16 @@ export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
 export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.4
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:1.4.5
 ```
 
 ### Backup / restauration
 
 ```bash
 # Export (admin JWT)
-curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.sqlite https://VOTRE-SERVEUR/api/backup
+# Backup complet (ZIP : SQLite + Compose + Dockerfiles + JWT)
+curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.zip https://VOTRE-SERVEUR/api/backup
+# Base seule : …/api/backup?format=sqlite
 
 # Restauration : arrêter Apache, remplacer data/dockermanager.sqlite, redémarrer
 # Conserver aussi data/jwt.secret (et WM_MASTER_KEY) pour déchiffrer les registres.

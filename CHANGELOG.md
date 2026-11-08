@@ -2,6 +2,17 @@
 
 Toutes les dates sont en UTC+1.
 
+## [1.4.5] — 2026-11-08
+
+### Ajouté
+- **Installation Docker Compose** : `Dockerfile`, `docker-compose.yml`, `.env.example`, entrypoint socket/`data/`
+- **Backup complet** (admin, Paramètres) : ZIP SQLite + Compose + Dockerfiles + JWT (`GET /api/backup`)
+- Point d’entrée physique **`/app`** (`app/index.php`) pour éviter le 404 Apache si rewrite/AllowOverride manque
+- Exemple vhost [`deploy/apache-vhost.conf`](deploy/apache-vhost.conf)
+
+### Modifié
+- README : install Docker en option recommandée, dépannage 404 / Docker offline
+
 ## [1.4.4] — 2026-11-08
 
 ### Ajouté

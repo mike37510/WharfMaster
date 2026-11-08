@@ -1,0 +1,31 @@
+# WharfMaster — installation rapide
+#
+#   DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) docker compose up -d --build
+#   → http://localhost:9000/app
+#
+# Première visite : créer le compte administrateur.
+
+services:
+  wharfmaster:
+    build: .
+    image: wharfmaster:1.4.5
+    container_name: wharfmaster
+    restart: unless-stopped
+    ports:
+      - "${WHARFMASTER_PORT:-9000}:80"
+    environment:
+      DOCKER_SOCKET: /var/run/docker.sock
+      DOCKER_API_VERSION: ${DOCKER_API_VERSION:-v1.45}
+      # Image agent proposée dans l’UI Nœuds (optionnel)
+      # WHARFMASTER_AGENT_IMAGE: ghcr.io/mike37510/wharfmaster-agent:1.4.5
+    volumes:
+      # Persistance : SQLite, stacks Compose, Dockerfiles, JWT
+      - wharfmaster-data:/var/www/html/data
+      # API Docker de l’hôte (override : DOCKER_SOCK_PATH=/var/run/docker.so)
+      - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+    # GID du groupe docker hôte (recommandé). Ex. : 999 ou 989
+    group_add:
+      - "${DOCKER_GID:-999}"
+
+volumes:
+  wharfmaster-data:

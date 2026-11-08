@@ -2429,7 +2429,7 @@ CMD ["sh"]
         <aside class="sidebar">
           <div class="brand brand-full">
             ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v1.4.4</div>
+            <div class="brand-ver">v1.4.5</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -5274,7 +5274,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.4', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=1.4.5', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -5928,6 +5928,22 @@ CMD ["sh"]
           <button class="btn btn-primary" id="save-settings">Enregistrer</button>
         </div>
       </div>
+      ${Number(state.user?.Role) === 1 ? `
+      <div class="panel" style="max-width:720px; margin-top:16px">
+        <div class="section-title" style="margin-top:0">Sauvegarde / reprise</div>
+        <p class="muted" style="margin:0 0 14px">
+          Archive ZIP pour repartir après un incident : base SQLite (utilisateurs, nœuds, stacks, registres, paramètres, audit, métriques),
+          fichiers Compose, Dockerfiles enregistrés, secret JWT. Les volumes Docker et images ne sont pas inclus.
+        </p>
+        <div class="info-box" style="margin-bottom:14px">
+          Conservez le fichier hors serveur — il contient des secrets. Un guide <code>RESTORE.md</code> est dans l’archive.
+        </div>
+        <div class="actions-bar" style="gap:8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-primary" id="backup-full">Télécharger le backup complet</button>
+          <button type="button" class="btn" id="backup-sqlite" title="Base seule">SQLite uniquement</button>
+        </div>
+        <p class="muted" id="backup-status" style="margin:10px 0 0;font-size:12px"></p>
+      </div>` : ''}
     `);
     document.getElementById('theme-dark').onclick = () => {
       state.theme = applyTheme('dark');
@@ -5967,6 +5983,26 @@ CMD ["sh"]
         errBox.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
       }
     }, { disableSiblings: false, minMs: 250 });
+
+    const backupStatus = document.getElementById('backup-status');
+    const runBackup = async (format) => {
+      const errBox = document.getElementById('settings-err');
+      if (errBox) errBox.innerHTML = '';
+      if (backupStatus) backupStatus.textContent = 'Préparation de l’archive…';
+      try {
+        const res = await Api.downloadBackup(format);
+        if (backupStatus) {
+          backupStatus.textContent = `Téléchargé : ${res.filename} (${formatBytes(res.size)})`;
+        }
+      } catch (err) {
+        if (backupStatus) backupStatus.textContent = '';
+        if (errBox) errBox.innerHTML = `<div class="error-box">${esc(err.message || 'Backup impossible')}</div>`;
+      }
+    };
+    const fullBtn = document.getElementById('backup-full');
+    const sqliteBtn = document.getElementById('backup-sqlite');
+    if (fullBtn) onBusyClick(fullBtn, () => runBackup('zip'), { disableSiblings: false, minMs: 300 });
+    if (sqliteBtn) onBusyClick(sqliteBtn, () => runBackup('sqlite'), { disableSiblings: false, minMs: 300 });
   }
 
   function roleLabel(role) {
@@ -6234,7 +6270,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>1.4.4</strong> — console TTY, Compose colorisé, usage images/volumes/réseaux, pagination.</p>
+          <p class="muted">Version <strong>1.4.5</strong> — console TTY, Compose colorisé, usage images/volumes/réseaux, pagination.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

@@ -1,0 +1,14 @@
+.git
+.github
+.cursor
+data/**
+!data/.gitkeep
+**/node_modules
+*.sqlite
+*.sqlite3
+*.log
+.env
+.env.*
+public/site/wharfmaster-poster-*.jpg
+agent-transcripts
+terminals
