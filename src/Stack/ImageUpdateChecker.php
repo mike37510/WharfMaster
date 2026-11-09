@@ -129,6 +129,100 @@ final class ImageUpdateChecker
         }
     }
 
+    /**
+     * Check a single image reference (containers, ad-hoc).
+     *
+     * @param list<array<string, mixed>> $registries
+     * @return array{Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,Detail:string}
+     */
+    public function checkImageRef(
+        string $image,
+        DockerClient $docker,
+        array $registries,
+        bool $forceRefresh = false,
+        string $label = 'container',
+    ): array {
+        return $this->checkImage($label, $image, $docker, $registries, $forceRefresh);
+    }
+
+    /**
+     * Batch-check container image refs. Dedupes by image string.
+     *
+     * @param list<array{Id?:string,Names?:list<string>|string,Image?:string,Name?:string}> $containers
+     * @param list<array<string, mixed>> $registries
+     * @return array<string, array{Status:string,UpdateCount:int,Checked:int,Image:string,Detail:string,LocalDigest:?string,RemoteDigest:?string}>
+     */
+    public function checkContainers(
+        array $containers,
+        DockerClient $docker,
+        array $registries,
+        bool $forceRefresh = false,
+    ): array {
+        $byImage = [];
+        $out = [];
+        foreach ($containers as $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $id = (string) ($c['Id'] ?? '');
+            if ($id === '') {
+                continue;
+            }
+            $image = trim((string) ($c['Image'] ?? ''));
+            $name = '';
+            if (!empty($c['Name']) && is_string($c['Name'])) {
+                $name = ltrim($c['Name'], '/');
+            } elseif (!empty($c['Names']) && is_array($c['Names']) && isset($c['Names'][0])) {
+                $name = ltrim((string) $c['Names'][0], '/');
+            } elseif (!empty($c['Names']) && is_string($c['Names'])) {
+                $name = ltrim($c['Names'], '/');
+            }
+            if ($image === '' || str_starts_with($image, 'sha256:')) {
+                $out[$id] = [
+                    'Status' => 'unknown',
+                    'UpdateCount' => 0,
+                    'Checked' => 0,
+                    'Image' => $image,
+                    'Detail' => $image === '' ? 'Image absente' : 'Référence par digest local (tag indisponible)',
+                    'LocalDigest' => str_starts_with($image, 'sha256:') ? strtolower($image) : null,
+                    'RemoteDigest' => null,
+                ];
+                continue;
+            }
+            $key = strtolower($image);
+            if (!isset($byImage[$key])) {
+                $byImage[$key] = $this->checkImage($name !== '' ? $name : 'container', $image, $docker, $registries, $forceRefresh);
+            }
+            $item = $byImage[$key];
+            $status = (string) ($item['Status'] ?? 'unknown');
+            $out[$id] = [
+                'Status' => $status,
+                'UpdateCount' => $status === 'update' ? 1 : 0,
+                'Checked' => in_array($status, ['update', 'fresh', 'pinned'], true) ? 1 : 0,
+                'Image' => (string) ($item['Image'] ?? $image),
+                'Detail' => (string) ($item['Detail'] ?? ''),
+                'LocalDigest' => $item['LocalDigest'] ?? null,
+                'RemoteDigest' => $item['RemoteDigest'] ?? null,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Registry credentials matching an image ref (for authenticated pulls).
+     *
+     * @param list<array<string, mixed>> $registries
+     * @return array{url?:string,username?:string,password?:string,type?:string}
+     */
+    public function registryCredsForImage(string $image, array $registries): array
+    {
+        $parsed = ManifestClient::parse($image);
+        if ($parsed === null) {
+            return [];
+        }
+        return $this->matchRegistry($parsed, $registries);
+    }
+
     private function stackCacheFile(int $stackId): string
     {
         return rtrim($this->cacheDir, '/') . '/stack-' . max(0, $stackId) . '.json';

@@ -1,10 +1,10 @@
 # WharfMaster
 
-**WharfMaster** est une interface web de gestion Docker : conteneurs, images, volumes, réseaux, stacks Compose et registres — avec **équipes**, **ACL par nœud**, **SSO Active Directory**, **scheduler**, **scan CVE Trivy**, isolation multi-utilisateurs et une API compatible Portainer CE.
+**WharfMaster** est une interface web de gestion Docker : conteneurs, images, volumes, réseaux, stacks Compose et registres — avec **équipes**, **ACL par nœud**, **SSO Active Directory**, **scheduler**, **CVE Trivy** (scan auto Images), **volumes bind**, **métriques conteneur**, pack agent ZIP, et une API compatible Portainer CE.
 
 | | |
 |---|---|
-| **Version** | 2.0.1 |
+| **Version** | 2.1.0 |
 | **Console** | `/app` |
 | **Site public** | `/` |
 | **API** | `/api` |
@@ -286,7 +286,7 @@ export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
 export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.0.0
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.1.0
 ```
 
 ### Backup / restauration

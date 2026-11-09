@@ -210,6 +210,22 @@ CREATE TABLE IF NOT EXISTS image_findings (
     FOREIGN KEY(scan_id) REFERENCES image_scans(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_image_findings_scan ON image_findings(scan_id);
+
+CREATE TABLE IF NOT EXISTS bind_volumes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    host_path TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    stack_id INTEGER,
+    stack_name TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    UNIQUE(endpoint_id, name),
+    FOREIGN KEY(endpoint_id) REFERENCES endpoints(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_bind_volumes_endpoint ON bind_volumes(endpoint_id);
+CREATE INDEX IF NOT EXISTS idx_bind_volumes_stack ON bind_volumes(stack_id);
 SQL);
         $this->ensureColumn('registries', 'owner_id', 'INTEGER');
         $this->ensureColumn('registries', 'owner_username', "TEXT NOT NULL DEFAULT ''");

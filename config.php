@@ -26,9 +26,9 @@ if (!is_file($jwtSecretFile)) {
 
 return [
     'app_name' => 'WharfMaster',
-    'version' => '2.0.1',
+    'version' => '2.1.0',
     'agent_image' => getenv('WHARFMASTER_AGENT_IMAGE')
-        ?: ('ghcr.io/mike37510/wharfmaster-agent:' . (getenv('WHARFMASTER_AGENT_TAG') ?: '2.0.0')),
+        ?: ('ghcr.io/mike37510/wharfmaster-agent:' . (getenv('WHARFMASTER_AGENT_TAG') ?: '2.1.0')),
     'edition' => 'CE',
     'docker_socket' => $dockerSocket,
     'docker_api_version' => getenv('DOCKER_API_VERSION') ?: 'v1.45',

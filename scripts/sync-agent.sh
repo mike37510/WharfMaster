@@ -5,7 +5,8 @@ ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/agent"
 DST="$ROOT/public/agent"
 
-for f in Dockerfile agent.php entrypoint.sh router.php install.sh .htaccess; do
+for f in Dockerfile agent.php entrypoint.sh router.php install.sh .htaccess \
+         docker-compose.yml deploy.sh README.md .env.example; do
   if [ -f "$SRC/$f" ]; then
     cp -a "$SRC/$f" "$DST/$f"
     echo "synced $f"

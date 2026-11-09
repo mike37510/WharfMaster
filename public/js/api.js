@@ -143,6 +143,46 @@ const Api = (() => {
       request('/api/nodes/join-token', { method: 'POST', body: JSON.stringify(payload) }),
     rotateJoinToken: (payload = {}) =>
       request('/api/nodes/join-token/rotate', { method: 'POST', body: JSON.stringify(payload) }),
+    /** ZIP pack (Dockerfile, compose, sources, .env) for manual agent deploy. */
+    downloadAgentBundle: async (payload = {}) => {
+      const headers = {
+        Accept: 'application/zip',
+        'Content-Type': 'application/json',
+      };
+      const token = getToken();
+      if (token) headers.Authorization = 'Bearer ' + token;
+      const res = await fetch('/api/nodes/agent-bundle', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        let msg = res.statusText;
+        try {
+          const data = await res.json();
+          if (data && data.message) msg = data.message;
+        } catch (_) {
+          try { msg = await res.text() || msg; } catch (__) {}
+        }
+        const err = new Error(msg || 'Téléchargement pack agent impossible');
+        err.status = res.status;
+        throw err;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="?([^";]+)"?/i);
+      const nameHint = String(payload.NodeName || payload.nodeName || 'agent').replace(/[^\w.-]+/g, '-');
+      const filename = (m && m[1]) || `wharfmaster-agent-${nameHint}.zip`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      return { filename, size: blob.size };
+    },
     unlinkNode: (id) => request(`/api/nodes/${id}`, { method: 'DELETE' }),
     updateNode: (id, payload) =>
       request(`/api/nodes/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
@@ -182,6 +222,14 @@ const Api = (() => {
           tty: opts.tty !== false,
         }),
       }),
+    containerUpdates: (refresh = false) =>
+      request(
+        `/api/endpoints/${getEndpointId()}/containers/updates${refresh ? '?refresh=1' : ''}`,
+      ),
+    containerUpdateStatus: (id, refresh = false) =>
+      request(
+        `/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/updates${refresh ? '?refresh=1' : ''}`,
+      ),
     buildImage: (payload) =>
       request('/api/images/build', { method: 'POST', body: JSON.stringify(payload) }),
     searchImages: (q) =>
@@ -237,6 +285,17 @@ const Api = (() => {
         body: JSON.stringify({ Repository, Tag }),
       }),
     pingRegistry: (id) => request(`/api/registries/${id}/ping`),
+    bindVolumes: () =>
+      request(`/api/endpoints/${getEndpointId()}/bind-volumes`),
+    createBindVolume: (Name, HostPath) =>
+      request(`/api/endpoints/${getEndpointId()}/bind-volumes`, {
+        method: 'POST',
+        body: JSON.stringify({ Name, HostPath }),
+      }),
+    deleteBindVolume: (id) =>
+      request(`/api/endpoints/${getEndpointId()}/bind-volumes/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      }),
     volumeBase: (name) => {
       const id = getEndpointId();
       if (!Number.isFinite(id) || id < 1) {
@@ -319,6 +378,12 @@ const Api = (() => {
     runSchedule: (id) => request(`/api/schedules/${id}/run`, { method: 'POST', body: '{}' }),
     imageScans: (endpointId) =>
       request(`/api/endpoints/${endpointId}/images/scans`),
+    /** Soft batch ensure — cache TTL same as image update checks (24 h). */
+    ensureImageScans: (endpointId, payload) =>
+      request(`/api/endpoints/${endpointId}/images/scans/ensure`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
     imageScan: (endpointId, opts = {}) => {
       const q = new URLSearchParams();
       if (opts.ref) q.set('ref', opts.ref);

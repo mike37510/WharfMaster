@@ -1,6 +1,7 @@
 (() => {
   const root = document.getElementById('app');
   const THEME_KEY = 'dm_theme';
+  const SIDEBAR_KEY = 'wm_sidebar_collapsed';
 
   function readTheme() {
     const saved = localStorage.getItem(THEME_KEY);
@@ -15,7 +16,19 @@
     return t;
   }
 
+  function readSidebarCollapsed() {
+    return localStorage.getItem(SIDEBAR_KEY) === '1';
+  }
+
+  function applySidebarCollapsed(collapsed) {
+    const on = !!collapsed;
+    document.documentElement.setAttribute('data-sidebar', on ? 'collapsed' : 'expanded');
+    localStorage.setItem(SIDEBAR_KEY, on ? '1' : '0');
+    return on;
+  }
+
   applyTheme(readTheme());
+  applySidebarCollapsed(readSidebarCollapsed());
 
   const state = {
     user: null,
@@ -48,11 +61,13 @@
     },
     pageSize: 20,
     theme: readTheme(),
+    sidebarCollapsed: readSidebarCollapsed(),
     containerTab: 'overview',
     logTimer: null,
+    statsTimer: null,
     term: null,
     publicUrl: '',
-    metricsChartHours: 24,
+    metricsChartHours: 72,
     metricsRetentionDays: 90,
     trivyEnabled: true,
     dashFilter: 'all',
@@ -71,7 +86,7 @@
 
   function metricChartHours() {
     const h = Number(state.metricsChartHours);
-    return Number.isFinite(h) && h >= 1 ? Math.min(168, Math.floor(h)) : 24;
+    return Number.isFinite(h) && h >= 1 ? Math.min(168, Math.floor(h)) : 72;
   }
 
   function metricRetentionDays() {
@@ -137,17 +152,18 @@
     return loadMetricHistory(scope);
   }
 
-  /** Multi-series host chart (CPU / mémoire / disque) — scale 0–100 %. */
-  function hostResourceChart(series) {
+  /** Multi-series resource chart (0–100 %). */
+  function resourceChart(series, opts = {}) {
     const w = 320;
     const h = 88;
     const padY = 4;
     const yAt = (pct) => padY + (1 - Math.max(0, Math.min(100, pct)) / 100) * (h - padY * 2);
-    const keys = [
+    const keys = opts.keys || [
       { key: 'cpu', color: '#3b82f6', label: 'CPU' },
       { key: 'mem', color: '#22c55e', label: 'Mémoire' },
       { key: 'disk', color: '#fb923c', label: 'Disque' },
     ];
+    const wrapId = opts.wrapId || 'host-wave-wrap';
     const n = Math.max(1, (series || []).length);
     const paths = keys.map(({ key, color }) => {
       const vals = metricValues(series, key);
@@ -165,17 +181,18 @@
       const d = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(' ');
       return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
     }).join('');
+    const labels = keys.map((k) => k.label).join(' / ');
     const title = n < 2
       ? 'Historique ressources en construction'
-      : `Évolution CPU / mémoire / disque — ${n} relevés (échelle 0–100 %)`;
+      : `Évolution ${labels} — ${n} relevés (échelle 0–100 %)`;
     const legend = keys.map(({ color, label }) =>
       `<span class="wave-leg"><i style="background:${color}"></i>${esc(label)}</span>`
     ).join('');
     const y100 = yAt(100).toFixed(1);
     const y50 = yAt(50).toFixed(1);
     const y0 = yAt(0).toFixed(1);
-    return `<div class="wave-wrap" id="host-wave-wrap">
-      <div class="wave-head"><span class="stat-hint" title="Fenêtre configurable dans Paramètres">Courbes · ${esc(metricWindowLabel())}</span></div>
+    return `<div class="wave-wrap" id="${esc(wrapId)}">
+      <div class="wave-head"><span class="stat-hint" title="Fenêtre configurable dans Paramètres">Courbes · ${esc(metricWindowLabel())} · rétention ${esc(String(metricRetentionDays()))} j</span></div>
       <div class="wave-plot">
         <div class="wave-y" aria-hidden="true">
           <span>100%</span>
@@ -192,6 +209,148 @@
       </div>
       <div class="wave-legend">${legend}</div>
     </div>`;
+  }
+
+  function hostResourceChart(series) {
+    return resourceChart(series, {
+      wrapId: 'host-wave-wrap',
+      keys: [
+        { key: 'cpu', color: '#3b82f6', label: 'CPU' },
+        { key: 'mem', color: '#22c55e', label: 'Mémoire' },
+        { key: 'disk', color: '#fb923c', label: 'Disque' },
+      ],
+    });
+  }
+
+  function containerResourceChart(series) {
+    return resourceChart(series, {
+      wrapId: 'ctr-wave-wrap',
+      keys: [
+        { key: 'cpu', color: '#3b82f6', label: 'CPU' },
+        { key: 'mem', color: '#22c55e', label: 'Mémoire' },
+        { key: 'disk', color: '#a78bfa', label: 'Réseau' },
+      ],
+    });
+  }
+
+  function containerMetricScope(containerId) {
+    const ep = Api.isAllEndpoints() ? 0 : Api.getEndpointId();
+    const id = String(containerId || '').replace(/^sha256:/, '');
+    return `ctr:${ep}:${id.slice(0, 64)}`;
+  }
+
+  /** Map network throughput → 0–100 score (aligned with CPU/RAM thresholds). */
+  function netLoadScore(rxRate, txRate) {
+    const bps = Math.max(0, Number(rxRate) || 0) + Math.max(0, Number(txRate) || 0);
+    const mbps = bps / (1024 * 1024);
+    if (mbps <= 0) return 0;
+    if (mbps < 1) return Math.min(40, mbps * 40);
+    if (mbps < 5) return 40 + ((mbps - 1) / 4) * 25;
+    if (mbps < 20) return 65 + ((mbps - 5) / 15) * 20;
+    return Math.min(100, 85 + ((mbps - 20) / 40) * 15);
+  }
+
+  /** ok | warn | hot from CPU / RAM / réseau scores. */
+  function resourceLoadLevel(cpuPct, memPct, netPct) {
+    const cpu = Number(cpuPct) || 0;
+    const mem = Number(memPct) || 0;
+    const net = Number(netPct) || 0;
+    const max = Math.max(cpu, mem, net);
+    if (max >= 85) return 'hot';
+    if (max >= 65) return 'warn';
+    return 'ok';
+  }
+
+  function applyStatsIconLevel(containerId, level, title) {
+    const btn = root.querySelector(`[data-stats-id="${CSS.escape(String(containerId))}"]`);
+    if (!btn) return;
+    btn.classList.remove('is-stats-ok', 'is-stats-warn', 'is-stats-hot', 'is-stats-off');
+    const cls = level === 'hot' ? 'is-stats-hot'
+      : level === 'warn' ? 'is-stats-warn'
+        : level === 'off' ? 'is-stats-off'
+          : 'is-stats-ok';
+    btn.classList.add(cls);
+    if (title) {
+      btn.title = title;
+      btn.setAttribute('aria-label', title);
+    }
+  }
+
+  async function pushContainerMetricSample(containerId, cpu, mem, net) {
+    const clamp = (v) => Math.max(0, Math.min(100, Number(v) || 0));
+    try {
+      await Api.metricsSample({
+        Scope: containerMetricScope(containerId),
+        cpu: clamp(cpu),
+        mem: clamp(mem),
+        disk: clamp(net),
+        containers: 1,
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  async function loadContainerMetricHistory(containerId) {
+    try {
+      const hours = metricChartHours();
+      const points = Math.min(288, Math.max(48, Math.ceil((hours * 60) / 5)));
+      const data = await Api.metricsHistory(containerMetricScope(containerId), { hours, points });
+      if (data?.ChartHours != null) state.metricsChartHours = Number(data.ChartHours) || state.metricsChartHours;
+      if (data?.RetentionDays != null) state.metricsRetentionDays = Number(data.RetentionDays) || state.metricsRetentionDays;
+      return Array.isArray(data?.Series) ? data.Series : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  async function refreshContainerStatsIcons(containers) {
+    if (state.route !== 'containers') return;
+    const running = (containers || []).filter((c) => {
+      const st = String(c.State || '').toLowerCase();
+      return st === 'running' || st === 'restarting';
+    }).slice(0, 24);
+    (containers || []).forEach((c) => {
+      const st = String(c.State || '').toLowerCase();
+      if (st !== 'running' && st !== 'restarting') {
+        applyStatsIconLevel(c.Id, 'off', 'Conteneur arrêté — pas de charge');
+      }
+    });
+    if (!state.containerStatsPrev) state.containerStatsPrev = {};
+    const queue = [...running];
+    const workers = 3;
+    const runOne = async () => {
+      while (queue.length) {
+        if (state.route !== 'containers') return;
+        const c = queue.shift();
+        if (!c) return;
+        try {
+          const st = await Api.docker(`/containers/${c.Id}/stats?stream=false`);
+          const computed = computeStats(st, 0);
+          const now = Date.now();
+          const prev = state.containerStatsPrev[c.Id];
+          let rate = { rx: 0, tx: 0 };
+          if (prev && prev.at > 0) {
+            const dt = Math.max(0.5, (now - prev.at) / 1000);
+            rate = {
+              rx: Math.max(0, (computed.netRx - prev.netRx) / dt),
+              tx: Math.max(0, (computed.netTx - prev.netTx) / dt),
+            };
+          }
+          state.containerStatsPrev[c.Id] = {
+            netRx: computed.netRx,
+            netTx: computed.netTx,
+            at: now,
+          };
+          const net = netLoadScore(rate.rx, rate.tx);
+          const level = resourceLoadLevel(computed.cpuPct, computed.memPct, net);
+          const title = `CPU ${computed.cpuPct.toFixed(0)}% · RAM ${computed.memPct.toFixed(0)}% · Réseau ${formatBitRate(rate.rx + rate.tx)}`;
+          applyStatsIconLevel(c.Id, level, title);
+          void pushContainerMetricSample(c.Id, computed.cpuPct, computed.memPct, net);
+        } catch (_) {
+          applyStatsIconLevel(c.Id, 'off', 'Stats indisponibles');
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: workers }, () => runOne()));
   }
 
   function metricValues(series, key) {
@@ -1143,6 +1302,7 @@ CMD ["sh"]
 
   async function openCreateVolumeModal() {
     closeAppModal();
+    const isAdmin = Number(state.user?.Role) === 1;
     const host = modalHost();
     host.innerHTML = `
       <div class="modal-backdrop">
@@ -1152,13 +1312,26 @@ CMD ["sh"]
             <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
           </div>
           <div id="create-err"></div>
+          ${isAdmin ? `
+          <div class="form-group">
+            <label class="field-label">Type</label>
+            <select id="v-type">
+              <option value="volume" selected>Volume Docker</option>
+              <option value="bind">Bind (chemin hôte)</option>
+            </select>
+          </div>` : ''}
           <div class="form-group">
             <label class="field-label">Nom <span class="req">*</span></label>
             <input id="v-name" placeholder="mon-volume" autocomplete="off">
           </div>
-          <div class="form-group">
+          <div class="form-group" id="v-driver-wrap">
             <label class="field-label">Pilote</label>
             <input id="v-driver" value="local" autocomplete="off">
+          </div>
+          <div class="form-group" id="v-bind-wrap" hidden>
+            <label class="field-label">Chemin hôte <span class="req">*</span></label>
+            <input id="v-host" class="mono" placeholder="/data/mon-app" autocomplete="off">
+            <p class="field-hint muted">Chemin absolu sur le nœud Docker. Le dossier n’est pas créé automatiquement.</p>
           </div>
           <div class="actions-bar">
             <button type="button" class="btn btn-primary" id="v-save">Créer</button>
@@ -1167,18 +1340,38 @@ CMD ["sh"]
         </div>
       </div>`;
     bindAppModalChrome();
+    const typeEl = document.getElementById('v-type');
+    const syncType = () => {
+      const isBind = typeEl?.value === 'bind';
+      const driverWrap = document.getElementById('v-driver-wrap');
+      const bindWrap = document.getElementById('v-bind-wrap');
+      if (driverWrap) driverWrap.hidden = !!isBind;
+      if (bindWrap) bindWrap.hidden = !isBind;
+    };
+    typeEl?.addEventListener('change', syncType);
+    syncType();
     document.getElementById('v-name')?.focus();
     onBusyClick(document.getElementById('v-save'), async () => {
       const errBox = document.getElementById('create-err');
       errBox.innerHTML = '';
       const Name = document.getElementById('v-name').value.trim();
-      const Driver = document.getElementById('v-driver').value.trim() || 'local';
+      const isBind = typeEl?.value === 'bind';
       if (!Name) {
         errBox.innerHTML = `<div class="error-box">Le nom est requis.</div>`;
         return;
       }
       try {
-        await Api.docker('/volumes/create', { method: 'POST', body: JSON.stringify({ Name, Driver }) });
+        if (isBind) {
+          const HostPath = document.getElementById('v-host').value.trim();
+          if (!HostPath || !HostPath.startsWith('/')) {
+            errBox.innerHTML = `<div class="error-box">Chemin hôte absolu requis (ex. /data/app).</div>`;
+            return;
+          }
+          await Api.createBindVolume(Name, HostPath);
+        } else {
+          const Driver = document.getElementById('v-driver').value.trim() || 'local';
+          await Api.docker('/volumes/create', { method: 'POST', body: JSON.stringify({ Name, Driver }) });
+        }
         closeAppModal();
         await route();
       } catch (err) {
@@ -1455,11 +1648,29 @@ CMD ["sh"]
     if (btn) btn.textContent = state.theme === 'dark' ? '☀' : '☾';
   }
 
+  function toggleSidebar() {
+    state.sidebarCollapsed = applySidebarCollapsed(!state.sidebarCollapsed);
+    const aside = document.querySelector('.sidebar');
+    if (aside) aside.classList.toggle('is-collapsed', state.sidebarCollapsed);
+    const btn = document.getElementById('sidebar-toggle');
+    if (btn) {
+      btn.title = state.sidebarCollapsed ? 'Afficher le menu' : 'Réduire le menu';
+      btn.setAttribute('aria-label', btn.title);
+      btn.setAttribute('aria-expanded', state.sidebarCollapsed ? 'false' : 'true');
+      btn.innerHTML = `<span class="btn-ico">${ico(state.sidebarCollapsed ? 'panel-right' : 'panel-left')}</span>`;
+    }
+  }
+
   document.addEventListener('click', (e) => {
     const t = e.target.closest('#theme-toggle');
     if (t) {
       e.preventDefault();
       toggleTheme();
+    }
+    const s = e.target.closest('#sidebar-toggle');
+    if (s) {
+      e.preventDefault();
+      toggleSidebar();
     }
   });
 
@@ -1699,7 +1910,9 @@ CMD ["sh"]
 
   function containersUsingVolume(vol, containers) {
     const volName = String(vol?.Name || '');
-    if (!volName) return [];
+    const hostPath = String(vol?.HostPath || vol?.Mountpoint || '');
+    const isBind = !!(vol?._bind || String(vol?.Driver || '').toLowerCase() === 'bind');
+    if (!volName && !hostPath) return [];
     return (containers || []).filter((c) => {
       if (vol?._nodeId != null && c?._nodeId != null && Number(vol._nodeId) !== Number(c._nodeId)) {
         return false;
@@ -1707,6 +1920,11 @@ CMD ["sh"]
       const mounts = Array.isArray(c.Mounts) ? c.Mounts : [];
       return mounts.some((m) => {
         const type = String(m.Type || '').toLowerCase();
+        if (isBind) {
+          if (type && type !== 'bind') return false;
+          const src = String(m.Source || m.SourcePath || '');
+          return hostPath !== '' && (src === hostPath || src.startsWith(hostPath + '/'));
+        }
         if (type && type !== 'volume') return false;
         return m.Name === volName;
       });
@@ -1714,12 +1932,20 @@ CMD ["sh"]
   }
 
   function openVolumeUsersModal(vol, users) {
+    const isBind = !!(vol?._bind || String(vol?.Driver || '').toLowerCase() === 'bind');
     openResourceUsersModal({
-      title: 'Conteneurs utilisant ce volume',
-      subtitle: vol?.Name || '',
+      title: isBind ? 'Conteneurs utilisant ce bind' : 'Conteneurs utilisant ce volume',
+      subtitle: isBind ? `${vol?.Name || ''} → ${vol?.HostPath || vol?.Mountpoint || ''}` : (vol?.Name || ''),
       users,
       extraCol: (c) => {
-        const mounts = (c.Mounts || []).filter((m) => m.Name === vol?.Name);
+        const mounts = (c.Mounts || []).filter((m) => {
+          if (isBind) {
+            const src = String(m.Source || '');
+            const host = String(vol?.HostPath || vol?.Mountpoint || '');
+            return src === host || src.startsWith(host + '/');
+          }
+          return m.Name === vol?.Name;
+        });
         return mounts.map((m) => m.Destination || m.Target || '').filter(Boolean).join(', ') || c.Image || '';
       },
     });
@@ -1773,6 +1999,10 @@ CMD ["sh"]
     if (state.logTimer) {
       clearInterval(state.logTimer);
       state.logTimer = null;
+    }
+    if (state.statsTimer) {
+      clearInterval(state.statsTimer);
+      state.statsTimer = null;
     }
     if (state.term) {
       try { state.term.dispose(); } catch (_) {}
@@ -1895,10 +2125,40 @@ CMD ["sh"]
     const online = st.cpu_stats?.online_cpus || st.cpu_stats?.cpu_usage?.percpu_usage?.length || 1;
     let cpuPct = 0;
     if (sysDelta > 0) cpuPct = (cpuDelta / sysDelta) * online * 100;
-    const usage = st.memory_stats?.usage || 0;
-    const limit = st.memory_stats?.limit || memTotal || 1;
+    const memStats = st.memory_stats || {};
+    const cache = Number(memStats.stats?.cache || memStats.stats?.inactive_file || 0) || 0;
+    const rawUsage = Number(memStats.usage || 0) || 0;
+    const usage = Math.max(0, rawUsage - cache);
+    const limit = Number(memStats.limit || memTotal || 1) || 1;
     const memPct = (usage / limit) * 100;
-    return { cpuPct, memPct, memUsage: usage, memLimit: limit };
+    let netRx = 0;
+    let netTx = 0;
+    const nets = st.networks || {};
+    Object.values(nets).forEach((n) => {
+      if (!n || typeof n !== 'object') return;
+      netRx += Number(n.rx_bytes || 0) || 0;
+      netTx += Number(n.tx_bytes || 0) || 0;
+    });
+    const pids = Number(st.pids_stats?.current || 0) || 0;
+    return {
+      cpuPct,
+      memPct,
+      memUsage: usage,
+      memLimit: limit,
+      netRx,
+      netTx,
+      pids,
+      networks: nets,
+      readAt: st.read || null,
+    };
+  }
+
+  function formatBitRate(bytesPerSec) {
+    const v = Math.max(0, Number(bytesPerSec) || 0);
+    if (v < 1024) return `${v.toFixed(0)} B/s`;
+    if (v < 1024 ** 2) return `${(v / 1024).toFixed(1)} KB/s`;
+    if (v < 1024 ** 3) return `${(v / 1024 ** 2).toFixed(1)} MB/s`;
+    return `${(v / 1024 ** 3).toFixed(2)} GB/s`;
   }
 
   function hostBase() {
@@ -2013,7 +2273,10 @@ CMD ["sh"]
       save: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3.5h7.2L12.5 5.3V12.5h-9V3.5zM5.5 3.5V6h5V3.5M5.5 9.5h5"/></svg>',
       logs: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 2.5h9v11h-9z"/><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"/></svg>',
       activity: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v9H3z"/><path d="M5.5 6.5h5M5.5 9h3.5M5.5 11.5h2"/><path d="M11.5 2.5v2"/></svg>',
+      stats: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5V8.5M6.5 12.5V3.5M10.5 12.5v-5M13.5 12.5v-2.5"/><path d="M2 13.5h12"/></svg>',
       nodes: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>',
+      'panel-left': '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.75" y="2.25" width="12.5" height="11.5" rx="2"/><path d="M5.75 2.25v11.5"/><path d="M10.25 6.25 8.5 8l1.75 1.75"/></svg>',
+      'panel-right': '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.75" y="2.25" width="12.5" height="11.5" rx="2"/><path d="M5.75 2.25v11.5"/><path d="M8.5 6.25 10.25 8 8.5 9.75"/></svg>',
       console: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 7l2 1.5L5 10M8.5 10h2.5"/></svg>',
       start: '<svg viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8 4.5 2.8z"/></svg>',
       stop: '<svg viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.2"/></svg>',
@@ -2033,9 +2296,10 @@ CMD ["sh"]
     danger = false, info = false, success = false,
     modal, name, running, del, reset, elId, label,
     editTeam, delTeam, delAcl, scanImg, runSched, delSched,
+    statsId, extraClass = '',
   }) {
     const withLabel = !!(label && String(label).trim());
-    const cls = `btn btn-icon btn-sm${withLabel ? ' btn-icon-label' : ''}${danger ? ' btn-danger' : ''}${info ? ' btn-info' : ''}${success ? ' btn-success' : ''}`;
+    const cls = `btn btn-icon btn-sm${withLabel ? ' btn-icon-label' : ''}${danger ? ' btn-danger' : ''}${info ? ' btn-info' : ''}${success ? ' btn-success' : ''}${extraClass ? ` ${extraClass}` : ''}`;
     const attrs = [
       `class="${cls}"`,
       `title="${esc(title)}"`,
@@ -2055,6 +2319,7 @@ CMD ["sh"]
       scanImg != null ? `data-scan-img="${esc(scanImg)}"` : '',
       runSched != null ? `data-run-sched="${esc(runSched)}"` : '',
       delSched != null ? `data-del-sched="${esc(delSched)}"` : '',
+      statsId != null ? `data-stats-id="${esc(statsId)}"` : '',
       tag === 'button' ? 'type="button"' : '',
     ].filter(Boolean).join(' ');
     const labelHtml = withLabel ? `<span class="btn-label">${esc(label)}</span>` : '';
@@ -2075,6 +2340,10 @@ CMD ["sh"]
     if (state.logTimer) {
       clearInterval(state.logTimer);
       state.logTimer = null;
+    }
+    if (state.statsTimer) {
+      clearInterval(state.statsTimer);
+      state.statsTimer = null;
     }
     if (state.term) {
       try { state.term.dispose(); } catch (_) {}
@@ -2098,6 +2367,107 @@ CMD ["sh"]
         if (e.target === backdrop) closeAppModal();
       });
     }
+    host.querySelectorAll('.modal-workspace').forEach((modal) => enableWorkspaceModalResize(modal));
+  }
+
+  const WORKSPACE_MODAL_SIZE_KEY = 'wm_workspace_modal_size';
+
+  function readWorkspaceModalSize() {
+    try {
+      const raw = localStorage.getItem(WORKSPACE_MODAL_SIZE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const w = Number(parsed?.w);
+      const h = Number(parsed?.h);
+      if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+      return { w, h };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveWorkspaceModalSize(w, h) {
+    try {
+      localStorage.setItem(WORKSPACE_MODAL_SIZE_KEY, JSON.stringify({ w: Math.round(w), h: Math.round(h) }));
+    } catch (_) {}
+  }
+
+  function clampWorkspaceModalSize(w, h) {
+    const maxW = Math.max(320, window.innerWidth - 28);
+    const maxH = Math.max(280, window.innerHeight - 24);
+    const minW = Math.min(720, maxW);
+    const minH = Math.min(420, maxH);
+    return {
+      w: Math.min(maxW, Math.max(minW, w)),
+      h: Math.min(maxH, Math.max(minH, h)),
+    };
+  }
+
+  function applyWorkspaceModalSize(modal, w, h) {
+    const size = clampWorkspaceModalSize(w, h);
+    modal.style.width = `${size.w}px`;
+    modal.style.height = `${size.h}px`;
+    modal.style.maxWidth = 'calc(100vw - 28px)';
+    modal.style.maxHeight = 'calc(100vh - 24px)';
+    modal.dispatchEvent(new CustomEvent('wm-modal-resize', { bubbles: true }));
+    return size;
+  }
+
+  function enableWorkspaceModalResize(modal) {
+    if (!modal || modal.dataset.resizeBound === '1') return;
+    modal.dataset.resizeBound = '1';
+
+    const saved = readWorkspaceModalSize();
+    if (saved) applyWorkspaceModalSize(modal, saved.w, saved.h);
+
+    let handle = modal.querySelector('.modal-resize-handle');
+    if (!handle) {
+      handle = document.createElement('div');
+      handle.className = 'modal-resize-handle';
+      handle.title = 'Redimensionner';
+      handle.setAttribute('aria-hidden', 'true');
+      modal.appendChild(handle);
+    }
+
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startW = 0;
+    let startH = 0;
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const next = applyWorkspaceModalSize(
+        modal,
+        startW + (e.clientX - startX),
+        startH + (e.clientY - startY),
+      );
+      saveWorkspaceModalSize(next.w, next.h);
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      modal.classList.remove('is-resizing');
+      document.body.style.cursor = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button != null && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragging = true;
+      const rect = modal.getBoundingClientRect();
+      startX = e.clientX;
+      startY = e.clientY;
+      startW = rect.width;
+      startH = rect.height;
+      modal.classList.add('is-resizing');
+      document.body.style.cursor = 'nwse-resize';
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
   }
 
   /** Simple name prompt modal. Resolves string or null if cancelled. */
@@ -2209,8 +2579,149 @@ CMD ["sh"]
         if (btn.dataset.modal === 'logs') await openLogsModal(id, name);
         else if (btn.dataset.modal === 'console') await openConsoleModal(id, name, running);
         else if (btn.dataset.modal === 'inspect') await openInspectModal(id, name);
+        else if (btn.dataset.modal === 'stats') await openContainerStatsModal(id, name, running);
       };
     });
+  }
+
+  async function openContainerStatsModal(id, name, runningHint) {
+    closeAppModal();
+    const host = modalHost();
+    let running = !!runningHint;
+    let history = await loadContainerMetricHistory(id);
+    host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form modal-form-wide modal-cstats" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Ressources</h3>
+              <div class="modal-sub mono">${esc(name)} · ${esc(shortId(id))}</div>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div class="cstats-toolbar">
+            <span class="logs-status" id="cstats-status"><span class="dot"></span><span class="label">Chargement…</span></span>
+            <div class="spacer"></div>
+            <span class="muted" style="font-size:12px" title="Identique au dashboard (Paramètres)">${esc(metricWindowLabel())} · rétention ${esc(String(metricRetentionDays()))} j</span>
+            <button type="button" class="btn btn-sm" id="cstats-refresh">Actualiser</button>
+          </div>
+          <div id="cstats-chart" class="cstats-chart">${containerResourceChart(history)}</div>
+          <div id="cstats-body" class="cstats-body">
+            <div class="muted" style="padding:1.5rem;text-align:center">Collecte des métriques…</div>
+          </div>
+        </div>
+      </div>`;
+    bindAppModalChrome();
+
+    const body = document.getElementById('cstats-body');
+    const chartEl = document.getElementById('cstats-chart');
+    const statusEl = document.getElementById('cstats-status');
+    let prev = null;
+    let prevAt = 0;
+    let lastPersistAt = 0;
+
+    const setStatus = (cls, label) => {
+      if (!statusEl) return;
+      statusEl.className = `logs-status ${cls || ''}`.trim();
+      const lbl = statusEl.querySelector('.label');
+      if (lbl) lbl.textContent = label;
+    };
+
+    const refreshChart = async (force = false) => {
+      if (force || !history.length) {
+        history = await loadContainerMetricHistory(id);
+      }
+      if (chartEl) chartEl.innerHTML = containerResourceChart(history);
+    };
+
+    const render = (computed, rate, netScore) => {
+      const cpu = Math.max(0, Number(computed.cpuPct) || 0);
+      const mem = Math.max(0, Number(computed.memPct) || 0);
+      const level = resourceLoadLevel(cpu, mem, netScore);
+      applyStatsIconLevel(id, level, `CPU ${cpu.toFixed(0)}% · RAM ${mem.toFixed(0)}% · Réseau ${formatBitRate((rate?.rx || 0) + (rate?.tx || 0))}`);
+      const netRows = Object.entries(computed.networks || {}).map(([iface, n]) => {
+        const rx = Number(n?.rx_bytes || 0) || 0;
+        const tx = Number(n?.tx_bytes || 0) || 0;
+        return `<tr>
+          <td class="mono">${esc(iface)}</td>
+          <td class="mono">${esc(formatBytes(rx))}</td>
+          <td class="mono">${esc(formatBytes(tx))}</td>
+        </tr>`;
+      }).join('');
+      body.innerHTML = `
+        <div class="cstats-gauges">
+          <div class="gauge">${gaugeRing(cpu, '#3b82f6')}<div class="g-label">CPU</div><div class="g-sub">${cpu.toFixed(1)} %</div></div>
+          <div class="gauge">${gaugeRing(mem, '#22c55e')}<div class="g-label">RAM</div><div class="g-sub">${esc(formatBytes(computed.memUsage))} / ${esc(formatBytes(computed.memLimit))}</div></div>
+          <div class="gauge">${gaugeRing(netScore, '#a78bfa')}<div class="g-label">Réseau</div><div class="g-sub">↓ ${esc(formatBitRate(rate?.rx || 0))} · ↑ ${esc(formatBitRate(rate?.tx || 0))}</div></div>
+        </div>
+        <div class="cstats-meta muted">PID ${esc(String(computed.pids || 0))} · live · historique ${esc(metricWindowLabel())}</div>
+        <div class="section-title" style="margin-top:14px">Interfaces réseau</div>
+        <div class="table-wrap" style="margin:0">
+          <table class="data">
+            <thead><tr><th>Interface</th><th>Reçu</th><th>Émis</th></tr></thead>
+            <tbody>${netRows || '<tr><td colspan="3" class="muted">Aucune interface</td></tr>'}</tbody>
+          </table>
+        </div>`;
+    };
+
+    const tick = async () => {
+      if (!document.getElementById('cstats-body')) {
+        if (state.statsTimer) {
+          clearInterval(state.statsTimer);
+          state.statsTimer = null;
+        }
+        return;
+      }
+      try {
+        if (!running) {
+          try {
+            const info = await Api.docker(`/containers/${id}/json`);
+            running = String(info.State?.Status || '').toLowerCase() === 'running';
+            if (!name || name === shortId(id)) {
+              name = (info.Name || '').replace(/^\//, '') || name;
+            }
+          } catch (_) {}
+        }
+        if (!running) {
+          setStatus('is-paused', 'Conteneur arrêté');
+          applyStatsIconLevel(id, 'off', 'Conteneur arrêté — pas de charge');
+          body.innerHTML = `<div class="info-box">Démarrez le conteneur pour voir CPU, RAM et réseau en direct.</div>`;
+          return;
+        }
+        setStatus('is-live', 'En direct');
+        const st = await Api.docker(`/containers/${id}/stats?stream=false`);
+        const now = Date.now();
+        const computed = computeStats(st, 0);
+        let rate = { rx: 0, tx: 0 };
+        if (prev && prevAt > 0) {
+          const dt = Math.max(0.5, (now - prevAt) / 1000);
+          rate = {
+            rx: Math.max(0, (computed.netRx - prev.netRx) / dt),
+            tx: Math.max(0, (computed.netTx - prev.netTx) / dt),
+          };
+        }
+        prev = computed;
+        prevAt = now;
+        const netScore = netLoadScore(rate.rx, rate.tx);
+        render(computed, rate, netScore);
+        // Persist with same retention/window as dashboard (server min-gap ~5 min)
+        if (!lastPersistAt || (now - lastPersistAt) > 60_000) {
+          lastPersistAt = now;
+          await pushContainerMetricSample(id, computed.cpuPct, computed.memPct, netScore);
+          await refreshChart(true);
+        }
+      } catch (err) {
+        setStatus('is-error', 'Erreur');
+        body.innerHTML = `<div class="error-box">${esc(err.message || 'Stats indisponibles')}</div>`;
+      }
+    };
+
+    document.getElementById('cstats-refresh')?.addEventListener('click', async () => {
+      await refreshChart(true);
+      await tick();
+    });
+    await tick();
+    state.statsTimer = setInterval(tick, 2000);
   }
 
   async function openInspectModal(id, name) {
@@ -2218,7 +2729,7 @@ CMD ["sh"]
     const host = modalHost();
     host.innerHTML = `
       <div class="modal-backdrop">
-        <div class="modal modal-xl modal-inspect" role="dialog" aria-modal="true">
+        <div class="modal modal-xl modal-workspace modal-inspect" role="dialog" aria-modal="true">
           <div class="modal-head">
             <div>
               <h3>Inspecter</h3>
@@ -2273,6 +2784,67 @@ CMD ["sh"]
     return String(text || '').replace(/\x1e/g, '');
   }
 
+  /**
+   * Infer a log severity from common formats (syslog, docker, logfmt, JSON, brackets…).
+   * Returns: fatal | error | warn | info | debug | success | null
+   */
+  function detectLogLevel(line, fromStderr) {
+    const s = String(line || '');
+    if (!s) return fromStderr ? 'error' : null;
+
+    // Structured / keyed levels first (most reliable)
+    let m = s.match(/(?:^|[^\w])(?:level|severity|severityname|severity_name|severityNum|severity_num|sev|severityity)\s*[=:]\s*"?([a-zA-Z]+)"?/i);
+    if (m) {
+      const lvl = classifyLevelToken(m[1]);
+      if (lvl) return lvl;
+    }
+    m = s.match(/"level"\s*:\s*"([^"]+)"/i);
+    if (m) {
+      const lvl = classifyLevelToken(m[1]);
+      if (lvl) return lvl;
+    }
+
+    // Bracket / angle / paren tokens: [ERROR], <warn>, (INFO)
+    m = s.match(/[\[(<]\s*(FATAL|CRIT(?:ICAL)?|PANIC|EMERG(?:ENCY)?|ALERT|ERROR|ERR|SEVERE|WARN(?:ING)?|INFO(?:RMATION)?|NOTICE|DEBUG|TRACE|VERBOSE|SUCCESS|OK)\s*[\])>]/i);
+    if (m) {
+      const lvl = classifyLevelToken(m[1]);
+      if (lvl) return lvl;
+    }
+
+    // Timestamp-prefixed: 2024-01-01T12:00:00Z ERROR …  |  Jan 01 12:00:00 host ERROR …
+    m = s.match(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\s+(?:[\[(<])?\s*(FATAL|CRIT(?:ICAL)?|PANIC|EMERG(?:ENCY)?|ALERT|ERROR|ERR|SEVERE|WARN(?:ING)?|INFO(?:RMATION)?|NOTICE|DEBUG|TRACE|VERBOSE)\b/i);
+    if (m) {
+      const lvl = classifyLevelToken(m[1]);
+      if (lvl) return lvl;
+    }
+
+    // Standalone token near start of line (after optional time / pid)
+    const head = s.slice(0, 160);
+    m = head.match(/(?:^|[\s|:\[\]])(FATAL|CRITICAL|PANIC|EMERGENCY|ALERT|ERROR|SEVERE|WARNING|WARN|INFORMATION|INFO|NOTICE|DEBUG|TRACE|VERBOSE|SUCCESS)\b(?=[\s|:\]\)>,-]|$)/i);
+    if (m) {
+      const lvl = classifyLevelToken(m[1]);
+      if (lvl) return lvl;
+    }
+
+    // Fallback heuristics on free text (avoid false positives on “info” alone)
+    if (/\b(?:exception|traceback|stack\s*trace|fatal\s+error|segmentation\s+fault)\b/i.test(s)) return 'error';
+    if (/\b(?:failed|failure|cannot|unable to)\b/i.test(s) && /\b(?:error|err)\b/i.test(s)) return 'error';
+
+    if (fromStderr) return 'error';
+    return null;
+  }
+
+  function classifyLevelToken(tok) {
+    const t = String(tok || '').toLowerCase();
+    if (['fatal', 'crit', 'critical', 'panic', 'emerg', 'emergency', 'alert', 'severe'].includes(t)) return 'fatal';
+    if (['error', 'err', 'errr'].includes(t)) return 'error';
+    if (['warn', 'warning'].includes(t)) return 'warn';
+    if (['info', 'information', 'notice'].includes(t)) return 'info';
+    if (['debug', 'trace', 'verbose'].includes(t)) return 'debug';
+    if (['success', 'ok'].includes(t)) return 'success';
+    return null;
+  }
+
   function renderLogLines(text, filter) {
     const raw = String(text || '');
     if (!raw) {
@@ -2284,11 +2856,12 @@ CMD ["sh"]
     let shown = 0;
     for (const line of lines) {
       if (line === '' && shown === 0 && lines.length === 1) continue;
-      const isErr = line.charCodeAt(0) === 0x1e;
-      const clean = isErr ? line.slice(1) : line;
+      const fromStderr = line.charCodeAt(0) === 0x1e;
+      const clean = fromStderr ? line.slice(1) : line;
       if (q && !clean.toLowerCase().includes(q)) continue;
       shown += 1;
-      const cls = isErr ? 'log-line log-err' : 'log-line';
+      const level = detectLogLevel(clean, fromStderr);
+      const cls = level ? `log-line log-${level}` : 'log-line';
       if (q) {
         const idx = clean.toLowerCase().indexOf(q);
         const before = esc(clean.slice(0, idx));
@@ -2323,7 +2896,7 @@ CMD ["sh"]
     const safeName = String(name || id).replace(/[^\w.-]+/g, '_');
     host.innerHTML = `
       <div class="modal-backdrop">
-        <div class="modal modal-xl modal-logs" role="dialog" aria-modal="true">
+        <div class="modal modal-xl modal-workspace modal-logs" role="dialog" aria-modal="true">
           <div class="modal-head">
             <div>
               <h3>Logs conteneur</h3>
@@ -2523,7 +3096,7 @@ CMD ["sh"]
     const host = modalHost();
     host.innerHTML = `
       <div class="modal-backdrop">
-        <div class="modal modal-xl modal-console" role="dialog" aria-modal="true">
+        <div class="modal modal-xl modal-workspace modal-console" role="dialog" aria-modal="true">
           <div class="modal-head">
             <div>
               <h3>Console</h3>
@@ -2615,7 +3188,7 @@ CMD ["sh"]
       const active = id === 'settings'
         ? isSettingsSection(state.route)
         : (state.route === id || state.route.startsWith(id + '/'));
-      return `<a href="#${id}" class="${active ? 'active' : ''}"><span class="nav-ico">${ico(id)}</span>${label}</a>`;
+      return `<a href="#${id}" class="${active ? 'active' : ''}" title="${esc(label)}" aria-label="${esc(label)}"><span class="nav-ico">${ico(id)}</span><span class="nav-label">${label}</span></a>`;
     }).join('');
     const initial = (state.user?.Username || 'A').slice(0, 2).toUpperCase();
     const username = state.user?.Username || 'admin';
@@ -2640,28 +3213,33 @@ CMD ["sh"]
         `<option value="${esc(e.Id)}" ${!allMode && Number(e.Id) === Number(state.endpointId) ? 'selected' : ''}>${esc(e.NodeName || e.Name)} (${e.Kind === 'agent' ? 'agent' : 'local'})</option>`
       ),
     ].join('');
+    const collapsed = !!state.sidebarCollapsed;
+    const toggleTitle = collapsed ? 'Afficher le menu' : 'Réduire le menu';
 
     return `
       <div class="shell">
-        <aside class="sidebar">
+        <aside class="sidebar${collapsed ? ' is-collapsed' : ''}">
           <div class="brand brand-full">
-            ${brandLogoImg('brand-logo-img', '/public/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v2.0.1</div>
+            ${brandLogoImg('brand-logo-img brand-logo-wide', '/public/img/wharfmaster-logo-light-sm.png')}
+            <div class="brand-ver">v2.1.0</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
           </div>
           <div class="sidebar-bottom">
             <nav class="nav">
-              <a href="#docs" class="${state.route === 'docs' ? 'active' : ''}"><span class="nav-ico">${ico('docs')}</span>Documentation</a>
-              <a href="#about" class="${state.route === 'about' ? 'active' : ''}"><span class="nav-ico">${ico('about')}</span>À propos</a>
-              <a href="#logout"><span class="nav-ico">${ico('logout')}</span>Déconnexion</a>
+              <a href="#docs" class="${state.route === 'docs' ? 'active' : ''}" title="Documentation" aria-label="Documentation"><span class="nav-ico">${ico('docs')}</span><span class="nav-label">Documentation</span></a>
+              <a href="#about" class="${state.route === 'about' ? 'active' : ''}" title="À propos" aria-label="À propos"><span class="nav-ico">${ico('about')}</span><span class="nav-label">À propos</span></a>
+              <a href="#logout" title="Déconnexion" aria-label="Déconnexion"><span class="nav-ico">${ico('logout')}</span><span class="nav-label">Déconnexion</span></a>
             </nav>
-            <div class="engine-pill">
+            <div class="engine-pill" title="${esc((allMode ? 'Tous les nœuds' : engine) + ' · ' + nodeKind + ' · ' + nodeLabel)}">
               <span class="dot ${epOnline ? '' : 'off'}"></span>
-              <div><strong>${esc(allMode ? 'Tous les nœuds' : engine)}</strong>${esc(nodeKind)} · ${esc(nodeLabel)}</div>
+              <div class="engine-pill-text"><strong>${esc(allMode ? 'Tous les nœuds' : engine)}</strong>${esc(nodeKind)} · ${esc(nodeLabel)}</div>
             </div>
           </div>
+          <button type="button" class="sidebar-toggle" id="sidebar-toggle" title="${esc(toggleTitle)}" aria-label="${esc(toggleTitle)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+            <span class="btn-ico">${ico(collapsed ? 'panel-right' : 'panel-left')}</span>
+          </button>
         </aside>
         <div class="main">
           <header class="topbar">
@@ -3549,12 +4127,18 @@ CMD ["sh"]
           ${iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs conteneur', icon: 'logs' })}
           ${iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
           ${iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
+          ${iconBtn({
+            modal: 'stats', id: c.Id, name, running: isRunning,
+            title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
+            icon: 'stats', statsId: c.Id,
+            extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
+          })}
           ${iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
           ${iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
           ${iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
           ${iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div>`;
-      return `<tr class="${rowCls}" data-search="${esc(search)}">
+      return `<tr class="${rowCls}" data-search="${esc(search)}" data-container-id="${esc(c.Id)}">
         ${all ? '' : bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${esc(c._nodeName || '—')}</td>` : ''}
         <td class="name-cell">
@@ -3562,25 +4146,29 @@ CMD ["sh"]
           <span class="id">${esc(shortId(c.Id))}</span>
         </td>
         <td class="mono">${esc(c.Image)}</td>
+        ${all ? '' : `<td class="img-upd-cell" data-cupd="${esc(c.Id)}">
+          <span class="img-upd is-loading" title="Vérification de l’image…"><span class="img-upd-dot"></span></span>
+        </td>`}
         <td>${badge(c.State)}</td>
         <td>${formatPorts(c.Ports || [])}</td>
         <td class="actions">${actions}</td>
       </tr>`;
     }).join('');
 
-    const colSpan = all ? 6 : 7;
+    const colSpan = all ? 6 : 8;
     root.innerHTML = shell('Conteneurs', `
       ${pageHeader(all ? 'Conteneurs — tous les nœuds' : 'Liste des conteneurs')}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${esc(failMsg)}</div>` : ''}
       ${all && perNodeHint ? `<div class="muted" style="margin-bottom:10px">Répartition — ${esc(perNodeHint)}</div>` : ''}
       ${all ? pickNodeGuardHtml() : ''}
-      ${searchBar(
-        'containers',
-        'Rechercher des conteneurs…',
-        list.length,
-        list.length,
-        all ? '' : `${createBtn('create-container', 'Créer un conteneur')}${bulkDeleteBtnHtml()}`,
-      )}
+      <div class="toolbar">
+        <input class="search" id="filter" type="search" placeholder="Rechercher des conteneurs…" value="${esc(state.filters.containers || '')}">
+        ${all ? '' : `${createBtn('create-container', 'Créer un conteneur')}${bulkDeleteBtnHtml()}`}
+        <div class="spacer"></div>
+        ${all ? '' : `<span class="muted" style="font-size:12px">● vert = à jour · ● orange = mise à jour dispo · cache 24 h</span>
+        <button type="button" class="btn btn-sm" id="container-upd-refresh" title="Revérifier les images maintenant">Rafraîchir images</button>`}
+        <span class="muted mono" id="filter-count">${list.length} / ${list.length}</span>
+      </div>
       <div class="table-wrap">
         <table class="data">
           <thead><tr>
@@ -3588,6 +4176,7 @@ CMD ["sh"]
             ${all ? sortTh('Nœud', 'node', 'containers') : ''}
             ${sortTh('Nom', 'name', 'containers')}
             ${sortTh('Image', 'image', 'containers')}
+            ${all ? '' : '<th title="Image du registre">Màj</th>'}
             ${sortTh('État', 'state', 'containers')}
             ${sortTh('Ports publiés', 'ports', 'containers')}
             <th>Actions</th>
@@ -3603,10 +4192,11 @@ CMD ["sh"]
       bindModalActions();
       document.getElementById('create-container').onclick = () => openCreateContainerModal();
       root.querySelectorAll('[data-act]').forEach((btn) => {
+        const act = btn.dataset.act;
         onBusyClick(btn, async (el) => {
-          await containerAction(el.dataset.id, el.dataset.act);
+          await containerAction(el.dataset.id, act);
         }, {
-          confirm: btn.dataset.act === 'remove' ? 'Supprimer ce conteneur ?' : null,
+          confirm: act === 'remove' ? 'Supprimer ce conteneur ?' : null,
           reload: true,
         });
       });
@@ -3617,6 +4207,14 @@ CMD ["sh"]
         deleteOne: (id) => containerAction(id, 'remove'),
         reload: () => viewContainers(),
       });
+      document.getElementById('container-upd-refresh')?.addEventListener('click', () => {
+        root.querySelectorAll('[data-cupd]').forEach((cell) => {
+          cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span>`;
+        });
+        loadContainerUpdateIndicators(true);
+      });
+      loadContainerUpdateIndicators(false);
+      void refreshContainerStatsIcons(list);
     } else {
       root.querySelectorAll('[data-switch-node]').forEach((a) => {
         a.addEventListener('click', () => {
@@ -3626,6 +4224,32 @@ CMD ["sh"]
             state.endpointId = id;
           }
         });
+      });
+    }
+  }
+
+  async function loadContainerUpdateIndicators(refresh = false) {
+    try {
+      const data = await Api.containerUpdates(!!refresh);
+      const map = data?.Updates || {};
+      Object.keys(map).forEach((id) => {
+        const cell = root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
+        if (!cell) return;
+        const u = map[id] || {};
+        let title = u.Detail || u.Error || 'Aucun contrôle';
+        if (u.Image) title = `${u.Image}\n${title}`;
+        cell.innerHTML = stackUpdatePill(u.Status, u.UpdateCount || 0, title);
+      });
+      root.querySelectorAll('[data-cupd] .img-upd.is-loading').forEach((el) => {
+        el.className = 'img-upd is-unknown';
+        el.title = 'Contrôle indisponible';
+        const lbl = el.querySelector('.img-upd-lbl');
+        if (lbl) lbl.textContent = '—';
+        else el.insertAdjacentHTML('beforeend', '<span class="img-upd-lbl">—</span>');
+      });
+    } catch {
+      root.querySelectorAll('[data-cupd]').forEach((cell) => {
+        cell.innerHTML = stackUpdatePill('unknown', 0, 'Contrôle indisponible');
       });
     }
   }
@@ -3652,7 +4276,8 @@ CMD ["sh"]
           <dl class="kv">
             <dt>Nom</dt><dd>${esc(name)}</dd>
             <dt>ID</dt><dd class="mono">${esc(info.Id)}</dd>
-            <dt>Image</dt><dd>${esc(info.Config?.Image || '')}</dd>
+            <dt>Image</dt><dd class="mono">${esc(info.Config?.Image || '')}</dd>
+            <dt>Mise à jour</dt><dd id="container-upd-summary"><span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span></dd>
             <dt>Statut</dt><dd>${badge(info.State?.Status || '')}</dd>
             <dt>Créé le</dt><dd>${esc(info.Created || '')}</dd>
             <dt>Adresse IP</dt><dd class="mono">${esc(info.NetworkSettings?.IPAddress || Object.values(info.NetworkSettings?.Networks || {})[0]?.IPAddress || '—')}</dd>
@@ -3668,6 +4293,12 @@ CMD ["sh"]
         ${iconBtn({ modal: 'logs', id, name, running, title: 'Logs conteneur', icon: 'logs' })}
         ${iconBtn({ modal: 'console', id, name, running, title: 'Console', icon: 'console' })}
         ${iconBtn({ modal: 'inspect', id, name, running, title: 'Inspecter', icon: 'inspect' })}
+        ${iconBtn({
+          modal: 'stats', id, name, running,
+          title: running ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
+          icon: 'stats', statsId: id,
+          extraClass: running ? 'is-stats-ok' : 'is-stats-off',
+        })}
         ${iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: !running })}
         ${iconBtn({ act: 'stop', title: 'Arrêter', icon: 'stop', danger: running })}
         ${iconBtn({ act: 'restart', title: 'Redémarrer', icon: 'restart' })}
@@ -3710,6 +4341,20 @@ CMD ["sh"]
         reload: btn.dataset.act !== 'remove',
       });
     });
+    try {
+      const upd = await Api.containerUpdateStatus(id);
+      const sum = document.getElementById('container-upd-summary');
+      if (sum) {
+        sum.innerHTML = stackUpdatePill(
+          upd.Status,
+          upd.UpdateCount || 0,
+          upd.Detail || `${upd.Checked || 0} contrôle(s)`,
+        );
+      }
+    } catch (err) {
+      const sum = document.getElementById('container-upd-summary');
+      if (sum) sum.innerHTML = stackUpdatePill('unknown', 0, err.message || 'Erreur');
+    }
 
     if (requested === 'logs') await openLogsModal(id, name);
     else if (requested === 'console') await openConsoleModal(id, name, running);
@@ -3875,6 +4520,8 @@ CMD ["sh"]
 
     const onResize = () => { try { fit && fit.fit(); } catch (_) {} };
     window.addEventListener('resize', onResize);
+    const modalEl = wrap.closest('.modal-workspace');
+    if (modalEl) modalEl.addEventListener('wm-modal-resize', onResize);
 
     const runLine = async (line) => {
       const trimmed = line.trim();
@@ -4061,8 +4708,7 @@ CMD ["sh"]
         : `<span class="badge badge-unused">Inutilisé</span>`;
       const cveCell = !cveOn || all
         ? ''
-        : `<td>${img._scan ? cveBadge(img._scan.Summary) : '<span class="muted">—</span>'}</td>`;
-      const scanRef = img._primaryTag || img.Id;
+        : cveStatusTd(img._primaryTag, img._scan);
       const search = `${shortId(img.Id)} ${tags} ${img._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
       return `<tr data-search="${esc(search)}">
         ${all ? '' : bulkSelectTd(img.Id)}
@@ -4073,7 +4719,6 @@ CMD ["sh"]
         ${cveCell}
         <td>${esc(sizeMb)} MB</td>
         <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">
-          ${cveOn && img._primaryTag ? iconBtn({ scanImg: scanRef, title: 'Scan CVE (Trivy)', icon: 'activity', info: true }) : ''}
           ${iconBtn({ id: img.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div>`}</td>
       </tr>`;
@@ -4116,40 +4761,13 @@ CMD ["sh"]
     if (!all) {
       document.getElementById('build-image').onclick = () => { location.hash = '#images/build'; };
       document.getElementById('pull-image').onclick = () => openPullImageModal();
-      root.querySelectorAll('[data-scan-img]').forEach((btn) => {
-        onBusyClick(btn, async (el) => {
-          const ref = el.dataset.scanImg;
-          const host = document.getElementById('scan-modal');
-          if (host) host.innerHTML = `<div class="info-box">Scan Trivy de <code>${esc(ref)}</code> en cours…</div>`;
-          try {
-            const res = await Api.scanImage(Api.getEndpointId(), { Image: ref, Force: true });
-            const findings = (res.Findings || []).slice(0, 40);
-            const rowsF = findings.map((f) => `<tr>
-              <td>${esc(f.Severity)}</td>
-              <td class="mono">${esc(f.Cve)}</td>
-              <td>${esc(f.Package)} ${esc(f.Version || '')}</td>
-              <td class="muted">${esc((f.Title || '').slice(0, 120))}</td>
-            </tr>`).join('');
-            if (host) {
-              host.innerHTML = `
-                <div class="modal-backdrop">
-                  <div class="modal modal-form-wide" style="max-width:820px">
-                    <h3>Scan CVE · ${esc(ref)}</h3>
-                    <p>${cveBadge(res.Summary)} · ${esc(String(res.Summary?.TOTAL || 0))} finding(s)</p>
-                    <div class="table-wrap" style="max-height:360px;overflow:auto">
-                      <table class="data"><thead><tr><th>Sévérité</th><th>CVE</th><th>Paquet</th><th>Titre</th></tr></thead>
-                      <tbody>${rowsF || `<tr><td colspan="4" class="empty">Aucune vulnérabilité</td></tr>`}</tbody></table>
-                    </div>
-                    <div class="actions-bar"><button class="btn" id="close-scan">Fermer</button></div>
-                  </div>
-                </div>`;
-              document.getElementById('close-scan').onclick = () => { host.innerHTML = ''; viewImages(); };
-            }
-          } catch (err) {
-            if (host) host.innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
-          }
-        }, { minMs: 400 });
-      });
+      bindCveDetailButtons(root);
+      if (cveOn) {
+        const refs = [...new Set(list.map((img) => img._primaryTag).filter(Boolean))];
+        if (refs.length) {
+          ensureImagesCveColumn(root, refs).catch(() => {});
+        }
+      }
       root.querySelectorAll('.quick-actions button[data-id]').forEach((btn) => {
         const entry = [...usageByKey.values()].find((e) => e.img.Id === btn.dataset.id);
         const used = !!(entry && entry.users.length);
@@ -4174,6 +4792,7 @@ CMD ["sh"]
 
   async function viewVolumes() {
     const all = isAllNodes();
+    const isAdmin = Number(state.user?.Role) === 1;
     let volumes = [];
     let containers = [];
     let partial = false;
@@ -4186,12 +4805,21 @@ CMD ["sh"]
       containers = aggCtr.items;
       partial = aggVol.failed > 0 || aggCtr.failed > 0;
     } else {
-      const [data, ctrs] = await Promise.all([
+      const [data, ctrs, binds] = await Promise.all([
         Api.docker('/volumes'),
         Api.docker('/containers/json?all=true'),
+        Api.bindVolumes().catch(() => ({ Volumes: [] })),
       ]);
       volumes = data.Volumes || [];
       containers = ctrs || [];
+      const bindList = binds?.Volumes || [];
+      const named = new Set(volumes.map((v) => String(v.Name || '').toLowerCase()));
+      bindList.forEach((b) => {
+        const key = String(b.Name || '').toLowerCase();
+        if (!key || named.has(key)) return;
+        volumes.push(b);
+        named.add(key);
+      });
     }
 
     const usageByKey = new Map();
@@ -4206,31 +4834,43 @@ CMD ["sh"]
       name: (v) => v.Name || '',
       driver: (v) => v.Driver || '',
       usage: (v) => Number(v._usageCount) || 0,
-      mount: (v) => v.Mountpoint || '',
+      mount: (v) => v.Mountpoint || v.HostPath || '',
       node: (v) => v._nodeName || '',
     });
     const rows = volumes.map((v) => {
       const users = (usageByKey.get(v._sortKey) || {}).users || [];
       const key = v._sortKey;
+      const isBind = !!(v._bind || String(v.Driver || '').toLowerCase() === 'bind');
+      const mount = v.HostPath || v.Mountpoint || '';
       const usageCell = users.length
         ? `<button type="button" class="badge badge-inuse img-usage-btn" data-vol-key="${esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? 's' : ''}</button>`
         : `<span class="badge badge-unused">Inutilisé</span>`;
-      const search = `${v.Name} ${v.Driver} ${v.Mountpoint || ''} ${v._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
+      const driverLabel = isBind
+        ? (v.Source === 'stack' ? 'bind · stack' : 'bind')
+        : (v.Driver || '');
+      const search = `${v.Name} ${driverLabel} ${mount} ${v.StackName || ''} ${v._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'} bind`.toLowerCase();
+      const canDelete = !all && (!isBind || isAdmin);
       const actions = all
         ? '<span class="muted">—</span>'
         : `<div class="quick-actions">
         ${iconBtn({ tag: 'a', href: `#volumes/${encodeURIComponent(v.Name)}`, title: 'Explorer', icon: 'search' })}
-        ${iconBtn({ name: v.Name, title: 'Supprimer', icon: 'remove', danger: true })}
+        ${canDelete ? iconBtn({
+          name: v.Name,
+          title: isBind ? 'Retirer la déclaration bind' : 'Supprimer',
+          icon: 'remove',
+          danger: true,
+          del: isBind ? String(v.Id || '') : '',
+        }) : ''}
       </div>`;
-      return `<tr data-search="${esc(search)}">
-      ${all ? '' : bulkSelectTd(v.Name)}
+      return `<tr data-search="${esc(search)}" data-bind="${isBind ? '1' : '0'}" data-bind-id="${esc(isBind ? (v.Id || '') : '')}">
+      ${all ? '' : bulkSelectTd(v.Name, { disabled: isBind, title: isBind ? 'Les binds se retirent unitairement' : '' })}
       ${all ? `<td class="muted">${esc(v._nodeName || '—')}</td>` : ''}
       <td>${all
         ? esc(v.Name)
-        : `<a href="#volumes/${encodeURIComponent(v.Name)}">${esc(v.Name)}</a>`}</td>
-      <td>${esc(v.Driver)}</td>
+        : `<a href="#volumes/${encodeURIComponent(v.Name)}">${esc(v.Name)}</a>`}${isBind && v.StackName ? ` <span class="muted" style="font-size:11px">(${esc(v.StackName)})</span>` : ''}</td>
+      <td>${esc(driverLabel)}</td>
       <td>${usageCell}</td>
-      <td class="mono cell-clip" title="${esc(v.Mountpoint || '')}">${esc(v.Mountpoint || '')}</td>
+      <td class="mono cell-clip" title="${esc(mount)}">${esc(mount)}</td>
       <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
@@ -4241,8 +4881,9 @@ CMD ["sh"]
       ${all ? pickNodeGuardHtml() : ''}
       <div class="toolbar">
         <input class="search" id="filter" type="search" placeholder="Rechercher des volumes…" value="${esc(state.filters.volumes || '')}">
-        ${all ? '' : `${createBtn('create', 'Créer un volume')}${bulkDeleteBtnHtml()}`}
+        ${all ? '' : `${createBtn('create', isAdmin ? 'Créer / déclarer' : 'Créer un volume')}${bulkDeleteBtnHtml()}`}
         <div class="spacer"></div>
+        ${all ? '' : '<span class="muted" style="font-size:12px">bind = chemin hôte · sync auto depuis les stacks</span>'}
         <span class="muted mono" id="filter-count">${volumes.length} / ${volumes.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
@@ -4256,7 +4897,7 @@ CMD ["sh"]
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>
-      </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Volumes Docker' });
+      </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Volumes Docker et binds' });
     bindRefresh();
     bindPagedSearch('volumes');
     bindTableSort('volumes', () => viewVolumes());
@@ -4278,12 +4919,21 @@ CMD ["sh"]
       root.querySelectorAll('.quick-actions button[data-name]').forEach((btn) => {
         const entry = [...usageByKey.values()].find((e) => e.vol.Name === btn.dataset.name);
         const used = !!(entry && entry.users.length);
+        const isBind = !!(entry?.vol?._bind || String(entry?.vol?.Driver || '').toLowerCase() === 'bind');
         onBusyClick(btn, async (el) => {
+          if (isBind) {
+            const bindId = el.dataset.del || entry?.vol?.Id;
+            if (!bindId) throw new Error('Bind introuvable');
+            await Api.deleteBindVolume(bindId);
+            return;
+          }
           await Api.docker(`/volumes/${encodeURIComponent(el.dataset.name)}`, { method: 'DELETE' });
         }, {
-          confirm: used
-            ? 'Ce volume est utilisé par des conteneurs. Supprimer quand même ?'
-            : 'Supprimer ce volume ?',
+          confirm: isBind
+            ? 'Retirer cette déclaration bind de la liste ? (le dossier hôte n’est pas supprimé)'
+            : (used
+              ? 'Ce volume est utilisé par des conteneurs. Supprimer quand même ?'
+              : 'Supprimer ce volume ?'),
           reload: true,
         });
       });
@@ -5901,7 +6551,7 @@ CMD ["sh"]
     try {
       const s = await Api.settings();
       state.publicUrl = s.PublicURL || s.HostURL || '';
-      if (s.MetricsChartHours != null) state.metricsChartHours = Number(s.MetricsChartHours) || 24;
+      if (s.MetricsChartHours != null) state.metricsChartHours = Number(s.MetricsChartHours) || 72;
       if (s.MetricsRetentionDays != null) state.metricsRetentionDays = Number(s.MetricsRetentionDays) || 90;
       if (s.TrivyEnabled != null) state.trivyEnabled = !!s.TrivyEnabled;
     } catch (_) {
@@ -6065,7 +6715,7 @@ CMD ["sh"]
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/public/docs/DOCUMENTATION.md?v=2.0.1', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/public/docs/DOCUMENTATION.md?v=2.1.0', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');
@@ -6562,8 +7212,10 @@ CMD ["sh"]
           </div>
           <strong>Commande à exécuter sur la machine distante</strong>
           <pre class="mono" id="join-cmd" style="white-space:pre-wrap;margin:8px 0;user-select:all">${esc(cmd)}</pre>
-          <div class="toolbar" style="gap:8px">
+          <p class="muted" style="margin:10px 0 6px">Ou déploiement manuel : ZIP avec Dockerfile, docker-compose, sources et <code>.env</code> prérempli.</p>
+          <div class="toolbar" style="gap:8px;flex-wrap:wrap">
             <button type="button" class="btn btn-sm btn-primary" id="copy-join-cmd">Copier la commande</button>
+            <button type="button" class="btn btn-sm btn-info" id="dl-agent-bundle">Télécharger le pack ZIP</button>
             <button type="button" class="btn btn-sm" id="show-join-token">Afficher le token</button>
           </div>
           <pre class="mono" id="join-token-raw" style="display:none;white-space:pre-wrap;margin:8px 0 0">${esc(data.Token)}</pre>
@@ -6578,6 +7230,35 @@ CMD ["sh"]
             setTimeout(() => { btn.textContent = prev; }, 1400);
           }
         } catch (_) {}
+      });
+      document.getElementById('dl-agent-bundle')?.addEventListener('click', async () => {
+        const btn = document.getElementById('dl-agent-bundle');
+        const prev = btn?.textContent || '';
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = 'Préparation…';
+        }
+        try {
+          await Api.downloadAgentBundle({
+            Token: data.Token,
+            NodeHost: data.NodeHost || '',
+            NodeName: data.NodeName || '',
+            NodePort: data.NodePort || 9001,
+            PublicURL: data.PublicURL || '',
+            AdvertiseURL: data.AdvertiseURL || '',
+          });
+          if (btn) btn.textContent = 'Téléchargé';
+          setTimeout(() => { if (btn) { btn.textContent = prev; btn.disabled = false; } }, 1600);
+        } catch (err) {
+          if (btn) {
+            btn.textContent = prev;
+            btn.disabled = false;
+          }
+          const errEl = document.getElementById('join-form-err');
+          if (errEl) {
+            errEl.innerHTML = `<div class="error-box">${esc(err.message || 'Téléchargement impossible')}</div>`;
+          }
+        }
       });
       document.getElementById('show-join-token')?.addEventListener('click', () => {
         const el = document.getElementById('join-token-raw');
@@ -6857,25 +7538,25 @@ CMD ["sh"]
       <div class="panel" style="max-width:720px; margin-bottom:16px">
         <div class="section-title" style="margin-top:0">Historique &amp; courbes</div>
         <p class="muted" style="margin:0 0 14px">
-          Relevés du tableau de bord stockés en SQLite. Les courbes affichent une fenêtre glissante ;
-          au-delà de la rétention, les anciens points sont purgés.
+          Relevés du tableau de bord et des conteneurs (CPU / RAM / réseau) stockés en SQLite.
+          Les courbes utilisent la même fenêtre glissante et la même rétention partout.
         </p>
         <div class="form-group">
           <label class="field-label" for="metrics-chart-hours">Fenêtre des courbes (heures)</label>
-          <input id="metrics-chart-hours" type="number" min="1" max="168" step="1" value="${esc(chartHours)}" placeholder="24">
-          <p class="field-hint muted">Ex. 24 = dernières 24 h sur le dashboard (1–168).</p>
+          <input id="metrics-chart-hours" type="number" min="1" max="168" step="1" value="${esc(chartHours)}" placeholder="72">
+          <p class="field-hint muted">Ex. 72 = dernières 72 h sur le dashboard et les modales conteneur (1–168).</p>
         </div>
         <div class="form-group">
           <label class="field-label" for="metrics-retention-days">Rétention en base (jours)</label>
           <input id="metrics-retention-days" type="number" min="7" max="365" step="1" value="${esc(retentionDays)}" placeholder="90">
-          <p class="field-hint muted">Conservation des relevés (7–365). Défaut 90 jours.</p>
+          <p class="field-hint muted">Conservation des relevés (7–365). Défaut 90 jours — partagée dashboard / conteneurs.</p>
         </div>
       </div>
       ${isAdmin ? `
       <div class="panel" style="max-width:720px; margin-bottom:16px">
         <div class="section-title" style="margin-top:0">Scan CVE (Trivy)</div>
         <p class="muted" style="margin:0 0 14px">
-          Active ou désactive totalement les scans de vulnérabilités : pastilles Images, scan manuel,
+          Active ou désactive les scans CVE : à l’ouverture de la page Images (cache 24&nbsp;h, comme la vérif. de mises à jour),
           et avis non bloquant à la création de conteneurs / stacks.
           ${settings.TrivyInstalled === false
             ? '<br><span class="badge badge-warn">Binaire Trivy non détecté sur cette instance</span>'
@@ -7087,7 +7768,104 @@ CMD ["sh"]
     if (h > 0) return `<span class="badge badge-warn" title="High ${h}">H${h}</span>`;
     if (m > 0) return `<span class="badge badge-info" title="Medium ${m}">M${m}</span>`;
     if (Number(summary.TOTAL || 0) > 0) return `<span class="badge">L${Number(summary.LOW || 0)}</span>`;
-    return `<span class="badge badge-success" title="Aucune CVE">OK</span>`;
+    return `<span class="badge badge-success" title="Aucune CVE">CVE OK</span>`;
+  }
+
+  function cveStatusTd(ref, scan) {
+    if (!ref) return '<td><span class="muted">—</span></td>';
+    if (!scan) {
+      return `<td data-cve-cell="${esc(ref)}"><span class="muted cve-pending">…</span></td>`;
+    }
+    if (scan.Status === 'skipped' || scan.Warning) {
+      return `<td data-cve-cell="${esc(ref)}"><span class="muted" title="${esc(scan.Warning || 'Scan ignoré')}">—</span></td>`;
+    }
+    return `<td data-cve-cell="${esc(ref)}"><button type="button" class="cve-pill-btn" data-cve-ref="${esc(ref)}" title="Détail CVE">${cveBadge(scan.Summary)}</button></td>`;
+  }
+
+  function fillCveCell(cell, item) {
+    if (!cell || !item) return;
+    const ref = item.ImageRef || cell.dataset.cveCell || '';
+    if (item.Status === 'skipped' || item.Warning) {
+      cell.innerHTML = `<span class="muted" title="${esc(item.Warning || 'Scan ignoré')}">—</span>`;
+      return;
+    }
+    cell.innerHTML = `<button type="button" class="cve-pill-btn" data-cve-ref="${esc(ref)}" title="Détail CVE">${cveBadge(item.Summary)}</button>`;
+  }
+
+  function bindCveDetailButtons(scope) {
+    (scope || document).querySelectorAll('[data-cve-ref]').forEach((btn) => {
+      if (btn.dataset.cveBound === '1') return;
+      btn.dataset.cveBound = '1';
+      btn.addEventListener('click', () => openCveScanModal(btn.dataset.cveRef));
+    });
+  }
+
+  async function ensureImagesCveColumn(root, refs) {
+    let res;
+    try {
+      res = await Api.ensureImageScans(Api.getEndpointId(), { Images: refs });
+    } catch (_) {
+      root.querySelectorAll('[data-cve-cell]').forEach((cell) => {
+        if (cell.querySelector('.cve-pending')) {
+          cell.innerHTML = '<span class="muted" title="Scan indisponible">—</span>';
+        }
+      });
+      return;
+    }
+    const byRef = new Map();
+    (res?.Items || []).forEach((it) => {
+      if (it.ImageRef) byRef.set(it.ImageRef, it);
+    });
+    root.querySelectorAll('[data-cve-cell]').forEach((cell) => {
+      const ref = cell.dataset.cveCell;
+      const it = byRef.get(ref);
+      if (it) fillCveCell(cell, it);
+      else if (cell.querySelector('.cve-pending')) {
+        cell.innerHTML = '<span class="muted">—</span>';
+      }
+    });
+    bindCveDetailButtons(root);
+  }
+
+  async function openCveScanModal(ref) {
+    if (!ref) return;
+    const host = document.getElementById('scan-modal') || (() => {
+      const el = document.createElement('div');
+      el.id = 'scan-modal';
+      document.getElementById('root')?.appendChild(el);
+      return el;
+    })();
+    host.innerHTML = `<div class="info-box">Chargement CVE <code>${esc(ref)}</code>…</div>`;
+    try {
+      let res = null;
+      try {
+        res = await Api.imageScan(Api.getEndpointId(), { ref });
+      } catch (_) {
+        res = await Api.scanImage(Api.getEndpointId(), { Image: ref, Force: false });
+      }
+      const findings = (res.Findings || []).slice(0, 40);
+      const rowsF = findings.map((f) => `<tr>
+        <td>${esc(f.Severity)}</td>
+        <td class="mono">${esc(f.Cve)}</td>
+        <td>${esc(f.Package)} ${esc(f.Version || '')}</td>
+        <td class="muted">${esc((f.Title || '').slice(0, 120))}</td>
+      </tr>`).join('');
+      host.innerHTML = `
+        <div class="modal-backdrop">
+          <div class="modal modal-form-wide" style="max-width:820px">
+            <h3>Scan CVE · ${esc(ref)}</h3>
+            <p>${cveBadge(res.Summary)} · ${esc(String(res.Summary?.TOTAL || 0))} finding(s)${res.FromCache ? ' <span class="muted">(cache)</span>' : ''}</p>
+            <div class="table-wrap" style="max-height:360px;overflow:auto">
+              <table class="data"><thead><tr><th>Sévérité</th><th>CVE</th><th>Paquet</th><th>Titre</th></tr></thead>
+              <tbody>${rowsF || `<tr><td colspan="4" class="empty">Aucune vulnérabilité</td></tr>`}</tbody></table>
+            </div>
+            <div class="actions-bar"><button class="btn" id="close-scan">Fermer</button></div>
+          </div>
+        </div>`;
+      document.getElementById('close-scan').onclick = () => { host.innerHTML = ''; };
+    } catch (err) {
+      host.innerHTML = `<div class="error-box">${esc(err.message || 'Erreur CVE')}</div>`;
+    }
   }
 
   /** Soft CVE gate before create/deploy — never throws; returns { proceed, html }. */
@@ -7821,7 +8599,7 @@ CMD ["sh"]
         root.innerHTML = shell('À propos', `<div class="panel-card">
           <div class="about-brand">${brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>2.0.1</strong> — équipes, ACL nœuds, SSO AD, scheduler, scan CVE Trivy.</p>
+          <p class="muted">Version <strong>2.1.0</strong> — CVE auto Images, volumes bind, métriques conteneur, pack agent ZIP.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>

@@ -8,8 +8,23 @@ final class VolumeBrowser
     private const BROWSE_IMAGE = 'busybox:1.36';
     private const MAX_PREVIEW_BYTES = 512_000;
 
-    public function __construct(private readonly Client $docker)
+    /**
+     * @param ?string $hostBindPath Absolute host path for bind mounts (null = named Docker volume)
+     */
+    public function __construct(
+        private readonly Client $docker,
+        private readonly ?string $hostBindPath = null,
+    ) {
+    }
+
+    public function isBind(): bool
     {
+        return $this->hostBindPath !== null && $this->hostBindPath !== '';
+    }
+
+    public function hostPath(): ?string
+    {
+        return $this->hostBindPath;
     }
 
     /**
@@ -418,16 +433,18 @@ SH;
     private function startBrowseContainer(string $volumeName, bool $readOnly): string
     {
         $mode = $readOnly ? 'ro' : 'rw';
+        $source = $this->isBind() ? (string) $this->hostBindPath : $volumeName;
         $created = $this->docker->json('POST', '/containers/create', [
             'Image' => self::BROWSE_IMAGE,
             'Cmd' => ['sleep', '120'],
             'HostConfig' => [
-                'Binds' => [$volumeName . ':/volume:' . $mode],
+                'Binds' => [$source . ':/volume:' . $mode],
                 'AutoRemove' => false,
                 'NetworkMode' => 'none',
             ],
             'Labels' => [
                 'dockermanager.volume-browser' => '1',
+                'dockermanager.volume-browser.bind' => $this->isBind() ? '1' : '0',
             ],
         ]);
         $id = (string) ($created['Id'] ?? '');
@@ -479,6 +496,13 @@ SH;
         $name = trim($name);
         if ($name === '' || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/', $name)) {
             throw new \InvalidArgumentException('Nom de volume invalide');
+        }
+        if ($this->isBind()) {
+            $host = (string) $this->hostBindPath;
+            if ($host === '' || !str_starts_with($host, '/') || str_contains($host, "\0")) {
+                throw new \InvalidArgumentException('Chemin hôte bind invalide');
+            }
+            return;
         }
         try {
             $this->docker->json('GET', '/volumes/' . rawurlencode($name));

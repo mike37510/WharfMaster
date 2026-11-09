@@ -8,7 +8,8 @@ namespace App\Security;
  */
 final class ImageScanner
 {
-    public const CACHE_TTL = 86400;
+    /** Same window as stack/image update digest checks (24 h). */
+    public const CACHE_TTL = \App\Stack\ImageUpdateChecker::STACK_CACHE_TTL;
 
     public function __construct(
         private readonly string $trivyBin = 'trivy',

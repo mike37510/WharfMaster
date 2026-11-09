@@ -10,6 +10,7 @@ use App\Auth\Jwt;
 use App\Auth\LdapClient;
 use App\Docker\AgentComposeClient;
 use App\Docker\Client as DockerClient;
+use App\Docker\ContainerRecreate;
 use App\Docker\ImageBuilder;
 use App\Docker\VolumeBrowser;
 use App\Http\Request;
@@ -22,6 +23,7 @@ use App\Security\ImageScanner;
 use App\Security\PasswordPolicy;
 use App\Security\RateLimiter;
 use App\Security\SecretBox;
+use App\Stack\BindVolumeExtractor;
 use App\Stack\ComposeDeployer;
 use App\Stack\ImageUpdateChecker;
 use App\Storage\Database;
@@ -275,6 +277,9 @@ final class App
         if (preg_match('#^/api/endpoints/(\d+)/images/scans$#', $path, $m) && $method === 'GET') {
             return $this->listImageScans((int) $m[1], $user);
         }
+        if (preg_match('#^/api/endpoints/(\d+)/images/scans/ensure$#', $path, $m) && $method === 'POST') {
+            return $this->ensureImageScans((int) $m[1], $request, $user);
+        }
         if (preg_match('#^/api/endpoints/(\d+)/images/advise$#', $path, $m) && $method === 'POST') {
             return $this->adviseImages((int) $m[1], $request, $user);
         }
@@ -348,6 +353,9 @@ final class App
         if ($path === '/api/nodes/join-token/rotate' && $method === 'POST') {
             return $this->rotateJoinToken($request, $user);
         }
+        if ($path === '/api/nodes/agent-bundle' && ($method === 'GET' || $method === 'POST')) {
+            return $this->downloadAgentBundle($request, $user);
+        }
         if (preg_match('#^/api/nodes/(\d+)/disable$#', $path, $m) && $method === 'POST') {
             return $this->setNodeEnabled((int) $m[1], false, $request, $user);
         }
@@ -372,6 +380,18 @@ final class App
             return $this->proxyDocker((int) $m[1], '/containers/json', $request, $user);
         }
 
+        if (preg_match('#^/api/endpoints/(\d+)/containers/updates$#', $path, $m) && $method === 'GET') {
+            return $this->listContainerImageUpdates((int) $m[1], $request, $user);
+        }
+
+        if (preg_match('#^/api/endpoints/(\d+)/containers/([^/]+)/updates$#', $path, $m) && $method === 'GET') {
+            return $this->getContainerImageUpdate((int) $m[1], $m[2], $request, $user);
+        }
+
+        if (preg_match('#^/api/endpoints/(\d+)/containers/([^/]+)/update$#', $path, $m) && $method === 'POST') {
+            return $this->updateContainerImage((int) $m[1], $m[2], $request, $user);
+        }
+
         // Clean logs (demuxed) — handy for UI
         if (preg_match('#^/api/endpoints/(\d+)/containers/([^/]+)/logs$#', $path, $m) && $method === 'GET') {
             return $this->containerLogs((int) $m[1], $m[2], $request, $user);
@@ -380,6 +400,16 @@ final class App
         // One-shot exec for console UI
         if (preg_match('#^/api/endpoints/(\d+)/containers/([^/]+)/exec$#', $path, $m) && $method === 'POST') {
             return $this->containerExec((int) $m[1], $m[2], $request, $user);
+        }
+
+        if (preg_match('#^/api/endpoints/(\d+)/bind-volumes$#', $path, $m) && $method === 'GET') {
+            return $this->listBindVolumes((int) $m[1], $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/bind-volumes$#', $path, $m) && $method === 'POST') {
+            return $this->createBindVolume((int) $m[1], $request, $user);
+        }
+        if (preg_match('#^/api/endpoints/(\d+)/bind-volumes/(\d+)$#', $path, $m) && $method === 'DELETE') {
+            return $this->deleteBindVolume((int) $m[1], (int) $m[2], $request, $user);
         }
 
         // Volume explorer (scoped to endpoint / remote agent)
@@ -852,6 +882,134 @@ final class App
     }
 
     /** @param array{id:int,username:string,role:int} $user */
+    private function listContainerImageUpdates(int $endpointId, Request $request, array $user): Response
+    {
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::READ);
+        if ($deny) {
+            return $deny;
+        }
+        $role = $this->endpointAcl->roleFor($user, $endpointId);
+        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
+        $docker = $this->dockerForEndpoint($ep);
+        $scope = $this->scopeForEndpoint($ep);
+        $force = $this->wantsStackUpdateRefresh($request);
+        try {
+            $all = $docker->json('GET', '/containers/json', null, ['all' => 'true']);
+            if (!is_array($all)) {
+                $all = [];
+            }
+            $filtered = [];
+            foreach ($all as $c) {
+                if (!is_array($c)) {
+                    continue;
+                }
+                $cid = (string) ($c['Id'] ?? '');
+                if ($cid === '' || !$scope->canAccessContainer($cid, $scopedUser)) {
+                    continue;
+                }
+                $filtered[] = $c;
+            }
+            $updates = $this->imageUpdates->checkContainers(
+                $filtered,
+                $docker,
+                $this->registriesWithPasswordsForUser($user),
+                $force,
+            );
+            return Response::json([
+                'Updates' => $updates,
+                'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
+                'Forced' => $force,
+            ]);
+        } catch (\Throwable $e) {
+            return Response::error($e->getMessage(), 502);
+        }
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function getContainerImageUpdate(int $endpointId, string $containerId, Request $request, array $user): Response
+    {
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::READ);
+        if ($deny) {
+            return $deny;
+        }
+        $role = $this->endpointAcl->roleFor($user, $endpointId);
+        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
+        $scope = $this->scopeForEndpoint($ep);
+        if (!$scope->canAccessContainer($containerId, $scopedUser)) {
+            return Response::error('Accès refusé à ce conteneur', 403);
+        }
+        $force = $this->wantsStackUpdateRefresh($request);
+        try {
+            $docker = $this->dockerForEndpoint($ep);
+            $info = $docker->json('GET', '/containers/' . rawurlencode($containerId) . '/json');
+            $image = trim((string) ($info['Config']['Image'] ?? ''));
+            $name = ltrim((string) ($info['Name'] ?? ''), '/');
+            $item = $this->imageUpdates->checkImageRef(
+                $image,
+                $docker,
+                $this->registriesWithPasswordsForUser($user),
+                $force,
+                $name !== '' ? $name : 'container',
+            );
+            return Response::json([
+                'Status' => $item['Status'],
+                'UpdateCount' => $item['Status'] === 'update' ? 1 : 0,
+                'Checked' => in_array($item['Status'], ['update', 'fresh', 'pinned'], true) ? 1 : 0,
+                'Image' => $item['Image'],
+                'Detail' => $item['Detail'],
+                'LocalDigest' => $item['LocalDigest'],
+                'RemoteDigest' => $item['RemoteDigest'],
+                'Images' => [$item],
+            ]);
+        } catch (\Throwable $e) {
+            $code = (int) $e->getCode();
+            return Response::error($e->getMessage(), $code >= 400 && $code < 600 ? $code : 502);
+        }
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function updateContainerImage(int $endpointId, string $containerId, Request $request, array $user): Response
+    {
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::OPERATE);
+        if ($deny) {
+            return $deny;
+        }
+        $role = $this->endpointAcl->roleFor($user, $endpointId);
+        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
+        $scope = $this->scopeForEndpoint($ep);
+        if (!$scope->canAccessContainer($containerId, $scopedUser)) {
+            return Response::error('Accès refusé à ce conteneur', 403);
+        }
+        $body = $request->json();
+        $pull = !array_key_exists('Pull', $body) || !empty($body['Pull']) || !empty($body['PullImage']);
+        try {
+            $docker = $this->dockerForEndpoint($ep);
+            $info = $docker->json('GET', '/containers/' . rawurlencode($containerId) . '/json');
+            $image = trim((string) ($info['Config']['Image'] ?? ''));
+            $creds = $image !== ''
+                ? $this->imageUpdates->registryCredsForImage($image, $this->registriesWithPasswordsForUser($user))
+                : [];
+            $result = (new ContainerRecreate($docker))->upgrade($containerId, $pull, $creds);
+            $this->audit(
+                $user,
+                'container.update_image',
+                'Mise à jour image « ' . $result['Name'] . ' » (' . $result['Image'] . ')',
+                $request,
+                [
+                    'endpointId' => $endpointId,
+                    'previousId' => $result['PreviousId'],
+                    'newId' => $result['Id'],
+                    'pulled' => $result['Pulled'],
+                ],
+            );
+            return Response::json($result);
+        } catch (\Throwable $e) {
+            $code = (int) $e->getCode();
+            return Response::error($e->getMessage(), $code >= 400 && $code < 600 ? $code : 502);
+        }
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
     private function containerLogs(int $endpointId, string $containerId, Request $request, array $user): Response
     {
         [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::READ);
@@ -1214,6 +1372,9 @@ final class App
             'name' => $name,
             'endpointId' => $endpointId,
         ]);
+        if (is_array($row)) {
+            $this->syncBindVolumesForStack($row);
+        }
         return Response::json($this->formatStack($row), 200);
     }
 
@@ -1281,7 +1442,11 @@ final class App
             'stackId' => $id,
             'name' => $stack['name'],
         ]);
-        return Response::json($this->formatStack($row ?? $stack));
+        $fresh = $row ?? $stack;
+        if (is_array($fresh)) {
+            $this->syncBindVolumesForStack($fresh);
+        }
+        return Response::json($this->formatStack($fresh));
     }
 
     /** @param array{id:int,username:string,role:int} $user */
@@ -1310,6 +1475,7 @@ final class App
                 $this->compose->down($stack['project_path'], $stack['name'], $env);
             }
             $this->compose->removeProjectDir($stack['project_path']);
+            $this->repo->pruneStackBindVolumes($id, []);
             $this->repo->deleteStack($id);
             $this->imageUpdates->invalidateStack($id);
         } catch (\Throwable $e) {
@@ -1421,11 +1587,180 @@ final class App
         $role = $this->endpointAcl->roleFor($user, $endpointId);
         $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
         $docker = $this->dockerForEndpoint($ep);
+        $bind = $this->repo->getBindVolumeByName($endpointId, $name);
+        if ($bind) {
+            $hostPath = (string) ($bind['host_path'] ?? '');
+            return [new VolumeBrowser($docker, $hostPath), null];
+        }
         $scope = new DockerScope($docker, $this->repo);
         if (!$scope->canAccessVolume($name, $scopedUser)) {
             return [null, Response::error('Volume introuvable ou accès refusé', 404)];
         }
         return [new VolumeBrowser($docker), null];
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function listBindVolumes(int $endpointId, Request $request, array $user): Response
+    {
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::READ);
+        if ($deny) {
+            return $deny;
+        }
+        unset($ep);
+        // Refresh stack-sourced binds so compose bind mounts appear in Volumes
+        $this->syncBindVolumesFromEndpointStacks($endpointId);
+        $rows = $this->repo->listBindVolumes($endpointId);
+        return Response::json([
+            'Volumes' => array_map([$this, 'formatBindVolume'], $rows),
+        ]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function createBindVolume(int $endpointId, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::ADMIN);
+        if ($deny) {
+            return $deny;
+        }
+        unset($ep);
+        $body = $request->json();
+        $name = trim((string) ($body['Name'] ?? $body['name'] ?? ''));
+        $hostPath = trim((string) ($body['HostPath'] ?? $body['hostPath'] ?? $body['Path'] ?? ''));
+        if ($name === '' || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/', $name)) {
+            return Response::error('Nom invalide (lettres, chiffres, _ . -)', 400);
+        }
+        if ($hostPath === '' || !str_starts_with($hostPath, '/') || str_contains($hostPath, "\0")) {
+            return Response::error('Chemin hôte absolu requis (ex. /data/app)', 400);
+        }
+        $hostPath = rtrim(str_replace('\\', '/', $hostPath), '/') ?: '/';
+        if ($this->repo->getBindVolumeByName($endpointId, $name)) {
+            return Response::error('Un volume bind portant ce nom existe déjà', 409);
+        }
+        $row = $this->repo->upsertBindVolume(
+            $endpointId,
+            $name,
+            $hostPath,
+            'manual',
+            null,
+            '',
+            Ownership::username($user),
+        );
+        $this->audit($user, 'bind_volume.create', 'Déclaration du bind « ' . $name . ' » → ' . $hostPath, $request, [
+            'endpointId' => $endpointId,
+            'name' => $name,
+            'hostPath' => $hostPath,
+        ]);
+        return Response::json($this->formatBindVolume($row), 201);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    private function deleteBindVolume(int $endpointId, int $id, Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::ADMIN);
+        if ($deny) {
+            return $deny;
+        }
+        unset($ep);
+        $row = $this->repo->getBindVolume($id);
+        if (!$row || (int) ($row['endpoint_id'] ?? 0) !== $endpointId) {
+            return Response::error('Bind introuvable', 404);
+        }
+        $this->repo->deleteBindVolume($id);
+        $this->audit($user, 'bind_volume.delete', 'Suppression de la déclaration bind « ' . ($row['name'] ?? '') . ' »', $request, [
+            'endpointId' => $endpointId,
+            'name' => (string) ($row['name'] ?? ''),
+            'hostPath' => (string) ($row['host_path'] ?? ''),
+        ]);
+        return Response::empty(204);
+    }
+
+    /** @param array<string, mixed> $row */
+    private function formatBindVolume(array $row): array
+    {
+        return [
+            'Id' => (int) ($row['id'] ?? 0),
+            'Name' => (string) ($row['name'] ?? ''),
+            'Driver' => 'bind',
+            'Mountpoint' => (string) ($row['host_path'] ?? ''),
+            'HostPath' => (string) ($row['host_path'] ?? ''),
+            'Source' => (string) ($row['source'] ?? 'manual'),
+            'StackId' => isset($row['stack_id']) && $row['stack_id'] !== null ? (int) $row['stack_id'] : null,
+            'StackName' => (string) ($row['stack_name'] ?? ''),
+            'CreatedBy' => (string) ($row['created_by'] ?? ''),
+            'CreatedAt' => (int) ($row['created_at'] ?? 0),
+            'Labels' => [
+                'wharfmaster.bind' => '1',
+                'wharfmaster.bind.source' => (string) ($row['source'] ?? 'manual'),
+            ],
+            'Scope' => 'local',
+            'Options' => null,
+            'UsageData' => null,
+            '_bind' => true,
+        ];
+    }
+
+    private function syncBindVolumesFromEndpointStacks(int $endpointId): void
+    {
+        $stacks = $this->repo->listStacksForUser(null, true, $endpointId);
+        foreach ($stacks as $stack) {
+            $this->syncBindVolumesForStack($stack);
+        }
+    }
+
+    /** @param array<string, mixed> $stack */
+    private function syncBindVolumesForStack(array $stack): void
+    {
+        $stackId = (int) ($stack['id'] ?? 0);
+        $endpointId = (int) ($stack['endpoint_id'] ?? 0);
+        $stackName = (string) ($stack['name'] ?? '');
+        if ($stackId <= 0 || $endpointId <= 0) {
+            return;
+        }
+        $path = (string) ($stack['project_path'] ?? '');
+        $entry = (string) ($stack['entry_point'] ?? 'docker-compose.yml');
+        $content = '';
+        try {
+            if ($path !== '') {
+                $content = $this->compose->readComposeFile($path, $entry);
+            }
+        } catch (\Throwable) {
+            $content = '';
+        }
+        if ($content === '') {
+            return;
+        }
+        $binds = BindVolumeExtractor::fromCompose($content, $stackName, $path);
+        $keep = [];
+        foreach ($binds as $b) {
+            $name = (string) ($b['name'] ?? '');
+            $host = (string) ($b['hostPath'] ?? '');
+            if ($name === '' || $host === '') {
+                continue;
+            }
+            // Don't overwrite a manual bind with the same name
+            $existing = $this->repo->getBindVolumeByName($endpointId, $name);
+            if ($existing && (string) ($existing['source'] ?? '') === 'manual') {
+                $keep[] = $name;
+                continue;
+            }
+            $this->repo->upsertBindVolume(
+                $endpointId,
+                $name,
+                $host,
+                'stack',
+                $stackId,
+                $stackName,
+                (string) ($stack['created_by'] ?? ''),
+            );
+            $keep[] = $name;
+        }
+        $this->repo->pruneStackBindVolumes($stackId, $keep);
     }
 
     /** @param array{id:int,username:string,role:int} $user */
@@ -2029,7 +2364,7 @@ final class App
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/2.0.1',
+                'User-Agent: WharfMaster/2.1.0',
             ],
         ]);
         $body = curl_exec($ch);
@@ -2112,8 +2447,8 @@ final class App
 
     private function metricsChartHours(): int
     {
-        $v = (int) ($this->repo->getSetting('metrics_chart_hours', '24') ?? '24');
-        return max(1, min(168, $v > 0 ? $v : 24));
+        $v = (int) ($this->repo->getSetting('metrics_chart_hours', '72') ?? '72');
+        return max(1, min(168, $v > 0 ? $v : 72));
     }
 
     private function metricsRetentionDays(): int
@@ -2237,7 +2572,7 @@ final class App
         }
 
         if (array_key_exists('MetricsChartHours', $body) || array_key_exists('metricsChartHours', $body)) {
-            $hours = (int) ($body['MetricsChartHours'] ?? $body['metricsChartHours'] ?? 24);
+            $hours = (int) ($body['MetricsChartHours'] ?? $body['metricsChartHours'] ?? 72);
             $hours = max(1, min(168, $hours));
             $this->repo->setSetting('metrics_chart_hours', (string) $hours);
         }
@@ -3009,7 +3344,233 @@ MD;
             'PublicURL' => $public,
             'AdvertiseURL' => $this->buildAdvertiseUrl($nodeHost, $nodePort),
             'InstallCommand' => $cmd,
+            'BundleDownload' => '/api/nodes/agent-bundle',
         ];
+    }
+
+    /**
+     * ZIP pack for manual agent deploy: sources + Dockerfile + compose + deploy.sh + .env.
+     *
+     * @param array{id:int,username:string,role:int} $user
+     */
+    private function downloadAgentBundle(Request $request, array $user): Response
+    {
+        if ($err = $this->requireAdmin($user)) {
+            return $err;
+        }
+        if (!class_exists(\ZipArchive::class)) {
+            return Response::error('Extension PHP zip indisponible', 500);
+        }
+
+        $body = strtoupper($request->method) === 'POST' ? $request->json() : [];
+        if (!is_array($body)) {
+            $body = [];
+        }
+        $token = trim((string) ($body['Token'] ?? $body['token'] ?? $request->query('token') ?? ''));
+        $nodeHost = trim((string) ($body['NodeHost'] ?? $body['nodeHost'] ?? $request->query('nodeHost') ?? ''));
+        $nodeName = trim((string) ($body['NodeName'] ?? $body['nodeName'] ?? $request->query('nodeName') ?? ''));
+        $nodePort = (int) ($body['NodePort'] ?? $body['nodePort'] ?? $request->query('nodePort') ?? 9001);
+        if ($nodePort < 1 || $nodePort > 65535) {
+            $nodePort = 9001;
+        }
+        $public = trim((string) ($body['PublicURL'] ?? $body['publicUrl'] ?? ''));
+        if ($public === '') {
+            $public = $this->resolvePublicBaseUrl($request);
+        }
+        $advertise = trim((string) ($body['AdvertiseURL'] ?? $body['advertiseUrl'] ?? ''));
+        if ($advertise === '') {
+            $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
+        }
+        if ($nodeName === '') {
+            $nodeName = 'mon-serveur';
+        }
+
+        $agentDir = $this->resolveAgentSourceDir();
+        if ($agentDir === null) {
+            return Response::error('Sources agent introuvables sur le serveur', 500);
+        }
+
+        $safeName = preg_replace('/[^a-zA-Z0-9._-]+/', '-', $nodeName) ?: 'agent';
+        $rootName = 'wharfmaster-agent-' . $safeName;
+        $zipPath = sys_get_temp_dir() . '/' . $rootName . '-' . bin2hex(random_bytes(4)) . '.zip';
+
+        try {
+            $zip = new \ZipArchive();
+            if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+                throw new \RuntimeException('Impossible de créer l’archive ZIP', 500);
+            }
+
+            $required = ['Dockerfile', 'agent.php', 'router.php', 'entrypoint.sh'];
+            foreach ($required as $file) {
+                $path = $agentDir . '/' . $file;
+                if (!is_file($path)) {
+                    throw new \RuntimeException('Fichier agent manquant : ' . $file, 500);
+                }
+                $zip->addFile($path, $rootName . '/' . $file);
+            }
+
+            $optional = ['install.sh', 'docker-compose.yml', 'deploy.sh', 'README.md', '.env.example'];
+            foreach ($optional as $file) {
+                $path = $agentDir . '/' . $file;
+                if (is_file($path)) {
+                    $zip->addFile($path, $rootName . '/' . $file);
+                }
+            }
+
+            // Prefer in-tree templates; fall back to generated content if missing
+            if (!is_file($agentDir . '/docker-compose.yml')) {
+                $zip->addFromString($rootName . '/docker-compose.yml', $this->agentComposeYmlTemplate());
+            }
+            if (!is_file($agentDir . '/deploy.sh')) {
+                $zip->addFromString($rootName . '/deploy.sh', $this->agentDeployShTemplate());
+            }
+            if (!is_file($agentDir . '/README.md')) {
+                $zip->addFromString($rootName . '/README.md', $this->agentReadmeTemplate());
+            }
+
+            $tlsCn = preg_replace('#^https?://#i', '', $advertise) ?? '';
+            $tlsCn = preg_replace('#[:/].*$#', '', $tlsCn) ?? '';
+            if ($tlsCn === '') {
+                $tlsCn = $nodeName;
+            }
+
+            $env = $this->buildAgentEnvFile([
+                'WHARFMASTER_URL' => rtrim($public, '/'),
+                'JOIN_TOKEN' => $token !== '' ? $token : 'wmj_REMPLACER',
+                'ADVERTISE_URL' => $advertise,
+                'NODE_NAME' => $nodeName,
+                'AGENT_HOST_PORT' => (string) $nodePort,
+                'AGENT_TLS_CN' => $tlsCn,
+                'AGENT_TLS_DAYS' => '365',
+                'STACKS_DIR' => '/var/lib/wharfmaster/stacks',
+                'AGENT_IMAGE' => 'wharfmaster-agent:local',
+            ]);
+            $zip->addFromString($rootName . '/.env', $env);
+            if (!is_file($agentDir . '/.env.example')) {
+                $zip->addFromString($rootName . '/.env.example', $this->agentEnvExampleTemplate());
+            }
+
+            $zip->addFromString($rootName . '/MANIFEST.txt', implode("\n", [
+                'WharfMaster agent pack',
+                'Generated: ' . date('c'),
+                'NodeName: ' . $nodeName,
+                'Advertise: ' . $advertise,
+                'Principal: ' . rtrim($public, '/'),
+                'Token included: ' . ($token !== '' ? 'yes' : 'no (fill JOIN_TOKEN in .env)'),
+                '',
+                'Run: chmod +x deploy.sh entrypoint.sh install.sh && ./deploy.sh',
+                '',
+            ]));
+
+            $zip->close();
+            $blob = (string) file_get_contents($zipPath);
+            $this->audit($user, 'node.agent_bundle', 'Téléchargement pack agent ZIP', $request, [
+                'nodeName' => $nodeName,
+                'advertise' => $advertise,
+                'bytes' => strlen($blob),
+                'hasToken' => $token !== '',
+            ]);
+
+            return new Response(200, $blob, [
+                'Content-Type' => 'application/zip',
+                'Content-Disposition' => 'attachment; filename="' . $rootName . '.zip"',
+                'Cache-Control' => 'no-store',
+                'Content-Security-Policy' => "default-src 'none'",
+            ]);
+        } catch (\Throwable $e) {
+            $status = $e->getCode() >= 400 && $e->getCode() < 600 ? (int) $e->getCode() : 500;
+            return Response::error($e->getMessage() !== '' ? $e->getMessage() : 'Échec génération pack agent', $status);
+        } finally {
+            @unlink($zipPath);
+        }
+    }
+
+    private function resolveAgentSourceDir(): ?string
+    {
+        $candidates = [
+            dirname(__DIR__) . '/agent',
+            dirname(__DIR__) . '/public/agent',
+        ];
+        foreach ($candidates as $dir) {
+            if (is_dir($dir) && is_file($dir . '/agent.php') && is_file($dir . '/Dockerfile')) {
+                return $dir;
+            }
+        }
+        return null;
+    }
+
+    /** @param array<string, string> $vars */
+    private function buildAgentEnvFile(array $vars): string
+    {
+        $lines = [
+            '# WharfMaster agent — généré depuis le principal. chmod 600 .env',
+            '# Puis: chmod +x deploy.sh && ./deploy.sh',
+            '',
+        ];
+        foreach ($vars as $k => $v) {
+            $lines[] = $k . '=' . $v;
+        }
+        $lines[] = '';
+        $lines[] = '# Rempli automatiquement par ./deploy.sh après le join :';
+        $lines[] = '# NODE_SECRET=';
+        $lines[] = '';
+        return implode("\n", $lines);
+    }
+
+    private function agentComposeYmlTemplate(): string
+    {
+        return <<<'YAML'
+services:
+  agent:
+    build: .
+    image: ${AGENT_IMAGE:-wharfmaster-agent:local}
+    container_name: wharfmaster-agent
+    restart: unless-stopped
+    environment:
+      NODE_SECRET: ${NODE_SECRET:?NODE_SECRET requis}
+      DOCKER_SOCKET: /var/run/docker.sock
+      AGENT_PORT: "9001"
+      AGENT_TLS_CN: ${AGENT_TLS_CN:-wharfmaster-agent}
+      AGENT_TLS_DAYS: ${AGENT_TLS_DAYS:-365}
+      AGENT_CERT_DIR: /data/certs
+      AGENT_STACKS_DIR: /data/stacks
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - wharfmaster-agent-certs:/data/certs
+      - ${STACKS_DIR:-/var/lib/wharfmaster/stacks}:/data/stacks
+    ports:
+      - "${AGENT_HOST_PORT:-9001}:9001"
+
+volumes:
+  wharfmaster-agent-certs:
+YAML;
+    }
+
+    private function agentDeployShTemplate(): string
+    {
+        $path = dirname(__DIR__) . '/agent/deploy.sh';
+        if (is_file($path)) {
+            return (string) file_get_contents($path);
+        }
+        return "#!/bin/sh\necho 'deploy.sh manquant'\nexit 1\n";
+    }
+
+    private function agentReadmeTemplate(): string
+    {
+        $path = dirname(__DIR__) . '/agent/README.md';
+        if (is_file($path)) {
+            return (string) file_get_contents($path);
+        }
+        return "# WharfMaster agent\n\nchmod +x deploy.sh && ./deploy.sh\n";
+    }
+
+    private function agentEnvExampleTemplate(): string
+    {
+        $path = dirname(__DIR__) . '/agent/.env.example';
+        if (is_file($path)) {
+            return (string) file_get_contents($path);
+        }
+        return "WHARFMASTER_URL=https://VOTRE-SERVEUR\nJOIN_TOKEN=wmj_\nADVERTISE_URL=https://IP:9001\nNODE_NAME=mon-serveur\nAGENT_HOST_PORT=9001\n";
     }
 
     /** URL publique configurée, sinon origine de la requête courante. */
@@ -3070,7 +3631,7 @@ MD;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.0.0');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.1.0');
         return 'curl -fsSL ' . escapeshellarg($base . '/public/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)
@@ -4415,7 +4976,7 @@ MD;
     private function softAdviseOneImage(array $ep, int $endpointId, string $ref): array
     {
         $cached = $this->repo->getLatestImageScan($endpointId, $ref, '');
-        if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - ImageScanner::CACHE_TTL) {
+        if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - ImageUpdateChecker::STACK_CACHE_TTL) {
             $summary = json_decode((string) ($cached['summary_json'] ?? '{}'), true);
             return [
                 'ImageRef' => $ref,
@@ -4424,6 +4985,7 @@ MD;
                 'Summary' => is_array($summary) ? $summary : [],
                 'FromCache' => true,
                 'Warning' => null,
+                'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
             ];
         }
 
@@ -4522,6 +5084,59 @@ MD;
             'Items' => $items,
             'TrivyAvailable' => $this->imageScanner->available(),
             'TrivyEnabled' => true,
+            'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
+        ]);
+    }
+
+    /**
+     * Ensure CVE scans exist for the given image refs (cache TTL = image update checks).
+     * Soft / fail-open — used when opening the Images page.
+     *
+     * @param array{id:int,username:string,role:int} $user
+     */
+    private function ensureImageScans(int $endpointId, Request $request, array $user): Response
+    {
+        if (!$this->endpointAcl->can($user, $endpointId, EndpointAcl::READ)) {
+            return Response::error('Accès refusé à ce nœud', 403);
+        }
+        if (!$this->trivyEnabled()) {
+            return Response::json([
+                'Items' => [],
+                'TrivyAvailable' => false,
+                'TrivyEnabled' => false,
+                'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
+            ]);
+        }
+        $ep = $this->repo->getEndpoint($endpointId);
+        if (!$ep) {
+            return Response::error('Nœud introuvable', 404);
+        }
+        $body = $request->json();
+        $refs = [];
+        if (isset($body['Images']) && is_array($body['Images'])) {
+            foreach ($body['Images'] as $img) {
+                $refs[] = trim((string) $img);
+            }
+        }
+        $single = trim((string) ($body['Image'] ?? $body['image'] ?? $body['Ref'] ?? $body['ref'] ?? ''));
+        if ($single !== '') {
+            $refs[] = $single;
+        }
+        $refs = array_values(array_unique(array_filter($refs, static fn (string $r): bool => $r !== '' && $r !== '<none>:<none>')));
+        $refs = array_slice($refs, 0, 80);
+
+        $items = [];
+        $kind = (string) ($ep['kind'] ?? 'local');
+        $trivyOk = $kind === 'agent' ? true : $this->imageScanner->available();
+        foreach ($refs as $ref) {
+            $items[] = $this->softAdviseOneImage($ep, $endpointId, $ref);
+        }
+
+        return Response::json([
+            'Items' => $items,
+            'TrivyAvailable' => $trivyOk,
+            'TrivyEnabled' => true,
+            'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
         ]);
     }
 
@@ -4586,10 +5201,12 @@ MD;
             return Response::error('Image requise', 400);
         }
 
-        if (!$force && $digest !== '') {
+        if (!$force) {
             $cached = $this->repo->getLatestImageScan($endpointId, $ref, $digest);
-            if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - ImageScanner::CACHE_TTL) {
+            $ttl = ImageUpdateChecker::STACK_CACHE_TTL;
+            if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - $ttl) {
                 $summary = json_decode((string) ($cached['summary_json'] ?? '{}'), true);
+                $findings = $this->repo->listImageFindings((int) $cached['id']);
                 return Response::json([
                     'Id' => (int) $cached['id'],
                     'ImageRef' => (string) $cached['image_ref'],
@@ -4597,7 +5214,18 @@ MD;
                     'Status' => (string) $cached['status'],
                     'ScannedAt' => (int) $cached['scanned_at'],
                     'Summary' => is_array($summary) ? $summary : [],
+                    'Findings' => array_map(static function (array $f): array {
+                        return [
+                            'Cve' => (string) ($f['cve'] ?? ''),
+                            'Package' => (string) ($f['package'] ?? ''),
+                            'Version' => (string) ($f['version'] ?? ''),
+                            'Severity' => (string) ($f['severity'] ?? ''),
+                            'Title' => (string) ($f['title'] ?? ''),
+                            'FixedVersion' => (string) ($f['fixed_version'] ?? ''),
+                        ];
+                    }, $findings),
                     'FromCache' => true,
+                    'CacheTtl' => $ttl,
                 ]);
             }
         }

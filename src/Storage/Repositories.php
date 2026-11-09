@@ -1314,4 +1314,101 @@ final class Repositories
         $stmt->execute([$scanId]);
         return $stmt->fetchAll() ?: [];
     }
+
+    /** @return list<array<string, mixed>> */
+    public function listBindVolumes(int $endpointId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM bind_volumes WHERE endpoint_id = ? ORDER BY name COLLATE NOCASE ASC'
+        );
+        $stmt->execute([$endpointId]);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    public function getBindVolumeByName(int $endpointId, string $name): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM bind_volumes WHERE endpoint_id = ? AND name = ? LIMIT 1'
+        );
+        $stmt->execute([$endpointId, $name]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    public function getBindVolume(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM bind_volumes WHERE id = ? LIMIT 1');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function upsertBindVolume(
+        int $endpointId,
+        string $name,
+        string $hostPath,
+        string $source = 'manual',
+        ?int $stackId = null,
+        string $stackName = '',
+        string $createdBy = '',
+    ): array {
+        $existing = $this->getBindVolumeByName($endpointId, $name);
+        if ($existing) {
+            $stmt = $this->pdo->prepare(
+                'UPDATE bind_volumes
+                 SET host_path = ?, source = ?, stack_id = ?, stack_name = ?
+                 WHERE id = ?'
+            );
+            $stmt->execute([
+                $hostPath,
+                $source,
+                $stackId,
+                $stackName,
+                (int) $existing['id'],
+            ]);
+            return $this->getBindVolume((int) $existing['id']) ?: $existing;
+        }
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO bind_volumes (endpoint_id, name, host_path, source, stack_id, stack_name, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        );
+        $stmt->execute([
+            $endpointId,
+            $name,
+            $hostPath,
+            $source,
+            $stackId,
+            $stackName,
+            $createdBy,
+            time(),
+        ]);
+        return $this->getBindVolume((int) $this->pdo->lastInsertId()) ?: [];
+    }
+
+    public function deleteBindVolume(int $id): void
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM bind_volumes WHERE id = ?');
+        $stmt->execute([$id]);
+    }
+
+    /** Remove stack-sourced binds that are no longer present for a stack. */
+    public function pruneStackBindVolumes(int $stackId, array $keepNames): void
+    {
+        $keep = array_values(array_filter(array_map('strval', $keepNames)));
+        if ($keep === []) {
+            $stmt = $this->pdo->prepare(
+                "DELETE FROM bind_volumes WHERE stack_id = ? AND source = 'stack'"
+            );
+            $stmt->execute([$stackId]);
+            return;
+        }
+        $placeholders = implode(',', array_fill(0, count($keep), '?'));
+        $stmt = $this->pdo->prepare(
+            "DELETE FROM bind_volumes WHERE stack_id = ? AND source = 'stack' AND name NOT IN ($placeholders)"
+        );
+        $stmt->execute([$stackId, ...$keep]);
+    }
 }

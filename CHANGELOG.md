@@ -2,6 +2,23 @@
 
 Toutes les dates sont en UTC+1.
 
+## [2.1.0] — 2026-11-09
+
+### Ajouté
+- **Images / CVE** : à l’ouverture de la page Images, scan auto de toutes les images taguées (pastille **CVE OK** / C·H·M) ; plus d’icône de scan manuel ; cache **24 h** aligné sur la vérif. de mises à jour d’images
+- **Volumes bind** : volumes host bind gérés côté admin + sync automatique depuis les Compose
+- **Conteneurs — métriques** : modal CPU / RAM / réseau ; icônes colorées selon la charge ; fenêtre / rétention partagées avec le dashboard (défaut 72 h / 90 j)
+- **Conteneurs — images** : indicateur de statut de mise à jour (comme les stacks) ; plus de Pull+recreate sur un conteneur (upgrade via stack)
+- **Agents** : téléchargement d’un **pack ZIP** (Dockerfile, sources, `docker-compose.yml`, `deploy.sh`, `.env` prérempli) en plus de la commande `curl | sh`
+
+### Amélioré
+- UX console : menus, logs colorés, modales redimensionnables, liste stacks
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.1.0`**
+- Endpoint admin : `POST|GET /api/nodes/agent-bundle`
+- Endpoint : `POST /api/endpoints/{id}/images/scans/ensure`
+
 ## [2.0.1] — 2026-11-08
 
 ### Amélioré
