@@ -132,9 +132,20 @@
         return { filename, size: blob.size };
       },
       users: () => request("/api/users"),
+      usersDirectory: () => request("/api/users/directory"),
       createUser: (Username, Password, Role = 2) => request("/api/users", { method: "POST", body: JSON.stringify({ Username, Password, Role }) }),
       deleteUser: (id) => request(`/api/users/${id}`, { method: "DELETE" }),
       changePassword: (id, payload) => request(`/api/users/${id}/passwd`, { method: "PUT", body: JSON.stringify(payload) }),
+      listShares: (type, endpointId, key) => {
+        const q = new URLSearchParams({
+          type: String(type),
+          endpointId: String(endpointId),
+          key: String(key)
+        });
+        return request(`/api/shares?${q.toString()}`);
+      },
+      createShare: (payload) => request("/api/shares", { method: "POST", body: JSON.stringify(payload) }),
+      deleteShare: (id) => request(`/api/shares/${id}`, { method: "DELETE" }),
       endpoints: () => request("/api/endpoints"),
       nodes: () => request("/api/nodes"),
       joinTokenMeta: () => request("/api/nodes/join-token"),
@@ -927,17 +938,8 @@
         else if (bag.state.route.startsWith("registries/")) await bag.viewRegistryBrowse(bag.state.route.split("/")[1]);
         else if (bag.state.route === "docs") await bag.viewDocs();
         else if (bag.state.route === "about") {
-          bag.root.innerHTML = bag.shell("\xC0 propos", `<div class="panel-card">
-          <div class="about-brand">${bag.brandLogoImg("about-logo-img")}</div>
-          <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>${bag.esc(bag.state.appVersion || "\u2026")}</strong> \u2014 CVE auto Images, volumes bind, m\xE9triques conteneur, pack agent ZIP.</p>
-          <p class="muted">Compatibilit\xE9 API : endpoints align\xE9s sur l\u2019API Portainer CE (clients / scripts existants).</p>
-          <p class="muted">Documentation : <a href="#docs">guide complet + API</a> \xB7 source <code>docs/DOCUMENTATION.md</code></p>
-          <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
-          <p class="muted">Socket : <code>unix:///var/run/docker.sock</code></p>
-          <p class="muted"><a href="/" target="_blank" rel="noopener">Site public</a> \u2014 pr\xE9sentation du projet et des outils.</p>
-          <p class="muted" style="margin-bottom:0">Licence : <strong>MIT</strong> \u2014 open source, libre d\u2019utilisation. Voir <code>LICENSE</code>.</p>
-        </div>`, { subtitle: "Informations sur l\u2019application" });
+          location.hash = "#dashboard";
+          return;
         } else await bag.viewDashboard();
       } catch (err) {
         bag.root.innerHTML = bag.shell("Erreur", `${bag.pageHeader("Erreur", false)}<div class="error-box">${bag.esc(err.message)}</div>`);
@@ -1619,7 +1621,6 @@
           <div class="sidebar-bottom">
             <nav class="nav">
               <a href="#docs" class="${bag.state.route === "docs" ? "active" : ""}" title="Documentation" aria-label="Documentation"><span class="nav-ico">${bag.ico("docs")}</span><span class="nav-label">Documentation</span></a>
-              <a href="#about" class="${bag.state.route === "about" ? "active" : ""}" title="\xC0 propos" aria-label="\xC0 propos"><span class="nav-ico">${bag.ico("about")}</span><span class="nav-label">\xC0 propos</span></a>
               <a href="#logout" title="D\xE9connexion" aria-label="D\xE9connexion"><span class="nav-ico">${bag.ico("logout")}</span><span class="nav-label">D\xE9connexion</span></a>
             </nav>
             <div class="engine-pill" title="${bag.esc((allMode ? "Tous les n\u0153uds" : engine) + " \xB7 " + nodeKind + " \xB7 " + nodeLabel)}">
@@ -1977,6 +1978,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       runSched,
       delSched,
       statsId,
+      shareType,
+      shareKey,
       extraClass = ""
     }) {
       const withLabel = !!(label && String(label).trim());
@@ -2001,10 +2004,65 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         runSched != null ? `data-run-sched="${bag.esc(runSched)}"` : "",
         delSched != null ? `data-del-sched="${bag.esc(delSched)}"` : "",
         statsId != null ? `data-stats-id="${bag.esc(statsId)}"` : "",
+        shareType != null ? `data-share-type="${bag.esc(shareType)}"` : "",
+        shareKey != null ? `data-share-key="${bag.esc(shareKey)}"` : "",
         tag === "button" ? 'type="button"' : ""
       ].filter(Boolean).join(" ");
       const labelHtml = withLabel ? `<span class="btn-label">${bag.esc(label)}</span>` : "";
       return `<${tag} ${attrs}><span class="btn-ico">${bag.ico(icon)}</span>${labelHtml}</${tag}>`;
+    };
+    bag.moreActions = function moreActions(primaryHtml, moreHtml) {
+      return `<div class="quick-actions">
+      ${primaryHtml}
+      <div class="qa-more">
+        <button type="button" class="btn btn-icon btn-sm" data-qa-toggle title="Plus d\u2019actions" aria-label="Plus d\u2019actions" aria-expanded="false" aria-haspopup="true">
+          <span class="btn-ico">${bag.ico("more")}</span>
+        </button>
+        <div class="qa-more-menu" hidden role="menu">${moreHtml}</div>
+      </div>
+    </div>`;
+    };
+    bag.closeMoreActions = function closeMoreActions(scope = document) {
+      scope.querySelectorAll(".qa-more.is-open").forEach((el) => {
+        el.classList.remove("is-open");
+        const toggle = el.querySelector("[data-qa-toggle]");
+        const menu = el.querySelector(".qa-more-menu");
+        if (toggle) toggle.setAttribute("aria-expanded", "false");
+        if (menu) menu.hidden = true;
+      });
+    };
+    bag.bindMoreActions = function bindMoreActions(scope = bag.root) {
+      if (!scope) return;
+      scope.querySelectorAll("[data-qa-toggle]").forEach((btn) => {
+        btn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const wrap = btn.closest(".qa-more");
+          if (!wrap) return;
+          const willOpen = !wrap.classList.contains("is-open");
+          bag.closeMoreActions(scope);
+          if (!willOpen) return;
+          wrap.classList.add("is-open");
+          btn.setAttribute("aria-expanded", "true");
+          const menu = wrap.querySelector(".qa-more-menu");
+          if (menu) menu.hidden = false;
+        };
+      });
+      scope.querySelectorAll(".qa-more-menu").forEach((menu) => {
+        menu.addEventListener("click", () => {
+          setTimeout(() => bag.closeMoreActions(scope), 0);
+        });
+      });
+      if (!bag._moreActionsDocBound) {
+        bag._moreActionsDocBound = true;
+        document.addEventListener("click", (e) => {
+          if (e.target.closest?.(".qa-more")) return;
+          bag.closeMoreActions();
+        });
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") bag.closeMoreActions();
+        });
+      }
     };
     bag.ico = function ico(name) {
       const icons = {
@@ -2045,7 +2103,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         search: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>',
         folder: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3.5h4l1.2 1.5H14V13H2V3.5z"/></svg>',
         file: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 2.5h5.5L12 5v8.5H4V2.5z"/><path d="M9.5 2.5V5H12"/></svg>',
-        link: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M6.5 9.5l3-3M7 11.5H5.2A2.2 2.2 0 015.2 7H7m2 1.5h1.8a2.2 2.2 0 010 4.4H9"/></svg>'
+        link: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M6.5 9.5l3-3M7 11.5H5.2A2.2 2.2 0 015.2 7H7m2 1.5h1.8a2.2 2.2 0 010 4.4H9"/></svg>',
+        more: '<svg viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.35"/><circle cx="8" cy="8" r="1.35"/><circle cx="12.5" cy="8" r="1.35"/></svg>'
       };
       return icons[name] || icons.dashboard;
     };
@@ -2647,8 +2706,224 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
     };
   }
 
-  // public/assets/js/src/views/dashboard.js
+  // public/assets/js/src/ui/share.js
   function install4() {
+    bag.shareBtn = function shareBtn(type, key, title = "Partager") {
+      return bag.iconBtn({
+        title,
+        icon: "users",
+        info: true,
+        shareType: type,
+        shareKey: key
+      });
+    };
+    bag.bindShareButtons = function bindShareButtons(scope = bag.root) {
+      if (!scope) return;
+      scope.querySelectorAll("[data-share-type]").forEach((btn) => {
+        btn.onclick = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const type = btn.dataset.shareType;
+          const key = btn.dataset.shareKey;
+          if (!type || !key) return;
+          await bag.openShareModal(type, key);
+        };
+      });
+    };
+    bag.openShareModal = async function openShareModal(type, key) {
+      const endpointId = bag.Api.getEndpointId();
+      if (!endpointId || bag.Api.isAllEndpoints()) {
+        alert("Choisissez un n\u0153ud pour partager");
+        return;
+      }
+      bag.closeAppModal();
+      const host = bag.modalHost();
+      const typeLabel = {
+        stack: "stack",
+        container: "conteneur",
+        volume: "volume",
+        network: "r\xE9seau"
+      }[type] || type;
+      host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Partager ce ${bag.esc(typeLabel)}</h3>
+              <div class="modal-sub mono">${bag.esc(key)}</div>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">\u2715</button>
+          </div>
+          <p class="muted" style="margin:0 0 14px">${type === "stack" ? "En plus des droits n\u0153uds. Inclut aussi les conteneurs, volumes et r\xE9seaux Compose de cette stack." : "En plus des droits n\u0153uds \u2014 le destinataire pourra utiliser cette ressource."}</p>
+          <div id="share-err"></div>
+          <div class="form-group">
+            <label class="field-label">Utilisateur</label>
+            <div class="img-search" id="share-user-wrap">
+              <input id="share-user-q" type="search" placeholder="Rechercher un utilisateur\u2026" autocomplete="off" spellcheck="false">
+              <div class="img-search-panel" id="share-user-panel" hidden>
+                <div class="img-search-hint muted" id="share-user-hint">Saisissez un nom\u2026</div>
+                <div id="share-user-results"></div>
+              </div>
+            </div>
+            <div class="img-selected" id="share-user-sel" hidden>
+              <span class="img-selected-badge is-local">User</span>
+              <code class="mono" id="share-user-ref"></code>
+              <button type="button" class="icon-btn img-selected-clear" id="share-user-clear" title="Changer" aria-label="Changer">\u2715</button>
+            </div>
+          </div>
+          <div class="actions-bar">
+            <button type="button" class="btn btn-primary" id="share-add">Partager</button>
+            <button type="button" class="btn" data-close-modal>Annuler</button>
+          </div>
+          <div class="section-title" style="margin-top:18px">D\xE9j\xE0 partag\xE9 avec</div>
+          <div id="share-list" class="muted">Chargement\u2026</div>
+        </div>
+      </div>`;
+      bag.bindAppModalChrome();
+      const errBox = document.getElementById("share-err");
+      const listEl = document.getElementById("share-list");
+      const addBtn = document.getElementById("share-add");
+      const qInput = document.getElementById("share-user-q");
+      const panel = document.getElementById("share-user-panel");
+      const resultsEl = document.getElementById("share-user-results");
+      const hintEl = document.getElementById("share-user-hint");
+      const wrap = document.getElementById("share-user-wrap");
+      const selBox = document.getElementById("share-user-sel");
+      const selRef = document.getElementById("share-user-ref");
+      const clearBtn = document.getElementById("share-user-clear");
+      let directory = [];
+      let selected = null;
+      const showErr = (msg) => {
+        errBox.innerHTML = msg ? `<div class="error-box">${bag.esc(msg)}</div>` : "";
+      };
+      const hidePanel = () => {
+        panel.hidden = true;
+      };
+      const clearSelection = () => {
+        selected = null;
+        selBox.hidden = true;
+        wrap.classList.remove("is-picked");
+        qInput.value = "";
+        qInput.focus();
+      };
+      const pickUser = (u) => {
+        selected = u;
+        selRef.textContent = u.Username;
+        selBox.hidden = false;
+        wrap.classList.add("is-picked");
+        qInput.value = "";
+        hidePanel();
+        showErr("");
+      };
+      const renderResults = (q) => {
+        const needle = String(q || "").trim().toLowerCase();
+        if (!needle) {
+          resultsEl.innerHTML = "";
+          hintEl.hidden = false;
+          hintEl.textContent = directory.length ? "Saisissez un nom\u2026" : "Aucun autre utilisateur";
+          panel.hidden = false;
+          return;
+        }
+        const matches = directory.filter((u) => String(u.Username || "").toLowerCase().includes(needle)).slice(0, 12);
+        hintEl.hidden = true;
+        if (!matches.length) {
+          resultsEl.innerHTML = `<div class="img-search-hint muted">Aucun r\xE9sultat pour \xAB ${bag.esc(q)} \xBB</div>`;
+        } else {
+          resultsEl.innerHTML = matches.map((u) => `
+          <button type="button" class="img-search-item" data-uid="${bag.esc(u.Id)}">
+            <div class="img-search-main">
+              <span class="img-search-name">${bag.esc(u.Username)}</span>
+            </div>
+          </button>`).join("");
+          resultsEl.querySelectorAll("[data-uid]").forEach((btn) => {
+            btn.onclick = () => {
+              const id = parseInt(btn.dataset.uid, 10);
+              const u = directory.find((x) => Number(x.Id) === id);
+              if (u) pickUser(u);
+            };
+          });
+        }
+        panel.hidden = false;
+      };
+      qInput.addEventListener("input", () => renderResults(qInput.value));
+      qInput.addEventListener("focus", () => renderResults(qInput.value));
+      qInput.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") hidePanel();
+      });
+      clearBtn.onclick = () => clearSelection();
+      document.addEventListener("click", function onDocClick(e) {
+        if (!host.contains(e.target)) return;
+        if (wrap.contains(e.target) || selBox.contains(e.target)) return;
+        hidePanel();
+      });
+      const renderList = (shares) => {
+        if (!shares.length) {
+          listEl.innerHTML = '<span class="muted">Aucun partage pour l\u2019instant.</span>';
+          return;
+        }
+        listEl.innerHTML = `<table class="data"><tbody>${shares.map((s) => `
+        <tr>
+          <td>${bag.esc(s.GranteeUsername || s.GranteeUserId)}</td>
+          <td class="actions">
+            <button type="button" class="btn btn-icon btn-sm btn-danger" data-unshare="${bag.esc(s.Id)}" title="Retirer">
+              <span class="btn-ico">${bag.ico("remove")}</span>
+            </button>
+          </td>
+        </tr>`).join("")}</tbody></table>`;
+        listEl.querySelectorAll("[data-unshare]").forEach((btn) => {
+          btn.onclick = async () => {
+            try {
+              await bag.withBusy(btn, () => bag.Api.deleteShare(btn.dataset.unshare));
+              await refresh();
+            } catch (err) {
+              showErr(err.message || String(err));
+            }
+          };
+        });
+      };
+      const refresh = async () => {
+        showErr("");
+        try {
+          const shares = await bag.Api.listShares(type, endpointId, key);
+          renderList(Array.isArray(shares) ? shares : []);
+        } catch (err) {
+          listEl.innerHTML = "";
+          showErr(err.message || String(err));
+        }
+      };
+      try {
+        const users = await bag.Api.usersDirectory();
+        directory = Array.isArray(users) ? users : [];
+      } catch (err) {
+        directory = [];
+        showErr(err.message || String(err));
+      }
+      addBtn.onclick = async () => {
+        if (!selected?.Id) {
+          showErr("Recherchez et s\xE9lectionnez un utilisateur");
+          qInput.focus();
+          return;
+        }
+        try {
+          await bag.withBusy(addBtn, () => bag.Api.createShare({
+            Type: type,
+            EndpointId: endpointId,
+            Key: key,
+            GranteeUserId: selected.Id
+          }));
+          clearSelection();
+          await refresh();
+        } catch (err) {
+          showErr(err.message || String(err));
+        }
+      };
+      await refresh();
+      qInput.focus();
+    };
+  }
+
+  // public/assets/js/src/views/dashboard.js
+  function install5() {
     bag.viewDashboard = async function viewDashboard() {
       if (bag.isAllNodes()) {
         await bag.viewDashboardAll();
@@ -3052,7 +3327,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
   }
 
   // public/assets/js/src/views/containers.js
-  function install5() {
+  function install6() {
     bag.openCreateContainerModal = async function openCreateContainerModal() {
       bag.closeAppModal();
       const host = bag.modalHost();
@@ -3677,25 +3952,26 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         const isRunning = st === "running" || st === "restarting";
         const rowCls = isRunning ? "" : "row-stopped";
         const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ""}`.toLowerCase();
-        const actions = all ? `<span class="muted">\u2014</span>` : `<div class="quick-actions">
-          ${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs conteneur", icon: "logs" })}
-          ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console" })}
-          ${bag.iconBtn({ modal: "inspect", id: c.Id, name, running: isRunning, title: "Inspecter", icon: "inspect" })}
-          ${bag.iconBtn({
-          modal: "stats",
-          id: c.Id,
-          name,
-          running: isRunning,
-          title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
-          icon: "stats",
-          statsId: c.Id,
-          extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
-        })}
-          ${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
-          ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
-          ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
-          ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}
-        </div>`;
+        const actions = all ? `<span class="muted">\u2014</span>` : bag.moreActions(
+          `${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
+           ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
+           ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
+           ${bag.iconBtn({
+            modal: "stats",
+            id: c.Id,
+            name,
+            running: isRunning,
+            title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
+            icon: "stats",
+            statsId: c.Id,
+            extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
+          })}
+           ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}`,
+          `${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs conteneur", icon: "logs", label: "Logs" })}
+           ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console", label: "Console" })}
+           ${bag.iconBtn({ modal: "inspect", id: c.Id, name, running: isRunning, title: "Inspecter", icon: "inspect", label: "Inspecter" })}
+           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || c.Id, label: "Partager" })}`
+        );
         return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}">
         ${all ? "" : bag.bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${bag.esc(c._nodeName || "\u2014")}</td>` : ""}
@@ -3742,6 +4018,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         </table>
       </div>`, { subtitle: all ? "Vue agr\xE9g\xE9e (lecture)" : "G\xE9rez vos conteneurs Docker" });
       bag.bindRefresh();
+      bag.bindShareButtons();
+      bag.bindMoreActions();
       bag.bindPagedSearch("containers");
       bag.bindTableSort("containers", () => bag.viewContainers());
       if (!all) {
@@ -3843,23 +4121,26 @@ ${title}`;
       ${bag.pageHeader(name, false)}
       <div class="toolbar">
         ${bag.iconBtn({ tag: "a", href: "#containers", title: "Retour", icon: "back" })}
-        ${bag.iconBtn({ modal: "logs", id, name, running, title: "Logs conteneur", icon: "logs" })}
-        ${bag.iconBtn({ modal: "console", id, name, running, title: "Console", icon: "console" })}
-        ${bag.iconBtn({ modal: "inspect", id, name, running, title: "Inspecter", icon: "inspect" })}
-        ${bag.iconBtn({
-        modal: "stats",
-        id,
-        name,
-        running,
-        title: running ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
-        icon: "stats",
-        statsId: id,
-        extraClass: running ? "is-stats-ok" : "is-stats-off"
-      })}
-        ${bag.iconBtn({ act: "start", title: "D\xE9marrer", icon: "start", success: !running })}
-        ${bag.iconBtn({ act: "stop", title: "Arr\xEAter", icon: "stop", danger: running })}
-        ${bag.iconBtn({ act: "restart", title: "Red\xE9marrer", icon: "restart" })}
-        ${bag.iconBtn({ act: "remove", title: "Supprimer", icon: "remove", danger: true })}
+        ${bag.moreActions(
+        `${bag.iconBtn({ act: "start", title: "D\xE9marrer", icon: "start", success: !running })}
+           ${bag.iconBtn({ act: "stop", title: "Arr\xEAter", icon: "stop", danger: running })}
+           ${bag.iconBtn({ act: "restart", title: "Red\xE9marrer", icon: "restart" })}
+           ${bag.iconBtn({
+          modal: "stats",
+          id,
+          name,
+          running,
+          title: running ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
+          icon: "stats",
+          statsId: id,
+          extraClass: running ? "is-stats-ok" : "is-stats-off"
+        })}
+           ${bag.iconBtn({ act: "remove", title: "Supprimer", icon: "remove", danger: true })}`,
+        `${bag.iconBtn({ modal: "logs", id, name, running, title: "Logs conteneur", icon: "logs", label: "Logs" })}
+           ${bag.iconBtn({ modal: "console", id, name, running, title: "Console", icon: "console", label: "Console" })}
+           ${bag.iconBtn({ modal: "inspect", id, name, running, title: "Inspecter", icon: "inspect", label: "Inspecter" })}
+           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || id, label: "Partager" })}`
+      )}
         <div class="spacer"></div>
         ${bag.formatPorts(ports)}
       </div>
@@ -3867,6 +4148,8 @@ ${title}`;
       ${body}
     `, { subtitle: "D\xE9tail du conteneur" });
       bag.bindModalActions();
+      bag.bindShareButtons();
+      bag.bindMoreActions();
       bag.root.querySelectorAll(".tab").forEach((el) => {
         el.onclick = async () => {
           const t = el.dataset.tab;
@@ -4303,7 +4586,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/images.js
-  function install6() {
+  function install7() {
     bag.parseImageRef = function parseImageRef(ref) {
       const raw = String(ref || "").trim();
       if (!raw) return { fromImage: "", tag: "latest" };
@@ -4946,7 +5229,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/volumes.js
-  function install7() {
+  function install8() {
     bag.openCreateVolumeModal = async function openCreateVolumeModal() {
       bag.closeAppModal();
       const isAdmin = Number(bag.state.user?.Role) === 1;
@@ -5083,6 +5366,7 @@ ${title}`;
         const canDelete = !all && (!isBind || isAdmin);
         const actions = all ? '<span class="muted">\u2014</span>' : `<div class="quick-actions">
         ${bag.iconBtn({ tag: "a", href: `#volumes/${encodeURIComponent(v.Name)}`, title: "Explorer", icon: "search" })}
+        ${!isBind ? bag.shareBtn("volume", v.Name) : ""}
         ${canDelete ? bag.iconBtn({
           name: v.Name,
           title: isBind ? "Retirer la d\xE9claration bind" : "Supprimer",
@@ -5126,6 +5410,7 @@ ${title}`;
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? "Vue agr\xE9g\xE9e (lecture)" : "Volumes Docker et binds" });
       bag.bindRefresh();
+      bag.bindShareButtons();
       bag.bindPagedSearch("volumes");
       bag.bindTableSort("volumes", () => bag.viewVolumes());
       bag.root.querySelectorAll("[data-vol-key]").forEach((btn) => {
@@ -5820,7 +6105,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/networks.js
-  function install8() {
+  function install9() {
     bag.openCreateNetworkModal = async function openCreateNetworkModal() {
       bag.closeAppModal();
       const host = bag.modalHost();
@@ -5926,6 +6211,7 @@ ${title}`;
       <td>${usageCell}</td>
       <td>${bag.esc(n.Scope)}</td>
       <td class="actions">${all ? '<span class="muted">\u2014</span>' : `<div class="quick-actions">
+        ${isBuiltin ? "" : bag.shareBtn("network", n.Name || n.Id)}
         ${isBuiltin ? "" : bag.iconBtn({ id: n.Id, title: "Supprimer", icon: "remove", danger: true })}
       </div>`}</td>
     </tr>`;
@@ -5955,6 +6241,7 @@ ${title}`;
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun r\xE9seau</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? "Vue agr\xE9g\xE9e (lecture)" : "R\xE9seaux Docker" });
       bag.bindRefresh();
+      bag.bindShareButtons();
       bag.bindPagedSearch("networks");
       bag.bindTableSort("networks", () => bag.viewNetworks());
       bag.root.querySelectorAll("[data-net-key]").forEach((btn) => {
@@ -6009,26 +6296,116 @@ ${title}`;
         });
       });
     };
+    bag.networkEndpointForContainer = function networkEndpointForContainer(net, container) {
+      return bag.containerNetworkEntries(container).find((e) => {
+        if (e.name === net?.Name) return true;
+        const eid = bag.normalizeImageRef(e.id);
+        const nid = bag.normalizeImageRef(net?.Id);
+        return nid && eid && (nid === eid || nid.startsWith(eid) || eid.startsWith(nid));
+      }) || null;
+    };
+    bag.networkIpamSummary = function networkIpamSummary(net) {
+      const confs = Array.isArray(net?.IPAM?.Config) ? net.IPAM.Config : [];
+      const first = confs.find((c) => c && (c.Subnet || c.Gateway)) || confs[0] || {};
+      const parts = [];
+      if (first.Subnet) parts.push(String(first.Subnet));
+      if (first.Gateway) parts.push(`gw ${first.Gateway}`);
+      return parts.join(" \xB7 ");
+    };
+    bag.formatPortChips = function formatPortChips(ports) {
+      if (!ports || !ports.length) return '<span class="muted">\u2014</span>';
+      const seen = /* @__PURE__ */ new Set();
+      const chips = [];
+      for (const p of ports) {
+        const pub = Number(p.PublicPort ?? p.publicPort) || 0;
+        const priv = p.PrivatePort || p.privatePort;
+        const type = (p.Type || p.type || "tcp").toLowerCase();
+        if (!priv) continue;
+        const label = pub > 0 ? `${pub}:${priv}/${type}` : `${priv}/${type}`;
+        const key = label;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        chips.push(`<span class="port-chip">${bag.esc(label)}</span>`);
+      }
+      return chips.length ? chips.join("") : '<span class="muted">\u2014</span>';
+    };
     bag.openNetworkUsersModal = function openNetworkUsersModal(net, users) {
-      bag.openResourceUsersModal({
-        title: "Conteneurs utilisant ce r\xE9seau",
-        subtitle: `${net?.Name || ""} \xB7 ${bag.shortId(net?.Id)}`,
-        users,
-        extraCol: (c) => {
-          const entry = bag.containerNetworkEntries(c).find((e) => {
-            if (e.name === net?.Name) return true;
-            const eid = bag.normalizeImageRef(e.id);
-            const nid = bag.normalizeImageRef(net?.Id);
-            return nid && eid && (nid === eid || nid.startsWith(eid) || eid.startsWith(nid));
-          });
-          return entry?.ip || c.Image || "";
-        }
+      bag.closeAppModal();
+      const host = bag.modalHost();
+      const list = Array.isArray(users) ? users : [];
+      const ipam = bag.networkIpamSummary(net);
+      const hubMeta = [net?.Driver, ipam].filter(Boolean).join(" \xB7 ");
+      const nodes = list.map((c) => {
+        const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : bag.shortId(c.Id);
+        const entry = bag.networkEndpointForContainer(net, c);
+        const ip = entry?.ip || "\u2014";
+        const st = String(c.State || "").toLowerCase();
+        const running = st === "running" || st === "restarting";
+        return `<button type="button" class="net-schema-node ${running ? "is-up" : "is-down"}" data-go-container="${bag.esc(c.Id)}" title="${bag.esc(name)}">
+        <span class="net-schema-link" aria-hidden="true"></span>
+        <span class="net-schema-node-name">${bag.esc(name)}</span>
+        <span class="net-schema-node-ip mono">${bag.esc(ip)}</span>
+        <span class="net-schema-node-ports">${bag.formatPortChips(c.Ports || [])}</span>
+      </button>`;
+      }).join("");
+      const rows = list.map((c) => {
+        const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : bag.shortId(c.Id);
+        const entry = bag.networkEndpointForContainer(net, c);
+        return `<tr>
+        <td><a class="res-user-link" href="#containers/${bag.esc(c.Id)}">${bag.esc(name)}</a></td>
+        <td class="mono">${bag.esc(entry?.ip || "\u2014")}</td>
+        <td>${bag.formatPorts(c.Ports || [])}</td>
+        <td>${bag.badge(c.State)}</td>
+      </tr>`;
+      }).join("");
+      host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form-wide" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Sch\xE9ma r\xE9seau</h3>
+              <p class="modal-sub mono">${bag.esc(net?.Name || "")} \xB7 ${bag.esc(bag.shortId(net?.Id))}</p>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">\u2715</button>
+          </div>
+          <div class="net-schema" aria-label="Sch\xE9ma des conteneurs sur ce r\xE9seau">
+            <div class="net-schema-hub">
+              <div class="net-schema-hub-ico">${bag.ico("networks")}</div>
+              <div class="net-schema-hub-name">${bag.esc(net?.Name || "r\xE9seau")}</div>
+              <div class="net-schema-hub-meta muted">${bag.esc(hubMeta || `${list.length} conteneur${list.length > 1 ? "s" : ""}`)}</div>
+            </div>
+            <div class="net-schema-nodes">
+              ${nodes || '<div class="muted" style="padding:12px">Aucun conteneur connect\xE9</div>'}
+            </div>
+          </div>
+          <div class="section-title" style="margin-top:16px">D\xE9tail</div>
+          <div class="table-wrap" style="margin:0">
+            <table class="data">
+              <thead><tr><th>Conteneur</th><th>IP</th><th>Ports</th><th>\xC9tat</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="4" class="empty">Aucun conteneur</td></tr>`}</tbody>
+            </table>
+          </div>
+          <div class="actions-bar" style="margin-top:14px">
+            <button type="button" class="btn" data-close-modal>Fermer</button>
+          </div>
+        </div>
+      </div>`;
+      bag.bindAppModalChrome();
+      const goContainer = (id) => {
+        bag.closeAppModal();
+        location.hash = `#containers/${id}`;
+      };
+      host.querySelectorAll("[data-go-container]").forEach((btn) => {
+        btn.addEventListener("click", () => goContainer(btn.dataset.goContainer));
+      });
+      host.querySelectorAll("a.res-user-link").forEach((a) => {
+        a.addEventListener("click", () => bag.closeAppModal());
       });
     };
   }
 
   // public/assets/js/src/views/stacks.js
-  function install9() {
+  function install10() {
     bag.viewStacks = async function viewStacks() {
       const all = bag.isAllNodes();
       if (bag.state.route === "stacks/new") {
@@ -6057,13 +6434,14 @@ ${title}`;
         const stLabel = stackStatusLabel(s.Status);
         const search = `${s.Id} ${s.Name} ${node} ${s.CreatedBy || ""} ${stLabel}`.toLowerCase();
         const isRunning = stLabel === "running";
-        const actions = `<div class="quick-actions">
-        ${bag.iconBtn({ tag: "a", href: `#stacks/${s.Id}`, title: "Ouvrir", icon: "edit" })}
-        ${bag.iconBtn({ act: "start", id: s.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
-        ${bag.iconBtn({ act: "stop", id: s.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
-        ${bag.iconBtn({ act: "restart", id: s.Id, title: "Red\xE9marrer", icon: "restart" })}
-        ${bag.iconBtn({ act: "remove", id: s.Id, title: "Supprimer", icon: "remove", danger: true })}
-      </div>`;
+        const actions = bag.moreActions(
+          `${bag.iconBtn({ act: "start", id: s.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
+         ${bag.iconBtn({ act: "stop", id: s.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
+         ${bag.iconBtn({ act: "restart", id: s.Id, title: "Red\xE9marrer", icon: "restart" })}
+         ${bag.iconBtn({ act: "remove", id: s.Id, title: "Supprimer", icon: "remove", danger: true })}`,
+          `${bag.iconBtn({ tag: "a", href: `#stacks/${s.Id}`, title: "Ouvrir", icon: "edit", label: "Ouvrir" })}
+         ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "stack", shareKey: String(s.Id), label: "Partager" })}`
+        );
         const rowCls = isRunning ? "" : "row-stopped";
         return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-stack-id="${bag.esc(s.Id)}">
       ${bag.bulkSelectTd(s.Id)}
@@ -6108,6 +6486,8 @@ ${title}`;
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? "Vue agr\xE9g\xE9e" : "Projets Compose" });
       bag.bindRefresh();
+      bag.bindShareButtons();
+      bag.bindMoreActions();
       bag.bindPagedSearch("stacks");
       bag.bindTableSort("stacks", () => bag.viewStacks());
       bag.root.querySelectorAll("[data-act]").forEach((btn) => {
@@ -6730,12 +7110,15 @@ ${title}`;
       ${bag.pageHeader(stack.Name, false)}
       <div class="toolbar">
         ${bag.iconBtn({ tag: "a", href: "#stacks", title: "Retour", icon: "back" })}
-        ${bag.iconBtn({ elId: "edit", title: "\xC9diteur", icon: "edit", info: true })}
-        ${bag.iconBtn({ act: "start", id: stack.Id, title: "D\xE9marrer", icon: "start", success: !stackRunning })}
-        ${bag.iconBtn({ act: "stop", id: stack.Id, title: "Arr\xEAter", icon: "stop", danger: stackRunning })}
-        ${bag.iconBtn({ act: "restart", id: stack.Id, title: "Red\xE9marrer", icon: "restart" })}
-        ${bag.iconBtn({ elId: "stack-pull-redeploy", title: "Pull images + red\xE9ployer", icon: "pull" })}
-        ${bag.iconBtn({ act: "remove", id: stack.Id, title: "Supprimer", icon: "remove", danger: true })}
+        ${bag.moreActions(
+        `${bag.iconBtn({ act: "start", id: stack.Id, title: "D\xE9marrer", icon: "start", success: !stackRunning })}
+           ${bag.iconBtn({ act: "stop", id: stack.Id, title: "Arr\xEAter", icon: "stop", danger: stackRunning })}
+           ${bag.iconBtn({ act: "restart", id: stack.Id, title: "Red\xE9marrer", icon: "restart" })}
+           ${bag.iconBtn({ act: "remove", id: stack.Id, title: "Supprimer", icon: "remove", danger: true })}`,
+        `${bag.iconBtn({ elId: "edit", title: "\xC9diteur", icon: "edit", info: true, label: "\xC9diteur" })}
+           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "stack", shareKey: String(stack.Id), label: "Partager" })}
+           ${bag.iconBtn({ elId: "stack-pull-redeploy", title: "Pull images + red\xE9ployer", icon: "pull", label: "Pull + red\xE9ployer" })}`
+      )}
       </div>
       <div id="stack-detail-err"></div>
       <div class="panel" style="margin-bottom:1rem">
@@ -6788,6 +7171,8 @@ ${title}`;
           if (errBox) errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
         }
       }, { minMs: 400 });
+      bag.bindShareButtons();
+      bag.bindMoreActions();
       bag.root.querySelectorAll("[data-act]").forEach((btn) => {
         const act = btn.dataset.act;
         const confirmMsg = act === "remove" ? "Supprimer la stack et ses conteneurs ?" : null;
@@ -6871,7 +7256,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/registries.js
-  function install10() {
+  function install11() {
     bag.registryHost = function registryHost(reg) {
       return String(reg?.URL || "").replace(/^https?:\/\//i, "").replace(/\/$/, "");
     };
@@ -7156,7 +7541,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/nodes.js
-  function install11() {
+  function install12() {
     bag.nodeStatusLabel = function nodeStatusLabel(nodeOrStatus, disabled) {
       if (nodeOrStatus && typeof nodeOrStatus === "object") {
         disabled = !!nodeOrStatus.Disabled;
@@ -7679,7 +8064,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/settings.js
-  function install12() {
+  function install13() {
     bag.viewSettings = async function viewSettings() {
       await bag.loadPublicUrl();
       let settings = {};
@@ -7948,7 +8333,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/diagnostics.js
-  function install13() {
+  function install14() {
     const SPA_HANDLERS = [
       "viewDashboard",
       "viewContainers",
@@ -7981,8 +8366,7 @@ ${title}`;
       ["#nodes", "N\u0153uds"],
       ["#users", "Utilisateurs"],
       ["#teams", "\xC9quipes"],
-      ["#docs", "Documentation"],
-      ["#about", "\xC0 propos"]
+      ["#docs", "Documentation"]
     ];
     function levelBadge(level, ok) {
       const lv = level || (ok ? "ok" : "fail");
@@ -8167,7 +8551,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/docs.js
-  function install14() {
+  function install15() {
     bag.renderMarkdown = function renderMarkdown(src) {
       const lines = String(src || "").replace(/\r\n/g, "\n").split("\n");
       const html = [];
@@ -8336,7 +8720,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/activity.js
-  function install15() {
+  function install16() {
     bag.viewActivity = async function viewActivity() {
       const actionFilter = bag.state.filters.activityAction || "";
       let data;
@@ -8414,7 +8798,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/users.js
-  function install16() {
+  function install17() {
     bag.viewUsers = async function viewUsers() {
       const users = await bag.Api.users();
       const list = users || [];
@@ -8581,7 +8965,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/teams.js
-  function install17() {
+  function install18() {
     bag.viewTeams = async function viewTeams() {
       const [teamsRes, users] = await Promise.all([
         bag.Api.teams(true),
@@ -8835,6 +9219,7 @@ ${title}`;
   install15();
   install16();
   install17();
+  install18();
   window.addEventListener("hashchange", () => bag.route());
   bag.boot();
 })();

@@ -20,13 +20,20 @@ final class EndpointsController extends BaseController
             return $deny;
         }
         $role = $this->endpointAcl->roleFor($user, $endpointId);
+        $viaShareOnly = false;
         if ($role === EndpointAcl::NONE) {
-            return Response::error('Accès refusé à ce nœud', 403);
+            if ($this->repo->userHasSharesOnEndpoint(Ownership::userId($user), $endpointId)) {
+                // Share grants operate on shared resources only — not full node ACL.
+                $role = EndpointAcl::OPERATE;
+                $viaShareOnly = true;
+            } else {
+                return Response::error('Accès refusé à ce nœud', 403);
+            }
         }
         $min = in_array(strtoupper($request->method), ['GET', 'HEAD'], true)
             ? EndpointAcl::READ
             : EndpointAcl::OPERATE;
-        if (!$this->endpointAcl->can($user, $endpointId, $min)) {
+        if (!$viaShareOnly && !$this->endpointAcl->can($user, $endpointId, $min)) {
             return Response::error('Permissions insuffisantes sur ce nœud', 403);
         }
 
@@ -37,7 +44,8 @@ final class EndpointsController extends BaseController
             $forwardHeaders['Content-Type'] = $contentType;
         }
 
-        $scopedUser = $this->endpointAcl->withEndpointContext($user, $role);
+        // Never mark share-only users as endpoint admin.
+        $scopedUser = $viaShareOnly ? $user : $this->endpointAcl->withEndpointContext($user, $role);
         $scope = $this->scopeForEndpoint($ep);
         $response = $scope->handle(
             $scopedUser,

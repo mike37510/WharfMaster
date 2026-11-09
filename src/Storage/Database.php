@@ -226,6 +226,24 @@ CREATE TABLE IF NOT EXISTS bind_volumes (
 );
 CREATE INDEX IF NOT EXISTS idx_bind_volumes_endpoint ON bind_volumes(endpoint_id);
 CREATE INDEX IF NOT EXISTS idx_bind_volumes_stack ON bind_volumes(stack_id);
+
+CREATE TABLE IF NOT EXISTS resource_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_type TEXT NOT NULL,
+    endpoint_id INTEGER NOT NULL,
+    resource_key TEXT NOT NULL,
+    grantee_type TEXT NOT NULL DEFAULT 'user',
+    grantee_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'operate',
+    created_by_user_id INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(resource_type, endpoint_id, resource_key, grantee_type, grantee_id),
+    FOREIGN KEY(endpoint_id) REFERENCES endpoints(id) ON DELETE CASCADE,
+    FOREIGN KEY(grantee_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(created_by_user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_resource_shares_grantee ON resource_shares(grantee_type, grantee_id);
+CREATE INDEX IF NOT EXISTS idx_resource_shares_resource ON resource_shares(resource_type, endpoint_id, resource_key);
 SQL);
         $this->ensureColumn('registries', 'owner_id', 'INTEGER');
         $this->ensureColumn('registries', 'owner_username', "TEXT NOT NULL DEFAULT ''");

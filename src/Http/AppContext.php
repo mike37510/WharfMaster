@@ -151,10 +151,17 @@ final class AppContext
         if ($deny = $this->assertEndpointUsable($ep)) {
             return [null, $deny];
         }
-        if (!$this->endpointAcl->can($user, $endpointId, $minRole)) {
-            return [null, Response::error('Accès refusé à ce nœud', 403)];
+        if ($this->endpointAcl->can($user, $endpointId, $minRole)) {
+            return [$ep, null];
         }
-        return [$ep, null];
+        // Resource shares are independent of node ACL: allow READ/OPERATE when user
+        // has at least one share on this endpoint (DockerScope still filters objects).
+        $shareOk = in_array($minRole, [EndpointAcl::READ, EndpointAcl::OPERATE], true)
+            && $this->repo->userHasSharesOnEndpoint(Ownership::userId($user), $endpointId);
+        if ($shareOk) {
+            return [$ep, null];
+        }
+        return [null, Response::error('Accès refusé à ce nœud', 403)];
     }
 
     /** @param array{id:int,username:string,role:int} $user */
@@ -379,13 +386,18 @@ final class AppContext
             return true;
         }
         $eid = (int) ($stack['endpoint_id'] ?? 0);
-        if (!$this->endpointAcl->can($user, $eid, EndpointAcl::READ)) {
-            return false;
+        $sid = (string) ((int) ($stack['id'] ?? 0));
+        // Share is independent of node ACL.
+        if ($sid !== '0' && $this->repo->hasResourceShare(Ownership::userId($user), 'stack', $eid, $sid)) {
+            return true;
+        }
+        if (strcasecmp((string) ($stack['created_by'] ?? ''), Ownership::username($user)) === 0) {
+            return true;
         }
         if ($this->endpointAcl->can($user, $eid, EndpointAcl::ADMIN)) {
             return true;
         }
-        return strcasecmp((string) ($stack['created_by'] ?? ''), Ownership::username($user)) === 0;
+        return false;
     }
 
     /** @param array<string, mixed> $stack @param array{id:int,username:string,role:int} $user */
@@ -394,8 +406,27 @@ final class AppContext
         if (!$this->canAccessStack($stack, $user)) {
             return false;
         }
+        if (Ownership::isGlobalAdmin($user)) {
+            return true;
+        }
         $eid = (int) ($stack['endpoint_id'] ?? 0);
+        $sid = (string) ((int) ($stack['id'] ?? 0));
+        if ($sid !== '0' && $this->repo->hasResourceShare(Ownership::userId($user), 'stack', $eid, $sid)) {
+            return true;
+        }
+        if (strcasecmp((string) ($stack['created_by'] ?? ''), Ownership::username($user)) === 0) {
+            return true;
+        }
         return $this->endpointAcl->can($user, $eid, EndpointAcl::OPERATE);
+    }
+
+    /** True if user owns the resource (can manage shares), not merely a grantee. */
+    public function ownsStackRecord(array $stack, array $user): bool
+    {
+        if (Ownership::isGlobalAdmin($user)) {
+            return true;
+        }
+        return strcasecmp((string) ($stack['created_by'] ?? ''), Ownership::username($user)) === 0;
     }
 
     /** @param array<string, mixed> $row @param array{id:int,username:string,role:int} $user */
@@ -842,7 +873,7 @@ MD;
     /** @param array<string, mixed> $ep */
     public function scopeForEndpoint(array $ep): DockerScope
     {
-        return new DockerScope($this->dockerForEndpoint($ep), $this->repo);
+        return new DockerScope($this->dockerForEndpoint($ep), $this->repo, (int) ($ep['id'] ?? 0));
     }
 
     /** @param array<string, mixed> $ep */

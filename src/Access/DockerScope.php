@@ -17,6 +17,7 @@ final class DockerScope
     public function __construct(
         private readonly DockerClient $docker,
         private readonly Repositories $repo,
+        private readonly int $endpointId = 0,
     ) {
     }
 
@@ -50,11 +51,14 @@ final class DockerScope
 
         $ownedStacks = Ownership::isAdmin($user)
             ? []
-            : $this->ownedStackNames($user);
+            : $this->accessibleStackNames($user);
+        $sharedKeys = Ownership::isAdmin($user)
+            ? ['container' => [], 'volume' => [], 'network' => []]
+            : $this->sharedDockerKeys($user);
 
         // --- List containers ---
         if ($method === 'GET' && ($dockerPath === '/containers/json' || str_starts_with($dockerPath, '/containers/json?'))) {
-            return $this->listContainers($user, $query, $ownedStacks);
+            return $this->listContainers($user, $query, $ownedStacks, $sharedKeys['container']);
         }
 
         // --- Create container ---
@@ -64,7 +68,7 @@ final class DockerScope
 
         // --- Container by id (inspect / start / stop / logs proxy / etc.) ---
         if (preg_match('#^/containers/([^/]+)(/.*)?$#', $dockerPath, $m)) {
-            $denied = $this->assertContainerAccess($m[1], $user, $ownedStacks, $method);
+            $denied = $this->assertContainerAccess($m[1], $user, $ownedStacks, $sharedKeys['container'], $method);
             if ($denied) {
                 return $denied;
             }
@@ -72,7 +76,7 @@ final class DockerScope
 
         // --- Volumes list ---
         if ($method === 'GET' && ($dockerPath === '/volumes' || $dockerPath === '/volumes/')) {
-            return $this->listVolumes($user, $ownedStacks);
+            return $this->listVolumes($user, $ownedStacks, $sharedKeys['volume']);
         }
 
         // --- Volume create ---
@@ -82,7 +86,7 @@ final class DockerScope
 
         // --- Volume by name (never treat "create" as a volume name) ---
         if (preg_match('#^/volumes/([^/]+)$#', $dockerPath, $m) && strcasecmp($m[1], 'create') !== 0) {
-            $denied = $this->assertVolumeAccess(rawurldecode($m[1]), $user, $ownedStacks);
+            $denied = $this->assertVolumeAccess(rawurldecode($m[1]), $user, $ownedStacks, $sharedKeys['volume']);
             if ($denied) {
                 return $denied;
             }
@@ -90,7 +94,7 @@ final class DockerScope
 
         // --- Networks list ---
         if ($method === 'GET' && ($dockerPath === '/networks' || $dockerPath === '/networks/')) {
-            return $this->listNetworks($user, $ownedStacks);
+            return $this->listNetworks($user, $ownedStacks, $sharedKeys['network']);
         }
 
         // --- Network create ---
@@ -102,7 +106,7 @@ final class DockerScope
         if (preg_match('#^/networks/([^/]+)$#', $dockerPath, $m)) {
             $name = rawurldecode($m[1]);
             if (!in_array($name, ['bridge', 'host', 'none'], true)) {
-                $denied = $this->assertNetworkAccess($name, $user, $ownedStacks);
+                $denied = $this->assertNetworkAccess($name, $user, $ownedStacks, $sharedKeys['network']);
                 if ($denied) {
                     return $denied;
                 }
@@ -133,8 +137,12 @@ final class DockerScope
         return $this->forward($method, $dockerPath, $rawBody, $forwardHeaders, $query);
     }
 
-    /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
-    private function listContainers(array $user, array $query, array $ownedStacks): Response
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @param list<string> $ownedStacks
+     * @param list<string> $sharedKeys
+     */
+    private function listContainers(array $user, array $query, array $ownedStacks, array $sharedKeys): Response
     {
         if (Ownership::isAdmin($user)) {
             return $this->forward('GET', '/containers/json', null, [], $query);
@@ -149,9 +157,14 @@ final class DockerScope
         if (!is_array($list)) {
             return Response::json([]);
         }
-        $filtered = array_values(array_filter($list, function ($c) use ($user, $ownedStacks) {
+        $filtered = array_values(array_filter($list, function ($c) use ($user, $ownedStacks, $sharedKeys) {
             $labels = is_array($c['Labels'] ?? null) ? $c['Labels'] : [];
-            return Ownership::ownsDockerResource($labels, $user, $ownedStacks);
+            if (Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
+                return true;
+            }
+            $names = is_array($c['Names'] ?? null) ? $c['Names'] : [];
+            $id = (string) ($c['Id'] ?? '');
+            return $this->matchesSharedKey($sharedKeys, $id, $names);
         }));
         return Response::json($filtered);
     }
@@ -268,8 +281,12 @@ final class DockerScope
         return false;
     }
 
-    /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
-    private function assertContainerAccess(string $id, array $user, array $ownedStacks, string $method): ?Response
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @param list<string> $ownedStacks
+     * @param list<string> $sharedKeys
+     */
+    private function assertContainerAccess(string $id, array $user, array $ownedStacks, array $sharedKeys, string $method): ?Response
     {
         if (Ownership::isAdmin($user)) {
             return null;
@@ -283,14 +300,26 @@ final class DockerScope
         if (!is_array($labels)) {
             $labels = [];
         }
-        if (!Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
-            return Response::error('Accès refusé à ce conteneur', 403);
+        if (Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
+            return null;
         }
-        return null;
+        $names = [];
+        if (!empty($info['Name'])) {
+            $names[] = (string) $info['Name'];
+        }
+        $fullId = (string) ($info['Id'] ?? $id);
+        if ($this->matchesSharedKey($sharedKeys, $fullId, $names) || $this->matchesSharedKey($sharedKeys, $id, $names)) {
+            return null;
+        }
+        return Response::error('Accès refusé à ce conteneur', 403);
     }
 
-    /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
-    private function listVolumes(array $user, array $ownedStacks): Response
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @param list<string> $ownedStacks
+     * @param list<string> $sharedKeys
+     */
+    private function listVolumes(array $user, array $ownedStacks, array $sharedKeys): Response
     {
         $res = $this->docker->request('GET', '/volumes');
         if ($res['status'] >= 400) {
@@ -307,9 +336,13 @@ final class DockerScope
         if (!is_array($vols)) {
             $vols = [];
         }
-        $data['Volumes'] = array_values(array_filter($vols, function ($v) use ($user, $ownedStacks) {
+        $data['Volumes'] = array_values(array_filter($vols, function ($v) use ($user, $ownedStacks, $sharedKeys) {
             $labels = is_array($v['Labels'] ?? null) ? $v['Labels'] : [];
-            return Ownership::ownsDockerResource($labels, $user, $ownedStacks);
+            if (Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
+                return true;
+            }
+            $name = (string) ($v['Name'] ?? '');
+            return $this->matchesSharedKey($sharedKeys, $name, [$name]);
         }));
         return Response::json($data);
     }
@@ -334,8 +367,12 @@ final class DockerScope
         );
     }
 
-    /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
-    private function assertVolumeAccess(string $name, array $user, array $ownedStacks): ?Response
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @param list<string> $ownedStacks
+     * @param list<string> $sharedKeys
+     */
+    private function assertVolumeAccess(string $name, array $user, array $ownedStacks, array $sharedKeys): ?Response
     {
         if (Ownership::isAdmin($user)) {
             return null;
@@ -349,14 +386,21 @@ final class DockerScope
         if (!is_array($labels)) {
             $labels = [];
         }
-        if (!Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
-            return Response::error('Accès refusé à ce volume', 403);
+        if (Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
+            return null;
         }
-        return null;
+        if ($this->matchesSharedKey($sharedKeys, $name, [$name])) {
+            return null;
+        }
+        return Response::error('Accès refusé à ce volume', 403);
     }
 
-    /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
-    private function listNetworks(array $user, array $ownedStacks): Response
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @param list<string> $ownedStacks
+     * @param list<string> $sharedKeys
+     */
+    private function listNetworks(array $user, array $ownedStacks, array $sharedKeys): Response
     {
         $res = $this->docker->request('GET', '/networks');
         if ($res['status'] >= 400) {
@@ -369,14 +413,18 @@ final class DockerScope
         if (!is_array($list)) {
             return Response::json([]);
         }
-        $filtered = array_values(array_filter($list, function ($n) use ($user, $ownedStacks) {
+        $filtered = array_values(array_filter($list, function ($n) use ($user, $ownedStacks, $sharedKeys) {
             $name = (string) ($n['Name'] ?? '');
             // Always show predefined networks (read-only usage)
             if (in_array($name, ['bridge', 'host', 'none'], true)) {
                 return true;
             }
             $labels = is_array($n['Labels'] ?? null) ? $n['Labels'] : [];
-            return Ownership::ownsDockerResource($labels, $user, $ownedStacks);
+            if (Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
+                return true;
+            }
+            $id = (string) ($n['Id'] ?? '');
+            return $this->matchesSharedKey($sharedKeys, $id, [$name]);
         }));
         return Response::json($filtered);
     }
@@ -401,8 +449,12 @@ final class DockerScope
         );
     }
 
-    /** @param array{id:int,username:string,role:int} $user @param list<string> $ownedStacks */
-    private function assertNetworkAccess(string $idOrName, array $user, array $ownedStacks): ?Response
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @param list<string> $ownedStacks
+     * @param list<string> $sharedKeys
+     */
+    private function assertNetworkAccess(string $idOrName, array $user, array $ownedStacks, array $sharedKeys): ?Response
     {
         if (Ownership::isAdmin($user)) {
             return null;
@@ -416,10 +468,15 @@ final class DockerScope
         if (!is_array($labels)) {
             $labels = [];
         }
-        if (!Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
-            return Response::error('Accès refusé à ce réseau', 403);
+        if (Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
+            return null;
         }
-        return null;
+        $name = (string) ($info['Name'] ?? $idOrName);
+        $id = (string) ($info['Id'] ?? $idOrName);
+        if ($this->matchesSharedKey($sharedKeys, $id, [$name, $idOrName])) {
+            return null;
+        }
+        return Response::error('Accès refusé à ce réseau', 403);
     }
 
     /** @param array{id:int,username:string,role:int} $user */
@@ -444,18 +501,84 @@ final class DockerScope
     }
 
     /**
+     * Owned + shared stacks (compose project names) for this endpoint.
+     *
      * @param array{id:int,username:string,role:int} $user
      * @return list<string>
      */
-    private function ownedStackNames(array $user): array
+    private function accessibleStackNames(array $user): array
     {
+        $rows = $this->repo->listStacksForUser(
+            Ownership::username($user),
+            false,
+            $this->endpointId > 0 ? $this->endpointId : null,
+            Ownership::userId($user),
+        );
         $names = [];
-        foreach ($this->repo->listStacks() as $stack) {
-            if (strcasecmp((string) ($stack['created_by'] ?? ''), Ownership::username($user)) === 0) {
-                $names[] = (string) $stack['name'];
+        foreach ($rows as $stack) {
+            $n = (string) ($stack['name'] ?? '');
+            if ($n !== '') {
+                $names[] = $n;
             }
         }
         return $names;
+    }
+
+    /**
+     * @param array{id:int,username:string,role:int} $user
+     * @return array{container:list<string>,volume:list<string>,network:list<string>}
+     */
+    private function sharedDockerKeys(array $user): array
+    {
+        $uid = Ownership::userId($user);
+        $eid = $this->endpointId > 0 ? $this->endpointId : null;
+        return [
+            'container' => $this->repo->listSharedResourceKeys($uid, 'container', $eid),
+            'volume' => $this->repo->listSharedResourceKeys($uid, 'volume', $eid),
+            'network' => $this->repo->listSharedResourceKeys($uid, 'network', $eid),
+        ];
+    }
+
+    /**
+     * @param list<string> $sharedKeys
+     * @param list<string> $names
+     */
+    private function matchesSharedKey(array $sharedKeys, string $id, array $names = []): bool
+    {
+        if ($sharedKeys === []) {
+            return false;
+        }
+        $candidates = [];
+        if ($id !== '') {
+            $candidates[] = $id;
+            if (strlen($id) > 12) {
+                $candidates[] = substr($id, 0, 12);
+            }
+        }
+        foreach ($names as $n) {
+            $n = ltrim((string) $n, '/');
+            if ($n !== '') {
+                $candidates[] = $n;
+            }
+        }
+        foreach ($sharedKeys as $key) {
+            $key = ltrim((string) $key, '/');
+            if ($key === '') {
+                continue;
+            }
+            foreach ($candidates as $c) {
+                if (strcasecmp($c, $key) === 0) {
+                    return true;
+                }
+                if (strlen($key) >= 12 && str_starts_with(strtolower($c), strtolower($key))) {
+                    return true;
+                }
+                if (strlen($c) >= 12 && str_starts_with(strtolower($key), strtolower($c))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -464,7 +587,8 @@ final class DockerScope
      */
     public function canAccessContainer(string $id, array $user): bool
     {
-        return $this->assertContainerAccess($id, $user, $this->ownedStackNames($user), 'GET') === null;
+        $keys = $this->sharedDockerKeys($user)['container'];
+        return $this->assertContainerAccess($id, $user, $this->accessibleStackNames($user), $keys, 'GET') === null;
     }
 
     /**
@@ -472,7 +596,8 @@ final class DockerScope
      */
     public function canAccessVolume(string $name, array $user): bool
     {
-        return $this->assertVolumeAccess($name, $user, $this->ownedStackNames($user)) === null;
+        $keys = $this->sharedDockerKeys($user)['volume'];
+        return $this->assertVolumeAccess($name, $user, $this->accessibleStackNames($user), $keys) === null;
     }
 
     /**

@@ -663,21 +663,22 @@ export function install() {
       const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ''}`.toLowerCase();
       const actions = all
         ? `<span class="muted">—</span>`
-        : `<div class="quick-actions">
-          ${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs conteneur', icon: 'logs' })}
-          ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
-          ${bag.iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
-          ${bag.iconBtn({
-            modal: 'stats', id: c.Id, name, running: isRunning,
-            title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
-            icon: 'stats', statsId: c.Id,
-            extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
-          })}
-          ${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
-          ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
-          ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
-          ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
-        </div>`;
+        : bag.moreActions(
+          `${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
+           ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
+           ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
+           ${bag.iconBtn({
+             modal: 'stats', id: c.Id, name, running: isRunning,
+             title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
+             icon: 'stats', statsId: c.Id,
+             extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
+           })}
+           ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}`,
+          `${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs conteneur', icon: 'logs', label: 'Logs' })}
+           ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console', label: 'Console' })}
+           ${bag.iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect', label: 'Inspecter' })}
+           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || c.Id, label: 'Partager' })}`,
+        );
       return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}">
         ${all ? '' : bag.bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${bag.esc(c._nodeName || '—')}</td>` : ''}
@@ -726,6 +727,8 @@ export function install() {
       </div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Gérez vos conteneurs Docker' });
 
     bag.bindRefresh();
+    bag.bindShareButtons();
+    bag.bindMoreActions();
     bag.bindPagedSearch('containers');
     bag.bindTableSort('containers', () => bag.viewContainers());
     if (!all) {
@@ -830,19 +833,22 @@ export function install() {
       ${bag.pageHeader(name, false)}
       <div class="toolbar">
         ${bag.iconBtn({ tag: 'a', href: '#containers', title: 'Retour', icon: 'back' })}
-        ${bag.iconBtn({ modal: 'logs', id, name, running, title: 'Logs conteneur', icon: 'logs' })}
-        ${bag.iconBtn({ modal: 'console', id, name, running, title: 'Console', icon: 'console' })}
-        ${bag.iconBtn({ modal: 'inspect', id, name, running, title: 'Inspecter', icon: 'inspect' })}
-        ${bag.iconBtn({
-          modal: 'stats', id, name, running,
-          title: running ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
-          icon: 'stats', statsId: id,
-          extraClass: running ? 'is-stats-ok' : 'is-stats-off',
-        })}
-        ${bag.iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: !running })}
-        ${bag.iconBtn({ act: 'stop', title: 'Arrêter', icon: 'stop', danger: running })}
-        ${bag.iconBtn({ act: 'restart', title: 'Redémarrer', icon: 'restart' })}
-        ${bag.iconBtn({ act: 'remove', title: 'Supprimer', icon: 'remove', danger: true })}
+        ${bag.moreActions(
+          `${bag.iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: !running })}
+           ${bag.iconBtn({ act: 'stop', title: 'Arrêter', icon: 'stop', danger: running })}
+           ${bag.iconBtn({ act: 'restart', title: 'Redémarrer', icon: 'restart' })}
+           ${bag.iconBtn({
+             modal: 'stats', id, name, running,
+             title: running ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
+             icon: 'stats', statsId: id,
+             extraClass: running ? 'is-stats-ok' : 'is-stats-off',
+           })}
+           ${bag.iconBtn({ act: 'remove', title: 'Supprimer', icon: 'remove', danger: true })}`,
+          `${bag.iconBtn({ modal: 'logs', id, name, running, title: 'Logs conteneur', icon: 'logs', label: 'Logs' })}
+           ${bag.iconBtn({ modal: 'console', id, name, running, title: 'Console', icon: 'console', label: 'Console' })}
+           ${bag.iconBtn({ modal: 'inspect', id, name, running, title: 'Inspecter', icon: 'inspect', label: 'Inspecter' })}
+           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || id, label: 'Partager' })}`,
+        )}
         <div class="spacer"></div>
         ${bag.formatPorts(ports)}
       </div>
@@ -851,6 +857,8 @@ export function install() {
     `, { subtitle: 'Détail du conteneur' });
 
     bag.bindModalActions();
+    bag.bindShareButtons();
+    bag.bindMoreActions();
     bag.root.querySelectorAll('.tab').forEach((el) => {
       el.onclick = async () => {
         const t = el.dataset.tab;

@@ -2,6 +2,11 @@
 
 Toutes les dates sont en UTC+1.
 
+## Unreleased
+
+### Ajouté
+- **Partage de ressources** : un utilisateur peut partager stack / conteneur / volume / réseau avec un autre utilisateur (indépendant des ACL nœuds) ; bouton Partager + `GET/POST/DELETE /api/shares`
+
 ## [2.2.0] — 2026-11-09
 
 ### Breaking

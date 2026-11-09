@@ -13,6 +13,7 @@ use App\Http\Controllers\ImagesController;
 use App\Http\Controllers\NodesController;
 use App\Http\Controllers\RegistriesController;
 use App\Http\Controllers\SchedulesController;
+use App\Http\Controllers\SharesController;
 use App\Http\Controllers\StacksController;
 use App\Http\Controllers\SystemController;
 use App\Http\Controllers\TeamsController;
@@ -100,6 +101,7 @@ final class App
         $stacks = new StacksController($ctx);
         $registries = new RegistriesController($ctx);
         $schedules = new SchedulesController($ctx);
+        $shares = new SharesController($ctx);
 
         $u = static fn (array $p): array => $p['__user'];
 
@@ -144,6 +146,7 @@ final class App
         $R->get('/api/system/diagnostics', fn ($r, $p) => $sys->diagnostics($u($p)));
         $R->get('/api/backup', fn ($r, $p) => $sys->downloadBackup($r, $u($p)));
 
+        $R->get('/api/users/directory', fn ($r, $p) => $shares->listDirectory($u($p)));
         $R->get('/api/users', fn ($r, $p) => $users->listUsers($u($p)));
         $R->post('/api/users', fn ($r, $p) => $users->createUser($r, $u($p)));
         $R->put('/api/users/{id}/passwd', fn ($r, $p) => $users->changeUserPassword((int) $p['id'], $r, $u($p)));
@@ -172,6 +175,10 @@ final class App
         $R->get('/api/acls', fn ($r, $p) => $acls->listAcls($r, $u($p)));
         $R->post('/api/acls', fn ($r, $p) => $acls->upsertAcl($r, $u($p)));
         $R->delete('/api/acls/{id}', fn ($r, $p) => $acls->deleteAcl((int) $p['id'], $r, $u($p)));
+
+        $R->get('/api/shares', fn ($r, $p) => $shares->listShares($r, $u($p)));
+        $R->post('/api/shares', fn ($r, $p) => $shares->createShare($r, $u($p)));
+        $R->delete('/api/shares/{id}', fn ($r, $p) => $shares->deleteShare((int) $p['id'], $r, $u($p)));
 
         $R->get('/api/schedules', fn ($r, $p) => $schedules->listSchedules($r, $u($p)));
         $R->post('/api/schedules', fn ($r, $p) => $schedules->createSchedule($r, $u($p)));

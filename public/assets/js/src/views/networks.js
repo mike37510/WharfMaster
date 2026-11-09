@@ -110,6 +110,7 @@ export function install() {
       <td>${usageCell}</td>
       <td>${bag.esc(n.Scope)}</td>
       <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">
+        ${isBuiltin ? '' : bag.shareBtn('network', n.Name || n.Id)}
         ${isBuiltin ? '' : bag.iconBtn({ id: n.Id, title: 'Supprimer', icon: 'remove', danger: true })}
       </div>`}</td>
     </tr>`;
@@ -139,6 +140,7 @@ export function install() {
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun réseau</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Réseaux Docker' });
     bag.bindRefresh();
+    bag.bindShareButtons();
     bag.bindPagedSearch('networks');
     bag.bindTableSort('networks', () => bag.viewNetworks());
     bag.root.querySelectorAll('[data-net-key]').forEach((btn) => {
@@ -198,21 +200,118 @@ export function install() {
     });
   }
 
+  bag.networkEndpointForContainer = function networkEndpointForContainer(net, container) {
+    return bag.containerNetworkEntries(container).find((e) => {
+      if (e.name === net?.Name) return true;
+      const eid = bag.normalizeImageRef(e.id);
+      const nid = bag.normalizeImageRef(net?.Id);
+      return nid && eid && (nid === eid || nid.startsWith(eid) || eid.startsWith(nid));
+    }) || null;
+  };
+
+  bag.networkIpamSummary = function networkIpamSummary(net) {
+    const confs = Array.isArray(net?.IPAM?.Config) ? net.IPAM.Config : [];
+    const first = confs.find((c) => c && (c.Subnet || c.Gateway)) || confs[0] || {};
+    const parts = [];
+    if (first.Subnet) parts.push(String(first.Subnet));
+    if (first.Gateway) parts.push(`gw ${first.Gateway}`);
+    return parts.join(' · ');
+  };
+
+  /** Port chips without nested <a> (safe inside clickable schema cards). */
+  bag.formatPortChips = function formatPortChips(ports) {
+    if (!ports || !ports.length) return '<span class="muted">—</span>';
+    const seen = new Set();
+    const chips = [];
+    for (const p of ports) {
+      const pub = Number(p.PublicPort ?? p.publicPort) || 0;
+      const priv = p.PrivatePort || p.privatePort;
+      const type = (p.Type || p.type || 'tcp').toLowerCase();
+      if (!priv) continue;
+      const label = pub > 0 ? `${pub}:${priv}/${type}` : `${priv}/${type}`;
+      const key = label;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      chips.push(`<span class="port-chip">${bag.esc(label)}</span>`);
+    }
+    return chips.length ? chips.join('') : '<span class="muted">—</span>';
+  };
+
   bag.openNetworkUsersModal = function openNetworkUsersModal(net, users) {
-    bag.openResourceUsersModal({
-      title: 'Conteneurs utilisant ce réseau',
-      subtitle: `${net?.Name || ''} · ${bag.shortId(net?.Id)}`,
-      users,
-      extraCol: (c) => {
-        const entry = bag.containerNetworkEntries(c).find((e) => {
-          if (e.name === net?.Name) return true;
-          const eid = bag.normalizeImageRef(e.id);
-          const nid = bag.normalizeImageRef(net?.Id);
-          return nid && eid && (nid === eid || nid.startsWith(eid) || eid.startsWith(nid));
-        });
-        return entry?.ip || c.Image || '';
-      },
+    bag.closeAppModal();
+    const host = bag.modalHost();
+    const list = Array.isArray(users) ? users : [];
+    const ipam = bag.networkIpamSummary(net);
+    const hubMeta = [net?.Driver, ipam].filter(Boolean).join(' · ');
+
+    const nodes = list.map((c) => {
+      const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : bag.shortId(c.Id));
+      const entry = bag.networkEndpointForContainer(net, c);
+      const ip = entry?.ip || '—';
+      const st = String(c.State || '').toLowerCase();
+      const running = st === 'running' || st === 'restarting';
+      return `<button type="button" class="net-schema-node ${running ? 'is-up' : 'is-down'}" data-go-container="${bag.esc(c.Id)}" title="${bag.esc(name)}">
+        <span class="net-schema-link" aria-hidden="true"></span>
+        <span class="net-schema-node-name">${bag.esc(name)}</span>
+        <span class="net-schema-node-ip mono">${bag.esc(ip)}</span>
+        <span class="net-schema-node-ports">${bag.formatPortChips(c.Ports || [])}</span>
+      </button>`;
+    }).join('');
+
+    const rows = list.map((c) => {
+      const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : bag.shortId(c.Id));
+      const entry = bag.networkEndpointForContainer(net, c);
+      return `<tr>
+        <td><a class="res-user-link" href="#containers/${bag.esc(c.Id)}">${bag.esc(name)}</a></td>
+        <td class="mono">${bag.esc(entry?.ip || '—')}</td>
+        <td>${bag.formatPorts(c.Ports || [])}</td>
+        <td>${bag.badge(c.State)}</td>
+      </tr>`;
+    }).join('');
+
+    host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form-wide" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h3>Schéma réseau</h3>
+              <p class="modal-sub mono">${bag.esc(net?.Name || '')} · ${bag.esc(bag.shortId(net?.Id))}</p>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div class="net-schema" aria-label="Schéma des conteneurs sur ce réseau">
+            <div class="net-schema-hub">
+              <div class="net-schema-hub-ico">${bag.ico('networks')}</div>
+              <div class="net-schema-hub-name">${bag.esc(net?.Name || 'réseau')}</div>
+              <div class="net-schema-hub-meta muted">${bag.esc(hubMeta || `${list.length} conteneur${list.length > 1 ? 's' : ''}`)}</div>
+            </div>
+            <div class="net-schema-nodes">
+              ${nodes || '<div class="muted" style="padding:12px">Aucun conteneur connecté</div>'}
+            </div>
+          </div>
+          <div class="section-title" style="margin-top:16px">Détail</div>
+          <div class="table-wrap" style="margin:0">
+            <table class="data">
+              <thead><tr><th>Conteneur</th><th>IP</th><th>Ports</th><th>État</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="4" class="empty">Aucun conteneur</td></tr>`}</tbody>
+            </table>
+          </div>
+          <div class="actions-bar" style="margin-top:14px">
+            <button type="button" class="btn" data-close-modal>Fermer</button>
+          </div>
+        </div>
+      </div>`;
+    bag.bindAppModalChrome();
+    const goContainer = (id) => {
+      bag.closeAppModal();
+      location.hash = `#containers/${id}`;
+    };
+    host.querySelectorAll('[data-go-container]').forEach((btn) => {
+      btn.addEventListener('click', () => goContainer(btn.dataset.goContainer));
     });
-  }
+    host.querySelectorAll('a.res-user-link').forEach((a) => {
+      a.addEventListener('click', () => bag.closeAppModal());
+    });
+  };
 
 }

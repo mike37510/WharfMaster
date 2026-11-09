@@ -623,17 +623,8 @@ export function installCore() {
       else if (bag.state.route.startsWith('registries/')) await bag.viewRegistryBrowse(bag.state.route.split('/')[1]);
       else if (bag.state.route === 'docs') await bag.viewDocs();
       else if (bag.state.route === 'about') {
-        bag.root.innerHTML = bag.shell('À propos', `<div class="panel-card">
-          <div class="about-brand">${bag.brandLogoImg('about-logo-img')}</div>
-          <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>${bag.esc(bag.state.appVersion || '…')}</strong> — CVE auto Images, volumes bind, métriques conteneur, pack agent ZIP.</p>
-          <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
-          <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
-          <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
-          <p class="muted">Socket : <code>unix:///var/run/docker.sock</code></p>
-          <p class="muted"><a href="/" target="_blank" rel="noopener">Site public</a> — présentation du projet et des outils.</p>
-          <p class="muted" style="margin-bottom:0">Licence : <strong>MIT</strong> — open source, libre d’utilisation. Voir <code>LICENSE</code>.</p>
-        </div>`, { subtitle: 'Informations sur l’application' });
+        location.hash = '#dashboard';
+        return;
       }
       else await bag.viewDashboard();
     } catch (err) {

@@ -17,7 +17,9 @@ final class StacksController extends BaseController
         $filter = null;
         if ($endpointId !== null && (int) $endpointId > 0) {
             $filter = (int) $endpointId;
-            if (!$this->endpointAcl->can($user, $filter, EndpointAcl::READ)) {
+            $hasAcl = $this->endpointAcl->can($user, $filter, EndpointAcl::READ);
+            $hasShare = $this->repo->userHasSharesOnEndpoint(Ownership::userId($user), $filter);
+            if (!$hasAcl && !$hasShare && !Ownership::isGlobalAdmin($user)) {
                 return Response::error('Accès refusé à ce nœud', 403);
             }
         }
@@ -26,18 +28,10 @@ final class StacksController extends BaseController
             Ownership::username($user),
             Ownership::isGlobalAdmin($user) || $isEpAdmin,
             $filter,
+            Ownership::userId($user),
         );
         if ($filter === null && !Ownership::isGlobalAdmin($user)) {
-            $rows = array_values(array_filter($rows, function (array $s) use ($user): bool {
-                $eid = (int) ($s['endpoint_id'] ?? 0);
-                if (!$this->endpointAcl->can($user, $eid, EndpointAcl::READ)) {
-                    return false;
-                }
-                if ($this->endpointAcl->can($user, $eid, EndpointAcl::ADMIN)) {
-                    return true;
-                }
-                return strcasecmp((string) ($s['created_by'] ?? ''), Ownership::username($user)) === 0;
-            }));
+            $rows = array_values(array_filter($rows, fn (array $s): bool => $this->canAccessStack($s, $user)));
         }
         return Response::json(array_map([$this, 'formatStack'], $rows));
     }
@@ -54,7 +48,9 @@ final class StacksController extends BaseController
             Ownership::username($user),
             Ownership::isAdmin($user),
             $filter,
+            Ownership::userId($user),
         );
+        $rows = array_values(array_filter($rows, fn (array $s): bool => $this->canAccessStack($s, $user)));
         $registries = $this->registriesWithPasswordsForUser($user);
         $force = $this->wantsStackUpdateRefresh($request);
         $out = [];

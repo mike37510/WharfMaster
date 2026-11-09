@@ -35,7 +35,6 @@ export function install() {
     ['#users', 'Utilisateurs'],
     ['#teams', 'Équipes'],
     ['#docs', 'Documentation'],
-    ['#about', 'À propos'],
   ];
 
   function levelBadge(level, ok) {

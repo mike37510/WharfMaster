@@ -95,7 +95,6 @@ export function install() {
           <div class="sidebar-bottom">
             <nav class="nav">
               <a href="#docs" class="${bag.state.route === 'docs' ? 'active' : ''}" title="Documentation" aria-label="Documentation"><span class="nav-ico">${bag.ico('docs')}</span><span class="nav-label">Documentation</span></a>
-              <a href="#about" class="${bag.state.route === 'about' ? 'active' : ''}" title="À propos" aria-label="À propos"><span class="nav-ico">${bag.ico('about')}</span><span class="nav-label">À propos</span></a>
               <a href="#logout" title="Déconnexion" aria-label="Déconnexion"><span class="nav-ico">${bag.ico('logout')}</span><span class="nav-label">Déconnexion</span></a>
             </nav>
             <div class="engine-pill" title="${bag.esc((allMode ? 'Tous les nœuds' : engine) + ' · ' + nodeKind + ' · ' + nodeLabel)}">
@@ -489,7 +488,7 @@ export function install() {
     danger = false, info = false, success = false,
     modal, name, running, del, reset, elId, label,
     editTeam, delTeam, delAcl, scanImg, runSched, delSched,
-    statsId, extraClass = '',
+    statsId, shareType, shareKey, extraClass = '',
   }) {
     const withLabel = !!(label && String(label).trim());
     const cls = `btn btn-icon btn-sm${withLabel ? ' btn-icon-label' : ''}${danger ? ' btn-danger' : ''}${info ? ' btn-info' : ''}${success ? ' btn-success' : ''}${extraClass ? ` ${extraClass}` : ''}`;
@@ -513,11 +512,71 @@ export function install() {
       runSched != null ? `data-run-sched="${bag.esc(runSched)}"` : '',
       delSched != null ? `data-del-sched="${bag.esc(delSched)}"` : '',
       statsId != null ? `data-stats-id="${bag.esc(statsId)}"` : '',
+      shareType != null ? `data-share-type="${bag.esc(shareType)}"` : '',
+      shareKey != null ? `data-share-key="${bag.esc(shareKey)}"` : '',
       tag === 'button' ? 'type="button"' : '',
     ].filter(Boolean).join(' ');
     const labelHtml = withLabel ? `<span class="btn-label">${bag.esc(label)}</span>` : '';
     return `<${tag} ${attrs}><span class="btn-ico">${bag.ico(icon)}</span>${labelHtml}</${tag}>`;
   }
+
+  /** Primary icon buttons + overflow "…" menu for secondary actions. */
+  bag.moreActions = function moreActions(primaryHtml, moreHtml) {
+    return `<div class="quick-actions">
+      ${primaryHtml}
+      <div class="qa-more">
+        <button type="button" class="btn btn-icon btn-sm" data-qa-toggle title="Plus d’actions" aria-label="Plus d’actions" aria-expanded="false" aria-haspopup="true">
+          <span class="btn-ico">${bag.ico('more')}</span>
+        </button>
+        <div class="qa-more-menu" hidden role="menu">${moreHtml}</div>
+      </div>
+    </div>`;
+  };
+
+  bag.closeMoreActions = function closeMoreActions(scope = document) {
+    scope.querySelectorAll('.qa-more.is-open').forEach((el) => {
+      el.classList.remove('is-open');
+      const toggle = el.querySelector('[data-qa-toggle]');
+      const menu = el.querySelector('.qa-more-menu');
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+      if (menu) menu.hidden = true;
+    });
+  };
+
+  bag.bindMoreActions = function bindMoreActions(scope = bag.root) {
+    if (!scope) return;
+    scope.querySelectorAll('[data-qa-toggle]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const wrap = btn.closest('.qa-more');
+        if (!wrap) return;
+        const willOpen = !wrap.classList.contains('is-open');
+        bag.closeMoreActions(scope);
+        if (!willOpen) return;
+        wrap.classList.add('is-open');
+        btn.setAttribute('aria-expanded', 'true');
+        const menu = wrap.querySelector('.qa-more-menu');
+        if (menu) menu.hidden = false;
+      };
+    });
+    scope.querySelectorAll('.qa-more-menu').forEach((menu) => {
+      menu.addEventListener('click', () => {
+        // Keep menu open for async busy clicks; close after a tick if action leaves.
+        setTimeout(() => bag.closeMoreActions(scope), 0);
+      });
+    });
+    if (!bag._moreActionsDocBound) {
+      bag._moreActionsDocBound = true;
+      document.addEventListener('click', (e) => {
+        if (e.target.closest?.('.qa-more')) return;
+        bag.closeMoreActions();
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') bag.closeMoreActions();
+      });
+    }
+  };
 
   bag.ico = function ico(name) {
     const icons = {
@@ -559,6 +618,7 @@ export function install() {
       folder: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 3.5h4l1.2 1.5H14V13H2V3.5z"/></svg>',
       file: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 2.5h5.5L12 5v8.5H4V2.5z"/><path d="M9.5 2.5V5H12"/></svg>',
       link: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M6.5 9.5l3-3M7 11.5H5.2A2.2 2.2 0 015.2 7H7m2 1.5h1.8a2.2 2.2 0 010 4.4H9"/></svg>',
+      more: '<svg viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.35"/><circle cx="8" cy="8" r="1.35"/><circle cx="12.5" cy="8" r="1.35"/></svg>',
     };
     return icons[name] || icons.dashboard;
   }

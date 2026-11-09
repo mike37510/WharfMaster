@@ -84,13 +84,21 @@ final class EndpointAcl
         if (Ownership::isAdmin($user)) {
             return $endpoints;
         }
+        $sharedIds = array_fill_keys(
+            $this->repo->listEndpointIdsSharedWithUser(Ownership::userId($user)),
+            true
+        );
         $out = [];
         foreach ($endpoints as $ep) {
             $id = (int) ($ep['id'] ?? 0);
-            if ($this->can($user, $id, self::READ)) {
-                $ep['_aclRole'] = $this->roleFor($user, $id);
-                $out[] = $ep;
+            $viaAcl = $this->can($user, $id, self::READ);
+            $viaShare = isset($sharedIds[$id]);
+            if (!$viaAcl && !$viaShare) {
+                continue;
             }
+            $ep['_aclRole'] = $viaAcl ? $this->roleFor($user, $id) : self::OPERATE;
+            $ep['_viaShare'] = $viaShare && !$viaAcl;
+            $out[] = $ep;
         }
         return $out;
     }

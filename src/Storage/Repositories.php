@@ -621,21 +621,59 @@ final class Repositories
         return $stmt->fetchAll() ?: [];
     }
 
-    /** @return list<array<string, mixed>> */
-    public function listStacksForUser(?string $username, bool $isAdmin, ?int $endpointId = null): array
+    /**
+     * Stacks owned by the user OR shared with them (independent of endpoint ACL).
+     * Pass $userId to include resource_shares; without it, ownership-only (legacy).
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listStacksForUser(?string $username, bool $isAdmin, ?int $endpointId = null, ?int $userId = null): array
     {
         if ($isAdmin) {
             return $this->listStacks($endpointId);
         }
+        $uname = $username ?? '';
+        $uid = $userId ?? 0;
         if ($endpointId !== null) {
+            if ($uid > 0) {
+                $stmt = $this->pdo->prepare(
+                    "SELECT DISTINCT s.* FROM stacks s
+                     LEFT JOIN resource_shares sh
+                       ON sh.resource_type = 'stack'
+                      AND sh.endpoint_id = s.endpoint_id
+                      AND sh.resource_key = CAST(s.id AS TEXT)
+                      AND sh.grantee_type = 'user'
+                      AND sh.grantee_id = ?
+                     WHERE s.endpoint_id = ?
+                       AND (s.created_by = ? OR sh.id IS NOT NULL)
+                     ORDER BY s.id ASC"
+                );
+                $stmt->execute([$uid, $endpointId, $uname]);
+                return $stmt->fetchAll() ?: [];
+            }
             $stmt = $this->pdo->prepare(
                 'SELECT * FROM stacks WHERE endpoint_id = ? AND created_by = ? ORDER BY id ASC'
             );
-            $stmt->execute([$endpointId, $username ?? '']);
+            $stmt->execute([$endpointId, $uname]);
+            return $stmt->fetchAll() ?: [];
+        }
+        if ($uid > 0) {
+            $stmt = $this->pdo->prepare(
+                "SELECT DISTINCT s.* FROM stacks s
+                 LEFT JOIN resource_shares sh
+                   ON sh.resource_type = 'stack'
+                  AND sh.endpoint_id = s.endpoint_id
+                  AND sh.resource_key = CAST(s.id AS TEXT)
+                  AND sh.grantee_type = 'user'
+                  AND sh.grantee_id = ?
+                 WHERE s.created_by = ? OR sh.id IS NOT NULL
+                 ORDER BY s.id ASC"
+            );
+            $stmt->execute([$uid, $uname]);
             return $stmt->fetchAll() ?: [];
         }
         $stmt = $this->pdo->prepare('SELECT * FROM stacks WHERE created_by = ? ORDER BY id ASC');
-        $stmt->execute([$username ?? '']);
+        $stmt->execute([$uname]);
         return $stmt->fetchAll() ?: [];
     }
 
@@ -1410,5 +1448,133 @@ final class Repositories
             "DELETE FROM bind_volumes WHERE stack_id = ? AND source = 'stack' AND name NOT IN ($placeholders)"
         );
         $stmt->execute([$stackId, ...$keep]);
+    }
+
+    public const SHARE_TYPES = ['stack', 'container', 'volume', 'network'];
+
+    public function userHasSharesOnEndpoint(int $userId, int $endpointId): bool
+    {
+        if ($userId <= 0 || $endpointId <= 0) {
+            return false;
+        }
+        $stmt = $this->pdo->prepare(
+            "SELECT 1 FROM resource_shares
+             WHERE grantee_type = 'user' AND grantee_id = ? AND endpoint_id = ?
+             LIMIT 1"
+        );
+        $stmt->execute([$userId, $endpointId]);
+        return (bool) $stmt->fetchColumn();
+    }
+
+    /** @return list<int> */
+    public function listEndpointIdsSharedWithUser(int $userId): array
+    {
+        if ($userId <= 0) {
+            return [];
+        }
+        $stmt = $this->pdo->prepare(
+            "SELECT DISTINCT endpoint_id FROM resource_shares
+             WHERE grantee_type = 'user' AND grantee_id = ?"
+        );
+        $stmt->execute([$userId]);
+        return array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+    }
+
+    public function hasResourceShare(int $userId, string $type, int $endpointId, string $key): bool
+    {
+        if ($userId <= 0 || $endpointId <= 0 || $key === '' || !in_array($type, self::SHARE_TYPES, true)) {
+            return false;
+        }
+        $stmt = $this->pdo->prepare(
+            "SELECT 1 FROM resource_shares
+             WHERE grantee_type = 'user' AND grantee_id = ?
+               AND resource_type = ? AND endpoint_id = ? AND resource_key = ?
+             LIMIT 1"
+        );
+        $stmt->execute([$userId, $type, $endpointId, $key]);
+        return (bool) $stmt->fetchColumn();
+    }
+
+    /** @return list<string> */
+    public function listSharedResourceKeys(int $userId, string $type, ?int $endpointId = null): array
+    {
+        if ($userId <= 0 || !in_array($type, self::SHARE_TYPES, true)) {
+            return [];
+        }
+        if ($endpointId !== null) {
+            $stmt = $this->pdo->prepare(
+                "SELECT resource_key FROM resource_shares
+                 WHERE grantee_type = 'user' AND grantee_id = ?
+                   AND resource_type = ? AND endpoint_id = ?"
+            );
+            $stmt->execute([$userId, $type, $endpointId]);
+        } else {
+            $stmt = $this->pdo->prepare(
+                "SELECT resource_key FROM resource_shares
+                 WHERE grantee_type = 'user' AND grantee_id = ? AND resource_type = ?"
+            );
+            $stmt->execute([$userId, $type]);
+        }
+        return array_values(array_filter(array_map('strval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [])));
+    }
+
+    /** @return list<array<string, mixed>> */
+    public function listSharesForResource(string $type, int $endpointId, string $key): array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT s.*, u.username AS grantee_username
+             FROM resource_shares s
+             JOIN users u ON u.id = s.grantee_id
+             WHERE s.resource_type = ? AND s.endpoint_id = ? AND s.resource_key = ?
+             ORDER BY s.id ASC"
+        );
+        $stmt->execute([$type, $endpointId, $key]);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    public function getResourceShare(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM resource_shares WHERE id = ?');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    public function createResourceShare(
+        string $type,
+        int $endpointId,
+        string $key,
+        int $granteeUserId,
+        int $createdByUserId,
+        string $role = 'operate',
+    ): array {
+        $now = time();
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO resource_shares
+             (resource_type, endpoint_id, resource_key, grantee_type, grantee_id, role, created_by_user_id, created_at)
+             VALUES (?, ?, ?, 'user', ?, ?, ?, ?)
+             ON CONFLICT(resource_type, endpoint_id, resource_key, grantee_type, grantee_id)
+             DO UPDATE SET role = excluded.role"
+        );
+        $stmt->execute([$type, $endpointId, $key, $granteeUserId, $role, $createdByUserId, $now]);
+        $shares = $this->listSharesForResource($type, $endpointId, $key);
+        foreach ($shares as $s) {
+            if ((int) $s['grantee_id'] === $granteeUserId) {
+                return $s;
+            }
+        }
+        return $shares[0] ?? [
+            'resource_type' => $type,
+            'endpoint_id' => $endpointId,
+            'resource_key' => $key,
+            'grantee_id' => $granteeUserId,
+            'role' => $role,
+        ];
+    }
+
+    public function deleteResourceShare(int $id): void
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM resource_shares WHERE id = ?');
+        $stmt->execute([$id]);
     }
 }

@@ -145,6 +145,7 @@ export function install() {
         ? '<span class="muted">—</span>'
         : `<div class="quick-actions">
         ${bag.iconBtn({ tag: 'a', href: `#volumes/${encodeURIComponent(v.Name)}`, title: 'Explorer', icon: 'search' })}
+        ${!isBind ? bag.shareBtn('volume', v.Name) : ''}
         ${canDelete ? bag.iconBtn({
           name: v.Name,
           title: isBind ? 'Retirer la déclaration bind' : 'Supprimer',
@@ -190,6 +191,7 @@ export function install() {
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée (lecture)' : 'Volumes Docker et binds' });
     bag.bindRefresh();
+    bag.bindShareButtons();
     bag.bindPagedSearch('volumes');
     bag.bindTableSort('volumes', () => bag.viewVolumes());
     bag.root.querySelectorAll('[data-vol-key]').forEach((btn) => {

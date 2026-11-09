@@ -20,6 +20,35 @@ final class VolumesController extends BaseController
         // Refresh stack-sourced binds so compose bind mounts appear in Volumes
         $this->syncBindVolumesFromEndpointStacks($endpointId);
         $rows = $this->repo->listBindVolumes($endpointId);
+        if (!Ownership::isGlobalAdmin($user) && !$this->endpointAcl->can($user, $endpointId, EndpointAcl::ADMIN)) {
+            $stacks = $this->repo->listStacksForUser(
+                Ownership::username($user),
+                false,
+                $endpointId,
+                Ownership::userId($user),
+            );
+            $stackIds = [];
+            $stackNames = [];
+            foreach ($stacks as $s) {
+                $stackIds[(int) ($s['id'] ?? 0)] = true;
+                $n = strtolower((string) ($s['name'] ?? ''));
+                if ($n !== '') {
+                    $stackNames[$n] = true;
+                }
+            }
+            $uname = strtolower(Ownership::username($user));
+            $rows = array_values(array_filter($rows, static function (array $r) use ($stackIds, $stackNames, $uname): bool {
+                if (strcasecmp((string) ($r['created_by'] ?? ''), $uname) === 0) {
+                    return true;
+                }
+                $sid = (int) ($r['stack_id'] ?? 0);
+                if ($sid > 0 && isset($stackIds[$sid])) {
+                    return true;
+                }
+                $sn = strtolower((string) ($r['stack_name'] ?? ''));
+                return $sn !== '' && isset($stackNames[$sn]);
+            }));
+        }
         return Response::json([
             'Volumes' => array_map([$this, 'formatBindVolume'], $rows),
         ]);

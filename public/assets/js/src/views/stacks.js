@@ -30,13 +30,14 @@ export function install() {
       const search = `${s.Id} ${s.Name} ${node} ${s.CreatedBy || ''} ${stLabel}`.toLowerCase();
       // Actions toujours disponibles (API liée à l’id stack / son nœud)
       const isRunning = stLabel === 'running';
-      const actions = `<div class="quick-actions">
-        ${bag.iconBtn({ tag: 'a', href: `#stacks/${s.Id}`, title: 'Ouvrir', icon: 'edit' })}
-        ${bag.iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
-        ${bag.iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
-        ${bag.iconBtn({ act: 'restart', id: s.Id, title: 'Redémarrer', icon: 'restart' })}
-        ${bag.iconBtn({ act: 'remove', id: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}
-      </div>`;
+      const actions = bag.moreActions(
+        `${bag.iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
+         ${bag.iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
+         ${bag.iconBtn({ act: 'restart', id: s.Id, title: 'Redémarrer', icon: 'restart' })}
+         ${bag.iconBtn({ act: 'remove', id: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}`,
+        `${bag.iconBtn({ tag: 'a', href: `#stacks/${s.Id}`, title: 'Ouvrir', icon: 'edit', label: 'Ouvrir' })}
+         ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'stack', shareKey: String(s.Id), label: 'Partager' })}`,
+      );
       const rowCls = isRunning ? '' : 'row-stopped';
       return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-stack-id="${bag.esc(s.Id)}">
       ${bag.bulkSelectTd(s.Id)}
@@ -81,6 +82,8 @@ export function install() {
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
       </table></div>`, { subtitle: all ? 'Vue agrégée' : 'Projets Compose' });
     bag.bindRefresh();
+    bag.bindShareButtons();
+    bag.bindMoreActions();
     bag.bindPagedSearch('stacks');
     bag.bindTableSort('stacks', () => bag.viewStacks());
     bag.root.querySelectorAll('[data-act]').forEach((btn) => {
@@ -748,12 +751,15 @@ export function install() {
       ${bag.pageHeader(stack.Name, false)}
       <div class="toolbar">
         ${bag.iconBtn({ tag: 'a', href: '#stacks', title: 'Retour', icon: 'back' })}
-        ${bag.iconBtn({ elId: 'edit', title: 'Éditeur', icon: 'edit', info: true })}
-        ${bag.iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: !stackRunning })}
-        ${bag.iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop', danger: stackRunning })}
-        ${bag.iconBtn({ act: 'restart', id: stack.Id, title: 'Redémarrer', icon: 'restart' })}
-        ${bag.iconBtn({ elId: 'stack-pull-redeploy', title: 'Pull images + redéployer', icon: 'pull' })}
-        ${bag.iconBtn({ act: 'remove', id: stack.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+        ${bag.moreActions(
+          `${bag.iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: !stackRunning })}
+           ${bag.iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop', danger: stackRunning })}
+           ${bag.iconBtn({ act: 'restart', id: stack.Id, title: 'Redémarrer', icon: 'restart' })}
+           ${bag.iconBtn({ act: 'remove', id: stack.Id, title: 'Supprimer', icon: 'remove', danger: true })}`,
+          `${bag.iconBtn({ elId: 'edit', title: 'Éditeur', icon: 'edit', info: true, label: 'Éditeur' })}
+           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'stack', shareKey: String(stack.Id), label: 'Partager' })}
+           ${bag.iconBtn({ elId: 'stack-pull-redeploy', title: 'Pull images + redéployer', icon: 'pull', label: 'Pull + redéployer' })}`,
+        )}
       </div>
       <div id="stack-detail-err"></div>
       <div class="panel" style="margin-bottom:1rem">
@@ -807,6 +813,8 @@ export function install() {
         if (errBox) errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
       }
     }, { minMs: 400 });
+    bag.bindShareButtons();
+    bag.bindMoreActions();
     bag.root.querySelectorAll('[data-act]').forEach((btn) => {
       const act = btn.dataset.act;
       const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;

@@ -132,11 +132,23 @@ export const Api = (() => {
       return { filename, size: blob.size };
     },
     users: () => request('/api/users'),
+    usersDirectory: () => request('/api/users/directory'),
     createUser: (Username, Password, Role = 2) =>
       request('/api/users', { method: 'POST', body: JSON.stringify({ Username, Password, Role }) }),
     deleteUser: (id) => request(`/api/users/${id}`, { method: 'DELETE' }),
     changePassword: (id, payload) =>
       request(`/api/users/${id}/passwd`, { method: 'PUT', body: JSON.stringify(payload) }),
+    listShares: (type, endpointId, key) => {
+      const q = new URLSearchParams({
+        type: String(type),
+        endpointId: String(endpointId),
+        key: String(key),
+      });
+      return request(`/api/shares?${q.toString()}`);
+    },
+    createShare: (payload) =>
+      request('/api/shares', { method: 'POST', body: JSON.stringify(payload) }),
+    deleteShare: (id) => request(`/api/shares/${id}`, { method: 'DELETE' }),
     endpoints: () => request('/api/endpoints'),
     nodes: () => request('/api/nodes'),
     joinTokenMeta: () => request('/api/nodes/join-token'),
