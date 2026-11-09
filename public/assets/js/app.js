@@ -1595,7 +1595,7 @@
         <aside class="sidebar${collapsed ? " is-collapsed" : ""}">
           <div class="brand brand-full">
             ${bag.brandLogoImg("brand-logo-img brand-logo-wide", "/assets/img/wharfmaster-logo-light-sm.png")}
-            <div class="brand-ver">v2.1.0</div>
+            <div class="brand-ver">v2.2.0</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
@@ -8302,7 +8302,7 @@ ${title}`;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.1.0", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.2.0", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");
