@@ -29,14 +29,14 @@ if (is_file($jwtSecretFile) && is_readable($jwtSecretFile)) {
 
 return [
     'app_name' => 'WharfMaster',
-    'version' => '2.2.0',
+    'version' => '2.2.1',
     'edition' => 'CE',
     'root' => $root,
     'var_dir' => $varDir,
     'agent_dir' => $root . '/agent',
     'docs_dir' => $root . '/docs',
     'agent_image' => getenv('WHARFMASTER_AGENT_IMAGE')
-        ?: ('ghcr.io/mike37510/wharfmaster-agent:' . (getenv('WHARFMASTER_AGENT_TAG') ?: '2.2.0')),
+        ?: ('ghcr.io/mike37510/wharfmaster-agent:' . (getenv('WHARFMASTER_AGENT_TAG') ?: '2.2.1')),
     'docker_socket' => $dockerSocket,
     'docker_api_version' => getenv('DOCKER_API_VERSION') ?: 'v1.45',
     'sqlite_path' => $varDir . '/dockermanager.sqlite',

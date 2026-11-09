@@ -44,7 +44,7 @@ final class ManifestClient
         $manifestUrl = $base . '/v2/' . $repo . '/manifests/' . rawurlencode($tag);
         $headers = [
             'Accept: ' . self::ACCEPT,
-            'User-Agent: WharfMaster/2.2.0',
+            'User-Agent: WharfMaster/2.2.1',
         ];
         if ($user !== '' || $pass !== '') {
             $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
@@ -56,7 +56,7 @@ final class ManifestClient
             if ($token !== null) {
                 $headers = [
                     'Accept: ' . self::ACCEPT,
-                    'User-Agent: WharfMaster/2.2.0',
+                    'User-Agent: WharfMaster/2.2.1',
                     'Authorization: Bearer ' . $token,
                 ];
                 $res = $this->httpHeadOrGet($manifestUrl, $headers, 8);
@@ -235,7 +235,7 @@ final class ManifestClient
             $query['scope'] = $params['scope'] ?? ('repository:' . $repository . ':pull');
         }
         $url = $realm . (str_contains($realm, '?') ? '&' : '?') . http_build_query($query);
-        $headers = ['Accept: application/json', 'User-Agent: WharfMaster/2.2.0'];
+        $headers = ['Accept: application/json', 'User-Agent: WharfMaster/2.2.1'];
         if ($user !== '' || $pass !== '') {
             $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
         }

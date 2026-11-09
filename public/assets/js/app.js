@@ -6924,7 +6924,7 @@ ${title}`;
       const map = { start: "D\xE9marrer", stop: "Arr\xEAter", restart: "Red\xE9marrer" };
       return map[action] || action || "\u2014";
     };
-    const DOW_LABELS = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
+    bag.DOW_LABELS = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
     bag.pad2 = function pad2(n) {
       return String(Number(n) || 0).padStart(2, "0");
     };
@@ -7168,7 +7168,10 @@ ${title}`;
           preview.textContent = composeText;
         }
       }
-      document.getElementById("edit").onclick = () => bag.showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
+      const editBtn = document.getElementById("edit");
+      if (editBtn) {
+        editBtn.onclick = () => bag.showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
+      }
       bag.onBusyClick(document.getElementById("stack-pull-redeploy"), async () => {
         const errBox = document.getElementById("stack-detail-err");
         if (errBox) errBox.innerHTML = "";
@@ -8994,7 +8997,7 @@ ${title}`;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.2.0", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.2.1", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");

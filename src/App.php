@@ -185,7 +185,7 @@ final class App
         $R->post('/api/schedules/run-due', fn ($r, $p) => $schedules->runDueSchedules($r, $u($p)));
         $R->get('/api/schedules/{id}', fn ($r, $p) => $schedules->getScheduleApi((int) $p['id'], $u($p)));
         $R->put('/api/schedules/{id}', fn ($r, $p) => $schedules->updateSchedule((int) $p['id'], $r, $u($p)));
-        $R->delete('/api/schedules/{id}', fn ($r, $p) => $schedules->deleteSchedule((int) $p['id'], $u($p)));
+        $R->delete('/api/schedules/{id}', fn ($r, $p) => $schedules->deleteSchedule((int) $p['id'], $r, $u($p)));
         $R->post('/api/schedules/{id}/run', fn ($r, $p) => $schedules->runScheduleNow((int) $p['id'], $r, $u($p)));
 
         $R->get('/api/endpoints/{id}/images/scans', fn ($r, $p) => $images->listImageScans((int) $p['id'], $u($p)));

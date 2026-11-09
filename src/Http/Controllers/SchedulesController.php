@@ -7,6 +7,7 @@ use App\Access\EndpointAcl;
 use App\Access\Ownership;
 use App\Http\Request;
 use App\Http\Response;
+use App\Schedule\CronExpr;
 
 final class SchedulesController extends BaseController
 {
@@ -159,9 +160,4 @@ final class SchedulesController extends BaseController
         }
         return Response::json(['Ran' => count($results), 'Results' => $results]);
     }
-
-    /**
-     * @param array<string, mixed> $row
-     * @param array{id:int,username:string,role:int} $user
-     */
 }

@@ -4,9 +4,26 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.2.1] — 2026-11-09
+
 ### Ajouté
+- **Partage de ressources** : partage stack / conteneur / volume / réseau entre utilisateurs (indépendant des ACL nœuds) ; cascade stack → ressources Compose ; `GET/POST/DELETE /api/shares`
 - **Tests API Docker** (Diagnostics) : suite création → suppression (image, volume, réseau, conteneur) sur `#settings/diagnostics/api`
-- **Partage de ressources** : un utilisateur peut partager stack / conteneur / volume / réseau avec un autre utilisateur (indépendant des ACL nœuds) ; bouton Partager + `GET/POST/DELETE /api/shares`
+- Badge version console lu dynamiquement depuis `/api/status`
+
+### Amélioré
+- Menus d’actions conteneurs / stacks (overflow « … »)
+- Modal schéma d’usage réseau (IP / ports)
+- Ordre de navigation latérale
+
+### Corrigé
+- Vérification des mises à jour d’images / stacks (`ImageUpdateChecker` manquant)
+- Création de planifications (`use App\Schedule\CronExpr`)
+- Suppression de planifications (route `DELETE` sans `Request` → TypeError « Erreur interne »)
+- Modal planification (`bag.DOW_LABELS`)
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.2.1`**
 
 ## [2.2.0] — 2026-11-09
 
