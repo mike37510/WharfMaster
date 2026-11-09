@@ -1,4 +1,5 @@
 # WharfMaster — console web Docker (Apache + PHP)
+# DocumentRoot = /var/www/html/public (code & var/ hors webroot)
 FROM php:8.3-apache-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && a2enmod rewrite headers \
   && rm -rf /var/lib/apt/lists/*
 
-# Trivy (image CVE scanner) — installed by default for /api/.../images/scan
+# Trivy (image CVE scanner)
 RUN set -eux; \
   TRIVY_VERSION=0.76.2; \
   ARCH=$(dpkg --print-architecture); \
@@ -25,7 +26,7 @@ RUN set -eux; \
   chmod 0755 /usr/local/bin/trivy; \
   /usr/local/bin/trivy --version
 
-# Docker CLI + Compose plugin (dépôt officiel Docker)
+# Docker CLI + Compose plugin
 RUN set -eux; \
   install -m 0755 -d /etc/apt/keyrings; \
   curl -fsSL https://download.docker.com/linux/debian/gpg \
@@ -42,11 +43,10 @@ RUN set -eux; \
     || ln -sf /usr/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose 2>/dev/null \
     || true
 
-# Uploads volumes (jusqu’à ~300 Mo)
-COPY deploy/php-uploads.ini /usr/local/etc/php/conf.d/zz-wharfmaster-uploads.ini
-COPY deploy/apache-uploads.conf /etc/apache2/conf-available/wharfmaster-uploads.conf
+COPY docker/php-uploads.ini /usr/local/etc/php/conf.d/zz-wharfmaster-uploads.ini
+COPY docker/apache-uploads.conf /etc/apache2/conf-available/wharfmaster-uploads.conf
+COPY docker/apache-docker.conf /etc/apache2/sites-available/000-default.conf
 RUN a2enconf wharfmaster-uploads \
-  && sed -ri 's/AllowOverride None/AllowOverride All/g' /etc/apache2/apache2.conf \
   && printf 'ServerName wharfmaster\n' > /etc/apache2/conf-available/servername.conf \
   && a2enconf servername
 
@@ -54,19 +54,22 @@ WORKDIR /var/www/html
 
 COPY . /var/www/html
 
-RUN mkdir -p /var/www/html/data/compose /var/www/html/data/dockerfiles \
-  && chown -R www-data:www-data /var/www/html \
-  && chmod 700 /var/www/html/data \
-  && chmod +x /var/www/html/deploy/docker-entrypoint.sh
+RUN mkdir -p /var/www/html/var/compose /var/www/html/var/dockerfiles \
+  && chown -R www-data:www-data /var/www/html/var \
+  && chmod 700 /var/www/html/var \
+  && chmod +x /var/www/html/docker/docker-entrypoint.sh /var/www/html/bin/init.php \
+  && chmod +x /var/www/html/agent/install.sh /var/www/html/agent/deploy.sh /var/www/html/agent/entrypoint.sh 2>/dev/null || true
 
-ENV DOCKER_SOCKET=/var/run/docker.sock \
+ENV APACHE_DOCUMENT_ROOT=/var/www/html/public \
+    DOCKER_SOCKET=/var/run/docker.sock \
     DOCKER_BIN=/usr/bin/docker \
     COMPOSE_BIN=/usr/bin/docker \
     DOCKER_API_VERSION=v1.45 \
-    TRIVY_BIN=/usr/local/bin/trivy
+    TRIVY_BIN=/usr/local/bin/trivy \
+    WHARFMASTER_VAR=/var/www/html/var
 
 EXPOSE 80
-VOLUME ["/var/www/html/data"]
+VOLUME ["/var/www/html/var"]
 
-ENTRYPOINT ["/var/www/html/deploy/docker-entrypoint.sh"]
+ENTRYPOINT ["/var/www/html/docker/docker-entrypoint.sh"]
 CMD ["apache2-foreground"]

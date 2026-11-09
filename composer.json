@@ -1,0 +1,25 @@
+{
+  "name": "mike37510/wharfmaster",
+  "description": "WharfMaster — console web Docker (équipes, ACL, SSO AD, scheduler, CVE Trivy)",
+  "type": "project",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.2",
+    "ext-pdo_sqlite": "*",
+    "ext-json": "*",
+    "ext-curl": "*",
+    "ext-openssl": "*",
+    "ext-zip": "*"
+  },
+  "suggest": {
+    "ext-ldap": "Required for Active Directory / LDAP SSO"
+  },
+  "autoload": {
+    "psr-4": {
+      "App\\": "src/"
+    }
+  },
+  "scripts": {
+    "init": "php bin/init.php"
+  }
+}

@@ -1,0 +1,27 @@
+RewriteEngine On
+
+# Pass Authorization through to PHP (Apache often strips it)
+RewriteCond %{HTTP:Authorization} .
+RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+# Deny hidden / sensitive under DocumentRoot
+RewriteRule (^|/)\. - [F,L]
+RewriteRule \.(sqlite3?|db|sql|secret|env|ini|log|bak|old)$ - [F,L]
+
+# Existing static files (assets/, _x/, robots.txt, …)
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Front controller
+RewriteRule ^ index.php [L,QSA]
+
+<IfModule mod_headers.c>
+  Header set X-Content-Type-Options "nosniff"
+  Header set X-Frame-Options "DENY"
+  Header set Referrer-Policy "same-origin"
+  Header set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  Header set Cross-Origin-Resource-Policy "same-origin"
+  Header always unset X-Powered-By
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains" env=HTTPS
+</IfModule>

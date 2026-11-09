@@ -2,6 +2,27 @@
 
 Toutes les dates sont en UTC+1.
 
+## [2.2.0] — 2026-11-09
+
+### Breaking
+- **DocumentRoot = `public/` uniquement** — `src/`, `config/`, `var/`, `agent/` hors webroot
+- Front controller unique `public/index.php` (`/api`, `/app`, `/agent/*`, `/docs/*`, `/` vitrine)
+- Plus de fallback **`/var/run/docker.so`** ni rename auto **`portainer.sqlite`** — lancer `php bin/migrate-legacy.php`
+- URLs `/public/…` → `/assets/…` et `/agent/…` ; volume runtime = `var/`
+
+### Ajouté
+- **Diagnostics admin** : Paramètres → Diagnostics (`#settings/diagnostics`) + `GET /api/system/diagnostics`
+- Structure `docker/`, `bin/`, `SECURITY.md`, `composer.json`, `package.json` (esbuild)
+- Site vitrine servi sur `/` depuis `site/`
+
+### Code
+- **PHP** : kernel `App` + `Http\Router` + `AppContext` + contrôleurs par domaine
+- **JS** : modules ES sous `public/assets/js/src/` ; bundle `npm run build` → `public/assets/js/app.js`
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.2.0`**
+- Migration : `php bin/migrate-legacy.php` puis rebuild image
+
 ## [2.1.0] — 2026-11-09
 
 ### Ajouté
@@ -107,7 +128,7 @@ Release majeure : gouvernance multi-équipes, SSO AD, ACL par nœud, scheduler, 
 ## [1.4.5] — 2026-11-08
 
 ### Ajouté
-- **Installation Docker Compose** : `Dockerfile`, `docker-compose.yml`, `.env.example`, entrypoint socket/`data/`
+- **Installation Docker Compose** : `Dockerfile`, `docker-compose.yml`, `.env.example`, entrypoint socket/`var/`
 - **Backup complet** (admin, Paramètres) : ZIP SQLite + Compose + Dockerfiles + JWT (`GET /api/backup`)
 - Point d’entrée physique **`/app`** (`app/index.php`) pour éviter le 404 Apache si rewrite/AllowOverride manque
 - Exemple vhost [`deploy/apache-vhost.conf`](deploy/apache-vhost.conf)
@@ -163,10 +184,10 @@ Release majeure : gouvernance multi-équipes, SSO AD, ACL par nœud, scheduler, 
 ### Ajouté
 - **Pinning TLS agent** : empreinte SHA-256 stockée à la jointure / premier ping (TOFU) ; refus si mismatch
 - **Chiffrement at-rest** des mots de passe registres (AES-256-GCM, clé `WM_MASTER_KEY` ou `jwt.secret`)
-- **`GET /api/health`** : docker, compose, droits `data/`, SQLite
+- **`GET /api/health`** : docker, compose, droits `var/`, SQLite
 - **`GET /api/backup`** (admin) : export SQLite cohérent
 - Image agent **versionnée** (`…/wharfmaster-agent:1.4.0`) injectée dans la commande d’install
-- Script [`scripts/sync-agent.sh`](scripts/sync-agent.sh) ; HSTS si HTTPS
+- Script [`(supprimé — une seule copie agent/)`]((supprimé — une seule copie agent/)) ; HSTS si HTTPS
 
 ### Modifié
 - Colonne Nœuds TLS : badge compact + courte empreinte (`pin abcdef…`)

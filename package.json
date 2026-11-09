@@ -1,0 +1,12 @@
+{
+  "name": "wharfmaster",
+  "private": true,
+  "scripts": {
+    "build": "esbuild public/assets/js/src/main.js --bundle --format=iife --outfile=public/assets/js/app.js --target=es2020",
+    "build:map": "esbuild public/assets/js/src/main.js --bundle --format=iife --outfile=public/assets/js/app.js --target=es2020 --sourcemap",
+    "build:min": "esbuild public/assets/js/src/main.js --bundle --format=iife --outfile=public/assets/js/app.js --target=es2020 --minify"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

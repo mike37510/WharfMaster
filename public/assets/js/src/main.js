@@ -1,0 +1,44 @@
+import { installCore } from './core.js';
+import { install as installMetrics } from './metrics/index.js';
+import { install as installCve } from './cve.js';
+import { install as installUi } from './ui/shell.js';
+import { install as install_dashboard } from './views/dashboard.js';
+import { install as install_containers } from './views/containers.js';
+import { install as install_images } from './views/images.js';
+import { install as install_volumes } from './views/volumes.js';
+import { install as install_networks } from './views/networks.js';
+import { install as install_stacks } from './views/stacks.js';
+import { install as install_registries } from './views/registries.js';
+import { install as install_nodes } from './views/nodes.js';
+import { install as install_settings } from './views/settings.js';
+import { install as install_diagnostics } from './views/diagnostics.js';
+import { install as install_docs } from './views/docs.js';
+import { install as install_activity } from './views/activity.js';
+import { install as install_users } from './views/users.js';
+import { install as install_teams } from './views/teams.js';
+
+import { bag } from './bag.js';
+
+installCore();
+bag.applyTheme(bag.readTheme());
+bag.applySidebarCollapsed(bag.readSidebarCollapsed());
+installMetrics();
+installCve();
+installUi();
+install_dashboard();
+install_containers();
+install_images();
+install_volumes();
+install_networks();
+install_stacks();
+install_registries();
+install_nodes();
+install_settings();
+install_diagnostics();
+install_docs();
+install_activity();
+install_users();
+install_teams();
+
+window.addEventListener('hashchange', () => bag.route());
+bag.boot();

@@ -6,35 +6,69 @@
 |---|---|
 | **Version** | 2.1.0 |
 | **Console** | `/app` |
-| **Site public** | `/` |
 | **API** | `/api` |
+| **DocumentRoot** | `public/` uniquement |
+| **Données** | `var/` (volume Docker) |
 | **Dépôt** | https://github.com/mike37510/WharfMaster |
 
 <p align="center">
-  <img src="public/img/wharfmaster-logo.jpg" alt="WharfMaster" width="420">
+  <img src="public/assets/img/wharfmaster-logo.jpg" alt="WharfMaster" width="420">
 </p>
+
+## Structure
+
+```
+WharfMaster/
+├── public/                 ← SEUL dossier exposé (DocumentRoot)
+│   ├── index.php           ← front controller (/api, /app, /agent/*, /docs/*)
+│   ├── app.html            ← SPA console
+│   └── assets/js/src/      ← modules ES (api, ui, views, metrics…)
+│       └── … bundle → assets/js/app.js  (npm run build)
+├── src/
+│   ├── App.php             ← kernel (wiring + routes)
+│   └── Http/
+│       ├── Router.php
+│       ├── AppContext.php
+│       └── Controllers/    ← domaines (stacks, images, nodes…)
+├── config/                 ← configuration lecture seule
+├── bin/                    ← init, migrate-legacy, scheduler
+├── var/                    ← runtime (SQLite, jwt.secret, compose…) = volume
+├── agent/                  ← une seule copie (servie via /agent/…)
+├── docker/
+├── docs/
+├── site/                   ← vitrine (hors webroot)
+├── package.json            ← esbuild
+└── composer.json, docker-compose.yml, README, CHANGELOG, SECURITY
+```
+
+Avant upgrade / si ancienne base `portainer.sqlite` :
+
+```bash
+php bin/migrate-legacy.php
+npm install && npm run build   # régénère public/assets/js/app.js
+```
 
 ## Captures d’écran
 
 ### Tableau de bord
 
-![Tableau de bord WharfMaster](public/site/shots/dashboard.png)
+![Tableau de bord WharfMaster](site/shots/dashboard.png)
 
 ### Conteneurs
 
-![Liste des conteneurs](public/site/shots/containers.png)
+![Liste des conteneurs](site/shots/containers.png)
 
 ### Explorateur de volumes
 
-![Explorateur de volumes](public/site/shots/volume-browse.png)
+![Explorateur de volumes](site/shots/volume-browse.png)
 
 ### Images
 
-![Images Docker](public/site/shots/images.png)
+![Images Docker](site/shots/images.png)
 
 ### Connexion
 
-![Écran de connexion](public/site/shots/login.png)
+![Écran de connexion](site/shots/login.png)
 
 ---
 
@@ -91,7 +125,7 @@ Les **stacks Compose** peuvent être déployées sur un nœud agent : le princip
 Exemple (valeurs déjà remplies par l’UI) :
 
 ```bash
-curl -fsSL https://VOTRE-SERVEUR/public/agent/install.sh | sh -s -- \
+curl -fsSL https://VOTRE-SERVEUR/agent/install.sh | sh -s -- \
   --url https://VOTRE-SERVEUR \
   --token wmj_... \
   --advertise https://192.168.1.5:9001 \
@@ -104,7 +138,7 @@ Optionnel : `--stacks-dir /chemin` (défaut `/var/lib/wharfmaster/stacks`).
 
 Le nœud local ne peut pas être délié. Relancer `install.sh` sur le même advertise **rejoint** le nœud (nouveau secret) et met à jour l’image agent (Compose inclus). Les échanges HTTP non chiffrés vers l’agent sont refusés à la jointure.
 
-Fichiers agent : [`agent/`](agent/), script public : [`public/agent/install.sh`](public/agent/install.sh).
+Fichiers agent : [`agent/`](agent/) — servis via `/agent/install.sh` (et autres fichiers allowlistés). Pack ZIP disponible depuis **Nœuds → Ajouter un nœud**.
 
 ---
 
@@ -117,7 +151,7 @@ Fichiers agent : [`agent/`](agent/), script public : [`public/agent/install.sh`]
 **Install Apache sur l’hôte** — alternativement :
 - PHP 8.2+ + Apache (`mod_rewrite`, `AllowOverride All`)
 - Socket Docker + binaires `docker` / `docker compose`
-- Droits d’écriture sur `data/`
+- Droits d’écriture sur `var/`
 
 ---
 
@@ -148,7 +182,7 @@ Ouvrir **http://localhost:9000/app** (ou `WHARFMASTER_PORT`) → créer le compt
 | [`Dockerfile`](Dockerfile) | Image Apache + PHP 8.3 + Docker CLI / Compose |
 | [`docker-compose.yml`](docker-compose.yml) | Port `9000`, volume données, socket Docker, service **scheduler** |
 | [`.env.example`](.env.example) | `WHARFMASTER_PORT`, `DOCKER_GID`, `DOCKER_SOCK_PATH` |
-| [`deploy/docker-entrypoint.sh`](deploy/docker-entrypoint.sh) | Prépare `data/` + droits socket |
+| [`docker/docker-entrypoint.sh`](docker/docker-entrypoint.sh) | Prépare `var/` + droits socket |
 
 **Où sont les données ?** volume Docker nommé `wharfmaster-data` → SQLite, stacks Compose, Dockerfiles, secret JWT.  
 **Backup :** Paramètres (admin) → *Télécharger le backup complet*, ou `GET /api/backup`.
@@ -182,43 +216,44 @@ cd WharfMaster
 
 #### 2. Déployer sous Apache
 
-**Important :** le `DocumentRoot` doit être la **racine du dépôt** (là où se trouvent `api/`, `public/`, `app/`, `.htaccess`) — pas un sous-dossier, pas le parent.
+**Important :** le `DocumentRoot` doit être **`…/public`** uniquement (pas la racine du dépôt).
 
-Exemple (fichier prêt : [`deploy/apache-vhost.conf`](deploy/apache-vhost.conf)) :
+Exemple (fichier prêt : [`docker/apache-vhost.conf`](docker/apache-vhost.conf)) :
 
 ```bash
 sudo git clone https://github.com/mike37510/WharfMaster.git /var/www/wharfmaster
-sudo cp /var/www/wharfmaster/deploy/apache-vhost.conf /etc/apache2/sites-available/wharfmaster.conf
-# Éditer ServerName + DocumentRoot si besoin
+sudo cp /var/www/wharfmaster/docker/apache-vhost.conf /etc/apache2/sites-available/wharfmaster.conf
+# Éditer ServerName si besoin
 sudo a2enmod rewrite headers
 sudo a2ensite wharfmaster
+php /var/www/wharfmaster/bin/init.php
 sudo systemctl reload apache2
 ```
 
 ```apache
 <VirtualHost *:80>
     ServerName wharfmaster.example.com
-    DocumentRoot /var/www/wharfmaster
+    DocumentRoot /var/www/wharfmaster/public
 
-    <Directory /var/www/wharfmaster>
+    <Directory /var/www/wharfmaster/public>
         AllowOverride All
         Require all granted
     </Directory>
 </VirtualHost>
 ```
 
-Si `https://…/app` renvoie le **404 Apache** (« The requested URL was not found ») :
-1. Vérifier `DocumentRoot` → doit contenir `ls /chemin/app/index.php`
+Si `https://…/app` renvoie le **404 Apache** :
+1. Vérifier `DocumentRoot` → `ls /chemin/public/index.php` et `app.html`
 2. `sudo a2enmod rewrite && sudo systemctl reload apache2`
-3. `AllowOverride All` sur ce Directory (sinon le `.htaccess` est ignoré)
-4. Derrière un reverse-proxy : proxy vers le bon port (Compose = `9000` par défaut), pas un Apache vide sur le 80 hôte
+3. `AllowOverride All` sur `public/` (sinon le `.htaccess` est ignoré)
+4. Derrière un reverse-proxy : proxy vers le bon port (Compose = `9000` par défaut)
 
 #### 3. Permissions
 
 ```bash
-mkdir -p data
-chown -R www-data:www-data data
-chmod 700 data
+php bin/init.php
+chown -R www-data:www-data var
+chmod 700 var
 ```
 
 L’utilisateur Apache doit pouvoir lire/écrire le socket Docker (groupe `docker` en général).
@@ -227,10 +262,10 @@ L’utilisateur Apache doit pouvoir lire/écrire le socket Docker (groupe `docke
 
 | URL | Rôle |
 |-----|------|
-| `http://votre-hote/` | Site public de présentation |
+| `http://votre-hote/` | Redirige vers `/app` |
 | `http://votre-hote/app` | Console WharfMaster |
 | `http://votre-hote/api/status` | Version / InstanceID |
-| `http://votre-hote/api/health` | Santé (docker, compose, `data/`) |
+| `http://votre-hote/api/health` | Santé (docker, compose, `var/`) |
 | `http://votre-hote/api/backup` | Backup ZIP complet admin (SQLite, Compose, Dockerfiles, JWT) |
 
 ---
@@ -254,7 +289,7 @@ Il n’y a **pas** de mot de passe par défaut : vous le choisissez à l’initi
 | Utilisateur | celui créé à l’init (souvent `admin`) |
 | Mot de passe | celui défini à l’initialisation |
 
-> Si vous avez oublié le mot de passe admin : réinitialisez-le via la base SQLite `data/dockermanager.sqlite` (table `users`) ou recréez un environnement propre en vidant `data/` (perte des users / stacks enregistrés).
+> Si vous avez oublié le mot de passe admin : réinitialisez-le via la base SQLite `var/dockermanager.sqlite` (table `users`) ou recréez un environnement propre en vidant `var/` (perte des users / stacks enregistrés).
 
 ### Comptes utilisateurs
 
@@ -267,16 +302,16 @@ SSO optionnel : **Paramètres → Authentification** (LDAP / Active Directory).
 
 ## Configuration
 
-Fichier principal : [`config.php`](config.php)
+Fichier principal : [`config/app.php`](config/app.php) (lecture seule — init via [`bin/init.php`](bin/init.php))
 
 | Clé | Description | Défaut |
 |-----|-------------|--------|
 | `docker_socket` | Socket Docker | auto (`DOCKER_SOCKET` / `.so` / `.sock`) |
-| `sqlite_path` | Base SQLite | `data/dockermanager.sqlite` |
-| `jwt_secret` | Secret JWT (fichier) | `data/jwt.secret` (généré auto) |
+| `sqlite_path` | Base SQLite | `var/dockermanager.sqlite` |
+| `jwt_secret` | Secret JWT (fichier) | `var/jwt.secret` (généré auto) |
 | `jwt_ttl` | Durée de session | 4 heures |
-| `compose_dir` | Projets Compose | `data/compose` |
-| `dockerfiles_dir` | Dockerfiles sauvés | `data/dockerfiles` |
+| `compose_dir` | Projets Compose | `var/compose` |
+| `dockerfiles_dir` | Dockerfiles sauvés | `var/dockerfiles` |
 
 Variables d’environnement utiles :
 
@@ -297,17 +332,17 @@ export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.1.0
 curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.zip https://VOTRE-SERVEUR/api/backup
 # Base seule : …/api/backup?format=sqlite
 
-# Restauration : arrêter Apache, remplacer data/dockermanager.sqlite, redémarrer
-# Conserver aussi data/jwt.secret (et WM_MASTER_KEY) pour déchiffrer les registres.
+# Restauration : arrêter Apache, remplacer var/dockermanager.sqlite, redémarrer
+# Conserver aussi var/jwt.secret (et WM_MASTER_KEY) pour déchiffrer les registres.
 ```
 
-Sources agent : éditer [`agent/`](agent/) puis `sh scripts/sync-agent.sh` avant release.
+Sources agent : éditer [`agent/`](agent/) puis `sh (supprimé — une seule copie agent/)` avant release.
 
 ---
 
 ## Sécurité (rappel)
 
-- **`data/`** contient JWT + SQLite → ne pas exposer (bloqué par `.htaccess` / Apache)
+- **`var/`** contient JWT + SQLite → ne pas exposer (bloqué par `.htaccess` / Apache)
 - En production : **HTTPS** obligatoire (HSTS activé si `HTTPS=on`)
 - Agents : empreinte TLS épinglée (SHA-256) ; mismatch → refus (rejoindre le nœud)
 - Mots de passe registres chiffrés at-rest (`enc:v1:…`)
@@ -366,24 +401,7 @@ Authentification : header `Authorization: Bearer <jwt>` (obtenu via `POST /api/a
 
 ## Structure du dépôt
 
-```
-├── api/                 Front controller API PHP
-├── agent/               Agent distant (Dockerfile + PHP)
-├── docs/                Documentation (`DOCUMENTATION.md`) + visuels API
-├── public/
-│   ├── index.html       SPA console (/app)
-│   ├── js/ css/         Interface
-│   ├── img/             Logo WharfMaster
-│   └── site/            Site public (/)
-├── src/                 Code applicatif PHP
-├── config.php           Configuration
-├── index.php            Entrée racine
-├── .htaccess            Routage + protections
-├── CHANGELOG.md
-└── README.md
-```
-
-Le dossier `data/` (runtime) est **ignoré par git** (secrets, base, compose déployés).
+Voir le schéma en tête de README. En résumé : **seul `public/` est exposé** ; `var/` (runtime) est **ignoré par git**.
 
 ---
 
@@ -395,7 +413,7 @@ Le dossier `data/` (runtime) est **ignoré par git** (secrets, base, compose dé
 | « Docker offline » | Socket accessible par `www-data` ? `ls -l /var/run/docker.sock` |
 | Stacks Compose échouent | `docker` / `docker compose` dans le PATH Apache |
 | Impossible de se connecter | Mot de passe ≥ 10 car. lettre+chiffre ; rate-limit éventuel |
-| Réinit complète | Arrêter Apache, supprimer `data/`, redémarrer → nouvel admin |
+| Réinit complète | Arrêter Apache, supprimer `var/`, redémarrer → nouvel admin |
 
 ---
 

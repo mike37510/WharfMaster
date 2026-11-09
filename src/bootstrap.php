@@ -19,13 +19,23 @@ spl_autoload_register(static function (string $class): void {
     }
 });
 
-$config = require dirname(__DIR__) . '/config.php';
+$root = dirname(__DIR__);
+\App\Support\RuntimeInit::ensure($root);
 
-if (!is_dir($config['compose_dir'])) {
-    mkdir($config['compose_dir'], 0755, true);
+$config = require $root . '/config/app.php';
+
+if (($config['jwt_secret'] ?? '') === '') {
+    http_response_code(503);
+    header('Content-Type: application/json');
+    echo json_encode(['message' => 'WharfMaster non initialisé — exécutez bin/init.php']);
+    exit;
 }
-if (!is_dir($config['dockerfiles_dir'])) {
-    mkdir($config['dockerfiles_dir'], 0755, true);
+
+foreach (['compose_dir', 'dockerfiles_dir'] as $key) {
+    $dir = (string) ($config[$key] ?? '');
+    if ($dir !== '' && !is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
 }
 
 $db = new App\Storage\Database($config['sqlite_path']);

@@ -8,7 +8,7 @@ ADVERTISE=""
 NAME=""
 PORT="9001"
 # Prefer versioned tag (principal injects --image); latest only as last resort
-IMAGE="${WHARFMASTER_AGENT_IMAGE:-ghcr.io/mike37510/wharfmaster-agent:2.1.0}"
+IMAGE="${WHARFMASTER_AGENT_IMAGE:-ghcr.io/mike37510/wharfmaster-agent:2.2.0}"
 CONTAINER_NAME="wharfmaster-agent"
 TLS_CN=""
 TLS_DAYS="365"
@@ -87,14 +87,14 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 SOCK=""
-for c in /var/run/docker.sock /var/run/docker.so; do
+for c in /var/run/docker.sock; do
   if [ -S "$c" ] || [ -e "$c" ]; then
     SOCK="$c"
     break
   fi
 done
 if [ -z "$SOCK" ]; then
-  echo "Docker socket not found" >&2
+  echo "Docker socket not found (/var/run/docker.sock). Set DOCKER_SOCKET if needed." >&2
   exit 1
 fi
 
@@ -178,10 +178,10 @@ build_local_agent() {
       exit 1
     fi
   }
-  fetch "$URL/public/agent/agent.php" "$BUILD/agent.php"
-  fetch "$URL/public/agent/router.php" "$BUILD/router.php"
-  fetch "$URL/public/agent/entrypoint.sh" "$BUILD/entrypoint.sh"
-  curl -fsS "$URL/public/agent/Dockerfile" -o "$BUILD/Dockerfile" 2>/dev/null || cat > "$BUILD/Dockerfile" <<'DF'
+  fetch "$URL/agent/agent.php" "$BUILD/agent.php"
+  fetch "$URL/agent/router.php" "$BUILD/router.php"
+  fetch "$URL/agent/entrypoint.sh" "$BUILD/entrypoint.sh"
+  curl -fsS "$URL/agent/Dockerfile" -o "$BUILD/Dockerfile" 2>/dev/null || cat > "$BUILD/Dockerfile" <<'DF'
 FROM php:8.3-cli-alpine
 RUN apk add --no-cache curl openssl socat docker-cli docker-cli-compose
 WORKDIR /app

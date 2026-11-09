@@ -1,4 +1,0 @@
-User-agent: *
-Disallow: /z/
-Disallow: /public/_x/
-Allow: /

@@ -4,11 +4,12 @@
 #   → http://localhost:9000/app
 #
 # Première visite : créer le compte administrateur.
+# DocumentRoot = public/ uniquement ; données dans le volume var/.
 
 services:
   wharfmaster:
     build: .
-    image: wharfmaster:2.1.0
+    image: wharfmaster:2.2.0
     container_name: wharfmaster
     restart: unless-stopped
     ports:
@@ -16,14 +17,12 @@ services:
     environment:
       DOCKER_SOCKET: /var/run/docker.sock
       DOCKER_API_VERSION: ${DOCKER_API_VERSION:-v1.45}
-      # Image agent proposée dans l’UI Nœuds (optionnel)
-      # WHARFMASTER_AGENT_IMAGE: ghcr.io/mike37510/wharfmaster-agent:2.1.0
+      WHARFMASTER_VAR: /var/www/html/var
+      # WHARFMASTER_AGENT_IMAGE: ghcr.io/mike37510/wharfmaster-agent:2.2.0
     volumes:
       # Persistance : SQLite, stacks Compose, Dockerfiles, JWT
-      - wharfmaster-data:/var/www/html/data
-      # API Docker de l’hôte (override : DOCKER_SOCK_PATH=/var/run/docker.so)
+      - wharfmaster-data:/var/www/html/var
       - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
-    # GID du groupe docker hôte (recommandé). Ex. : 999 ou 989
     group_add:
       - "${DOCKER_GID:-999}"
 
@@ -38,7 +37,7 @@ services:
       SCHEDULER_KEY_FILE: /data/scheduler.api_key
     volumes:
       - wharfmaster-data:/data:ro
-      - ./deploy/scheduler-entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/scheduler-entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
 
 volumes:

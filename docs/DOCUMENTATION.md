@@ -4,9 +4,9 @@ Guide d’utilisation de la console et de l’**API HTTP**. Version applicative 
 
 | | |
 |---|---|
-| Console | `/app` |
-| Site public | `/` |
+| Console | `/app` (`/` redirige vers `/app`) |
 | API | `/api` |
+| DocumentRoot | `public/` uniquement |
 | Santé | `GET /api/health` |
 | Dépôt | https://github.com/mike37510/WharfMaster |
 
@@ -44,7 +44,7 @@ Principal (PHP/Apache + SQLite)
 |-----------|------|
 | Principal | UI, auth, validation Compose, miroir YAML, proxy Docker |
 | Agent | Proxy Engine + API `/compose/*` sur chaque hôte distant |
-| SQLite `data/` | utilisateurs, endpoints, stacks, registres, audit |
+| SQLite `var/` | utilisateurs, endpoints, stacks, registres, audit |
 
 Les stacks distantes : le principal **valide** (`ComposePolicy` + `docker compose config`) et **stocke un miroir** ; le déploiement réel (`up` / `down` / start / stop) est délégué à l’agent.
 
@@ -126,12 +126,13 @@ Fichiers : `Dockerfile`, `docker-compose.yml`, `.env.example`. Données dans le 
 ### Apache sur l’hôte
 
 Prérequis : PHP 8.2+, Apache (`mod_rewrite`, `AllowOverride All`), socket Docker, binaires `docker` + Compose.  
-`DocumentRoot` = racine du dépôt (présence de `app/index.php`). Voir `deploy/apache-vhost.conf` et `README.md`.
+`DocumentRoot` = **`public/`** uniquement. Voir `docker/apache-vhost.conf` et `README.md`.
 
 ```bash
 git clone https://github.com/mike37510/WharfMaster.git
 cd WharfMaster
-mkdir -p data && chown -R www-data:www-data data && chmod 700 data
+php bin/init.php
+chown -R www-data:www-data var && chmod 700 var
 ```
 
 Variables utiles :
@@ -450,7 +451,7 @@ Image : `ghcr.io/mike37510/wharfmaster-agent:2.1.0` (ou build local).
 Install :
 
 ```bash
-curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
+curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
   --url https://SERVEUR \
   --token wmj_… \
   --advertise https://IP:9001 \
@@ -468,7 +469,7 @@ curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
 - JWT TTL 4 h ; rôle relu en base à chaque requête.
 - TLS agent : empreinte SHA-256 ; refresh pin seulement si `/health` Bearer OK (renouvellement cert).
 - HSTS si `HTTPS=on`.
-- `data/`, `src/`, `config.php` non exposés via `.htaccess`.
+- DocumentRoot = `public/` uniquement ; `var/`, `src/`, `config/`, `agent/` hors webroot.
 
 ---
 
@@ -490,9 +491,11 @@ curl -fsSL https://SERVEUR/public/agent/install.sh | sh -s -- \
 |---------|------|
 | `README.md` | Install & overview |
 | `CHANGELOG.md` | Historique versions |
-| `docs/DOCUMENTATION.md` | Ce guide (aussi servi en console) |
-| `config.php` | Configuration |
-| `scripts/sync-agent.sh` | Aligner `agent/` ↔ `public/agent/` |
-| `public/agent/install.sh` | Installer un nœud |
+| `SECURITY.md` | Modèle de durcissement |
+| `docs/DOCUMENTATION.md` | Ce guide (servi en console via `/docs/…`) |
+| `config/app.php` | Configuration (lecture seule) |
+| `bin/init.php` | Init runtime `var/` |
+| `public/index.php` | Front controller unique |
+| `agent/install.sh` | Installer un nœud (`/agent/install.sh`) |
 
 Pour toute évolution API, privilégier la compatibilité Portainer CE lorsque c’est pertinent, et documenter les extensions WharfMaster (`/api/health`, `/api/backup`, `/api/stacks/{id}/start|stop|restart`, nœuds, etc.) dans ce fichier.

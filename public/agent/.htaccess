@@ -1,9 +1,0 @@
-# Serve agent sources as static downloads (do not execute .php here).
-# install.sh curls agent.php / router.php to build a local image when GHCR pull fails.
-<IfModule mod_php.c>
-  php_flag engine off
-</IfModule>
-<FilesMatch "\.php$">
-  SetHandler default-handler
-  ForceType text/plain
-</FilesMatch>
