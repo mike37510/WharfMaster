@@ -429,6 +429,7 @@
       trivyEnabled: true,
       dashFilter: "all",
       engineVersion: "",
+      appVersion: "",
       endpoints: [],
       endpointId: 1,
       alerts: [],
@@ -929,7 +930,7 @@
           bag.root.innerHTML = bag.shell("\xC0 propos", `<div class="panel-card">
           <div class="about-brand">${bag.brandLogoImg("about-logo-img")}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>2.2.0</strong> \u2014 CVE auto Images, volumes bind, m\xE9triques conteneur, pack agent ZIP.</p>
+          <p class="muted">Version <strong>${bag.esc(bag.state.appVersion || "\u2026")}</strong> \u2014 CVE auto Images, volumes bind, m\xE9triques conteneur, pack agent ZIP.</p>
           <p class="muted">Compatibilit\xE9 API : endpoints align\xE9s sur l\u2019API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> \xB7 source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
@@ -945,7 +946,22 @@
       bag.ensureAlertPolling();
       bag.refreshAlerts();
     };
+    bag.ensureAppVersion = async function ensureAppVersion() {
+      if (bag.state.appVersion) return bag.state.appVersion;
+      try {
+        const st = await bag.Api.status();
+        const v = String(st?.Version || st?.version || "").trim();
+        if (v) bag.state.appVersion = v.replace(/^v/i, "");
+      } catch (_) {
+      }
+      return bag.state.appVersion || "";
+    };
+    bag.appVersionLabel = function appVersionLabel() {
+      const v = bag.state.appVersion || "";
+      return v ? `v${v}` : "";
+    };
     bag.boot = async function boot() {
+      await bag.ensureAppVersion();
       if (!await bag.ensureSession()) {
         await bag.renderAuth();
         return;
@@ -1595,7 +1611,7 @@
         <aside class="sidebar${collapsed ? " is-collapsed" : ""}">
           <div class="brand brand-full">
             ${bag.brandLogoImg("brand-logo-img brand-logo-wide", "/assets/img/wharfmaster-logo-light-sm.png")}
-            <div class="brand-ver">v2.2.0</div>
+            <div class="brand-ver">${bag.esc(bag.appVersionLabel() || "\u2026")}</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>

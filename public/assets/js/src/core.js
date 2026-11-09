@@ -77,6 +77,7 @@ export function installCore() {
     trivyEnabled: true,
     dashFilter: 'all',
     engineVersion: '',
+    appVersion: '',
     endpoints: [],
     endpointId: 1,
     alerts: [],
@@ -625,7 +626,7 @@ export function installCore() {
         bag.root.innerHTML = bag.shell('À propos', `<div class="panel-card">
           <div class="about-brand">${bag.brandLogoImg('about-logo-img')}</div>
           <h3 style="margin-top:14px">WharfMaster</h3>
-          <p class="muted">Version <strong>2.2.0</strong> — CVE auto Images, volumes bind, métriques conteneur, pack agent ZIP.</p>
+          <p class="muted">Version <strong>${bag.esc(bag.state.appVersion || '…')}</strong> — CVE auto Images, volumes bind, métriques conteneur, pack agent ZIP.</p>
           <p class="muted">Compatibilité API : endpoints alignés sur l’API Portainer CE (clients / scripts existants).</p>
           <p class="muted">Documentation : <a href="#docs">guide complet + API</a> · source <code>docs/DOCUMENTATION.md</code></p>
           <p class="muted">Changelog : <code>CHANGELOG.md</code></p>
@@ -643,7 +644,23 @@ export function installCore() {
     bag.refreshAlerts();
   }
 
+  bag.ensureAppVersion = async function ensureAppVersion() {
+    if (bag.state.appVersion) return bag.state.appVersion;
+    try {
+      const st = await bag.Api.status();
+      const v = String(st?.Version || st?.version || '').trim();
+      if (v) bag.state.appVersion = v.replace(/^v/i, '');
+    } catch (_) {}
+    return bag.state.appVersion || '';
+  }
+
+  bag.appVersionLabel = function appVersionLabel() {
+    const v = bag.state.appVersion || '';
+    return v ? `v${v}` : '';
+  }
+
   bag.boot = async function boot() {
+    await bag.ensureAppVersion();
     if (!(await bag.ensureSession())) {
       await bag.renderAuth();
       return;

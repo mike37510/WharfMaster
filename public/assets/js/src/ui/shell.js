@@ -87,7 +87,7 @@ export function install() {
         <aside class="sidebar${collapsed ? ' is-collapsed' : ''}">
           <div class="brand brand-full">
             ${bag.brandLogoImg('brand-logo-img brand-logo-wide', '/assets/img/wharfmaster-logo-light-sm.png')}
-            <div class="brand-ver">v2.2.0</div>
+            <div class="brand-ver">${bag.esc(bag.appVersionLabel() || '…')}</div>
           </div>
           <div class="nav-section">
             <nav class="nav">${nav}</nav>
