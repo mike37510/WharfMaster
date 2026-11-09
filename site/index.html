@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WharfMaster — pilotez Docker en toute clarté</title>
-  <meta name="description" content="WharfMaster : interface web pour conteneurs, stacks Compose, volumes, registres et isolation multi-utilisateurs. Compatible API Portainer CE.">
+  <meta name="description" content="WharfMaster : console Docker multi-nœuds — stacks Compose, CVE Trivy, clés API, ACL équipes, SSO AD. API compatible Portainer CE.">
   <link rel="icon" href="/assets/img/wharfmaster-mark.png" type="image/png">
   <link rel="stylesheet" href="/site/site.css">
 </head>
@@ -36,7 +36,7 @@
           <img class="hero-logo" src="/assets/img/wharfmaster-logo.png" alt="WharfMaster" width="420" height="170" decoding="async" fetchpriority="high">
         </p>
         <h1>Votre Docker,<br>sous contrôle.</h1>
-        <p class="lede">Pilotez conteneurs, stacks Compose, volumes et registres depuis une interface claire — avec isolation multi-utilisateurs.</p>
+        <p class="lede">Stacks Compose, conteneurs, volumes et registres — multi-nœuds, équipes, clés API et scans CVE, dans une console claire.</p>
         <div class="cta-row">
           <a class="btn btn-primary" href="/app">Accéder à la console</a>
           <a class="btn btn-ghost" href="#apercu">Voir l’interface</a>
@@ -64,28 +64,28 @@
         <p class="section-lede">Une console unique pour le quotidien Docker — sans disperser les outils.</p>
         <ul class="feature-list">
           <li>
-            <strong>Conteneurs</strong>
-            <span>Création, logs, console, inspect — actions en un geste.</span>
+            <strong>Conteneurs &amp; stacks</strong>
+            <span>Logs, console, métriques, MàJ image en un clic, Compose multi-nœud.</span>
           </li>
           <li>
-            <strong>Images &amp; build</strong>
-            <span>Pull Hub / local, Dockerfile intégré, tags et registres.</span>
-          </li>
-          <li>
-            <strong>Stacks Compose</strong>
-            <span>Éditeur YAML, variables d’environnement, déploiement fiable.</span>
+            <strong>Images &amp; CVE</strong>
+            <span>Pull Hub / registres, build Dockerfile, pastilles Trivy automatiques.</span>
           </li>
           <li>
             <strong>Volumes &amp; réseaux</strong>
-            <span>Montages à la création, explorateur de fichiers sur volume.</span>
+            <span>Named + binds, explorateur de fichiers, schémas d’usage.</span>
           </li>
           <li>
-            <strong>Multi-utilisateurs</strong>
-            <span>Chacun voit ses ressources ; l’admin garde la vue globale.</span>
+            <strong>Équipes &amp; ACL</strong>
+            <span>Droits par nœud, partages de ressources, SSO Active Directory.</span>
           </li>
           <li>
-            <strong>Maintenance</strong>
-            <span>Prune des orphelins, tableau de bord et alertes moteur.</span>
+            <strong>Clés API</strong>
+            <span>Générées dans le profil — mêmes droits que l’utilisateur (JWT ou X-API-Key).</span>
+          </li>
+          <li>
+            <strong>Agents multi-nœuds</strong>
+            <span>Enrôlement HTTPS, pack ZIP, proxy Docker distant sécurisé.</span>
           </li>
         </ul>
       </div>
@@ -117,7 +117,7 @@
                 loading="lazy"
                 decoding="async"
               >
-              <figcaption>Conteneurs — logs, console, start / stop</figcaption>
+              <figcaption>Conteneurs — actions, charge, MàJ image</figcaption>
             </figure>
             <figure class="shot-card">
               <img
@@ -142,7 +142,7 @@
               loading="lazy"
               decoding="async"
             >
-            <figcaption>Images — inventaire local</figcaption>
+            <figcaption>Images — inventaire &amp; pastilles CVE</figcaption>
           </figure>
           <figure class="shot-card">
             <img
@@ -165,20 +165,20 @@
         <p class="section-lede">Pensé pour les ops et les équipes qui livrent sur un Docker local ou un hôte dédié.</p>
         <div class="tool-grid">
           <article>
-            <h3>Recherche d’images</h3>
-            <p>Local d’abord, puis Docker Hub — sélection et tags, plus de saisie aveugle.</p>
+            <h3>MàJ en un clic</h3>
+            <p>Pastille sur stack ou conteneur : pull des images et redeploy Compose sans script.</p>
           </article>
           <article>
-            <h3>Explorateur de volumes</h3>
-            <p>Parcourez, prévisualisez et téléchargez les fichiers d’un volume nommé.</p>
+            <h3>Scheduler</h3>
+            <p>Start / stop / restart planifiés par stack (cron) via le sidecar intégré.</p>
           </article>
           <article>
-            <h3>Registres privés</h3>
-            <p>Ajoutez un Registry V2 ou Hub, listez les dépôts et lancez un pull.</p>
+            <h3>Métriques &amp; CVE</h3>
+            <p>Courbes CPU / RAM historiques, charge live, scans Trivy sur les images taguées.</p>
           </article>
           <article>
-            <h3>Isolation native</h3>
-            <p>Labels propriétaire à la création : conteneurs, volumes, réseaux, stacks.</p>
+            <h3>Profil &amp; automatisation</h3>
+            <p>Clés API personnelles, backup ZIP admin, diagnostics et tests API Docker.</p>
           </article>
         </div>
       </div>
@@ -187,12 +187,12 @@
     <section class="api" id="api">
       <div class="api-inner">
         <h2>API familière</h2>
-        <p class="section-lede">Les endpoints suivent le contrat de l’API Portainer CE : réutilisez scripts, clients et automatisations déjà en place.</p>
+        <p class="section-lede">Contrat aligné Portainer CE : gardez scripts et clients existants. Auth JWT ou clé API du profil.</p>
         <div class="api-panel">
           <code>GET /api/status</code>
           <code>POST /api/auth</code>
-          <code>/api/endpoints/1/docker/*</code>
-          <code>/api/stacks · /api/registries</code>
+          <code>X-API-Key: ptr_…</code>
+          <code>/api/stacks · /api/endpoints/*/docker/*</code>
         </div>
         <p class="api-note">Version actuelle <strong>2.3.0</strong> — clés API profil, MàJ images en un clic, stacks &amp; métriques.</p>
       </div>
