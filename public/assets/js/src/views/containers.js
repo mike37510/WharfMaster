@@ -234,18 +234,24 @@ export function install() {
       if (lbl) lbl.textContent = label;
     };
 
-    const refreshChart = async (force = false) => {
+    const refreshChart = async (force = false, livePoint = null) => {
       if (force || !history.length) {
         history = await bag.loadContainerMetricHistory(id);
       }
-      if (chartEl) chartEl.innerHTML = bag.containerResourceChart(history);
+      const series = livePoint ? history.concat([livePoint]) : history;
+      if (chartEl) chartEl.innerHTML = bag.containerResourceChart(series);
     };
 
     const render = (computed, rate, netScore) => {
       const cpu = Math.max(0, Number(computed.cpuPct) || 0);
       const mem = Math.max(0, Number(computed.memPct) || 0);
       const level = bag.resourceLoadLevel(cpu, mem, netScore);
-      bag.applyStatsIconLevel(id, level, `CPU ${cpu.toFixed(0)}% · RAM ${mem.toFixed(0)}% · Réseau ${bag.formatBitRate((rate?.rx || 0) + (rate?.tx || 0))}`);
+      bag.applyStatsIconLevel(
+        id,
+        level,
+        `CPU ${cpu.toFixed(0)}% · RAM ${mem.toFixed(0)}% · Réseau ${bag.formatBitRate((rate?.rx || 0) + (rate?.tx || 0))} — cliquer pour le détail`,
+        { cpu, mem },
+      );
       const netRows = Object.entries(computed.networks || {}).map(([iface, n]) => {
         const rx = Number(n?.rx_bytes || 0) || 0;
         const tx = Number(n?.tx_bytes || 0) || 0;
@@ -291,7 +297,7 @@ export function install() {
         }
         if (!running) {
           setStatus('is-paused', 'Conteneur arrêté');
-          bag.applyStatsIconLevel(id, 'off', 'Conteneur arrêté — pas de charge');
+          bag.applyStatsIconLevel(id, 'off', 'Conteneur arrêté — pas de charge', { cpu: null, mem: null });
           body.innerHTML = `<div class="info-box">Démarrez le conteneur pour voir CPU, RAM et réseau en direct.</div>`;
           return;
         }
@@ -311,11 +317,23 @@ export function install() {
         prevAt = now;
         const netScore = bag.netLoadScore(rate.rx, rate.tx);
         render(computed, rate, netScore);
+        const livePoint = {
+          t: now,
+          cpu: Math.max(0, Number(computed.cpuPct) || 0),
+          mem: Math.max(0, Number(computed.memPct) || 0),
+          disk: netScore,
+          containers: 1,
+          images: 0,
+          volumes: 0,
+          networks: 0,
+        };
         // Persist with same retention/window as dashboard (server min-gap ~5 min)
         if (!lastPersistAt || (now - lastPersistAt) > 60_000) {
           lastPersistAt = now;
           await bag.pushContainerMetricSample(id, computed.cpuPct, computed.memPct, netScore);
-          await refreshChart(true);
+          await refreshChart(true, livePoint);
+        } else {
+          await refreshChart(false, livePoint);
         }
       } catch (err) {
         setStatus('is-error', 'Erreur');
@@ -667,12 +685,7 @@ export function install() {
           `${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
            ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
            ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
-           ${bag.iconBtn({
-             modal: 'stats', id: c.Id, name, running: isRunning,
-             title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
-             icon: 'stats', statsId: c.Id,
-             extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
-           })}
+           ${bag.statsLoadBtn({ id: c.Id, name, running: isRunning })}
            ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}`,
           `${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs conteneur', icon: 'logs', label: 'Logs' })}
            ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console', label: 'Console' })}
@@ -688,7 +701,7 @@ export function install() {
         </td>
         <td class="mono">${bag.esc(c.Image)}</td>
         ${all ? '' : `<td class="img-upd-cell" data-cupd="${bag.esc(c.Id)}">
-          <span class="img-upd is-loading" title="Vérification de l’image…"><span class="img-upd-dot"></span></span>
+          <span class="img-upd is-loading" title="Vérification de l’image…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>
         </td>`}
         <td>${bag.badge(c.State)}</td>
         <td>${bag.formatPorts(c.Ports || [])}</td>
@@ -752,12 +765,12 @@ export function install() {
       });
       document.getElementById('container-upd-refresh')?.addEventListener('click', () => {
         bag.root.querySelectorAll('[data-cupd]').forEach((cell) => {
-          cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span>`;
+          cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>`;
         });
         bag.loadContainerUpdateIndicators(true);
       });
       bag.loadContainerUpdateIndicators(false);
-      void bag.refreshContainerStatsIcons(list);
+      bag.startContainerStatsPoll(list);
     } else {
       bag.root.querySelectorAll('[data-switch-node]').forEach((a) => {
         a.addEventListener('click', () => {
@@ -820,7 +833,7 @@ export function install() {
             <dt>Nom</dt><dd>${bag.esc(name)}</dd>
             <dt>ID</dt><dd class="mono">${bag.esc(info.Id)}</dd>
             <dt>Image</dt><dd class="mono">${bag.esc(info.Config?.Image || '')}</dd>
-            <dt>Mise à jour</dt><dd id="container-upd-summary"><span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span></dd>
+            <dt>Mise à jour</dt><dd id="container-upd-summary"><span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span></dd>
             <dt>Statut</dt><dd>${bag.badge(info.State?.Status || '')}</dd>
             <dt>Créé le</dt><dd>${bag.esc(info.Created || '')}</dd>
             <dt>Adresse IP</dt><dd class="mono">${bag.esc(info.NetworkSettings?.IPAddress || Object.values(info.NetworkSettings?.Networks || {})[0]?.IPAddress || '—')}</dd>
@@ -837,12 +850,7 @@ export function install() {
           `${bag.iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: !running })}
            ${bag.iconBtn({ act: 'stop', title: 'Arrêter', icon: 'stop', danger: running })}
            ${bag.iconBtn({ act: 'restart', title: 'Redémarrer', icon: 'restart' })}
-           ${bag.iconBtn({
-             modal: 'stats', id, name, running,
-             title: running ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
-             icon: 'stats', statsId: id,
-             extraClass: running ? 'is-stats-ok' : 'is-stats-off',
-           })}
+           ${bag.statsLoadBtn({ id, name, running })}
            ${bag.iconBtn({ act: 'remove', title: 'Supprimer', icon: 'remove', danger: true })}`,
           `${bag.iconBtn({ modal: 'logs', id, name, running, title: 'Logs conteneur', icon: 'logs', label: 'Logs' })}
            ${bag.iconBtn({ modal: 'console', id, name, running, title: 'Console', icon: 'console', label: 'Console' })}
@@ -859,6 +867,7 @@ export function install() {
     bag.bindModalActions();
     bag.bindShareButtons();
     bag.bindMoreActions();
+    bag.startContainerStatsPoll([{ Id: id, State: running ? 'running' : 'exited' }]);
     bag.root.querySelectorAll('.tab').forEach((el) => {
       el.onclick = async () => {
         const t = el.dataset.tab;

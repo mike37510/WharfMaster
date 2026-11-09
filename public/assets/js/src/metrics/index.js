@@ -182,7 +182,37 @@ export function install() {
     return 'ok';
   }
 
-  bag.applyStatsIconLevel = function applyStatsIconLevel(containerId, level, title) {
+  bag.statsLoadTone = function statsLoadTone(pct) {
+    const p = Number(pct) || 0;
+    if (p >= 85) return 'hot';
+    if (p >= 65) return 'warn';
+    return 'ok';
+  }
+
+  /** Compact clickable CPU/RAM chip (replaces color-only stats icon). */
+  bag.statsLoadBtn = function statsLoadBtn({ id, name, running }) {
+    const title = running
+      ? 'CPU / RAM en direct — cliquer pour le détail'
+      : 'Conteneur arrêté';
+    const level = running ? 'is-stats-ok' : 'is-stats-off';
+    return `<button type="button" class="btn btn-stats-load ${level}"
+      data-modal="stats" data-id="${bag.esc(id)}" data-name="${bag.esc(name || '')}"
+      data-running="${running ? '1' : '0'}" data-stats-id="${bag.esc(id)}"
+      title="${bag.esc(title)}" aria-label="${bag.esc(title)}">
+      <span class="sl-row" data-sl="cpu">
+        <span class="sl-k">CPU</span>
+        <span class="sl-bar"><i style="width:0%"></i></span>
+        <span class="sl-v">${running ? '…' : '—'}</span>
+      </span>
+      <span class="sl-row" data-sl="mem">
+        <span class="sl-k">RAM</span>
+        <span class="sl-bar mem"><i style="width:0%"></i></span>
+        <span class="sl-v">${running ? '…' : '—'}</span>
+      </span>
+    </button>`;
+  }
+
+  bag.applyStatsIconLevel = function applyStatsIconLevel(containerId, level, title, metrics = null) {
     const btn = bag.root.querySelector(`[data-stats-id="${CSS.escape(String(containerId))}"]`);
     if (!btn) return;
     btn.classList.remove('is-stats-ok', 'is-stats-warn', 'is-stats-hot', 'is-stats-off');
@@ -195,6 +225,28 @@ export function install() {
       btn.title = title;
       btn.setAttribute('aria-label', title);
     }
+    if (!btn.classList.contains('btn-stats-load')) return;
+    const setRow = (key, pct) => {
+      const row = btn.querySelector(`[data-sl="${key}"]`);
+      if (!row) return;
+      const bar = row.querySelector('.sl-bar');
+      const fill = row.querySelector('i');
+      const val = row.querySelector('.sl-v');
+      row.classList.remove('is-ok', 'is-warn', 'is-hot');
+      if (level === 'off' || pct == null || !Number.isFinite(Number(pct))) {
+        if (fill) fill.style.width = '0%';
+        if (val) val.textContent = '—';
+        return;
+      }
+      const p = Math.max(0, Math.min(100, Number(pct) || 0));
+      const tone = bag.statsLoadTone(p);
+      row.classList.add(`is-${tone}`);
+      if (bar) bar.dataset.tone = tone;
+      if (fill) fill.style.width = `${p.toFixed(0)}%`;
+      if (val) val.textContent = `${Math.round(p)}%`;
+    };
+    setRow('cpu', metrics?.cpu);
+    setRow('mem', metrics?.mem);
   }
 
   bag.pushContainerMetricSample = async function pushContainerMetricSample(containerId, cpu, mem, net) {
@@ -223,8 +275,29 @@ export function install() {
     }
   }
 
+  bag.stopContainerStatsPoll = function stopContainerStatsPoll() {
+    if (bag.state.containerStatsTimer) {
+      clearInterval(bag.state.containerStatsTimer);
+      bag.state.containerStatsTimer = null;
+    }
+  }
+
+  bag.startContainerStatsPoll = function startContainerStatsPoll(containers) {
+    bag.stopContainerStatsPoll();
+    const list = containers || [];
+    const tick = () => {
+      if (bag.state.route !== 'containers' && bag.state.route !== 'container') {
+        bag.stopContainerStatsPoll();
+        return;
+      }
+      void bag.refreshContainerStatsIcons(list);
+    };
+    tick();
+    bag.state.containerStatsTimer = setInterval(tick, 4000);
+  }
+
   bag.refreshContainerStatsIcons = async function refreshContainerStatsIcons(containers) {
-    if (bag.state.route !== 'containers') return;
+    if (bag.state.route !== 'containers' && bag.state.route !== 'container') return;
     const running = (containers || []).filter((c) => {
       const st = String(c.State || '').toLowerCase();
       return st === 'running' || st === 'restarting';
@@ -232,7 +305,7 @@ export function install() {
     (containers || []).forEach((c) => {
       const st = String(c.State || '').toLowerCase();
       if (st !== 'running' && st !== 'restarting') {
-        bag.applyStatsIconLevel(c.Id, 'off', 'Conteneur arrêté — pas de charge');
+        bag.applyStatsIconLevel(c.Id, 'off', 'Conteneur arrêté — pas de charge', { cpu: null, mem: null });
       }
     });
     if (!bag.state.containerStatsPrev) bag.state.containerStatsPrev = {};
@@ -240,7 +313,7 @@ export function install() {
     const workers = 3;
     const runOne = async () => {
       while (queue.length) {
-        if (bag.state.route !== 'containers') return;
+        if (bag.state.route !== 'containers' && bag.state.route !== 'container') return;
         const c = queue.shift();
         if (!c) return;
         try {
@@ -263,11 +336,14 @@ export function install() {
           };
           const net = bag.netLoadScore(rate.rx, rate.tx);
           const level = bag.resourceLoadLevel(computed.cpuPct, computed.memPct, net);
-          const title = `CPU ${computed.cpuPct.toFixed(0)}% · RAM ${computed.memPct.toFixed(0)}% · Réseau ${bag.formatBitRate(rate.rx + rate.tx)}`;
-          bag.applyStatsIconLevel(c.Id, level, title);
+          const title = `CPU ${computed.cpuPct.toFixed(0)}% · RAM ${computed.memPct.toFixed(0)}% · Réseau ${bag.formatBitRate(rate.rx + rate.tx)} — cliquer pour le détail`;
+          bag.applyStatsIconLevel(c.Id, level, title, {
+            cpu: computed.cpuPct,
+            mem: computed.memPct,
+          });
           void bag.pushContainerMetricSample(c.Id, computed.cpuPct, computed.memPct, net);
         } catch (_) {
-          bag.applyStatsIconLevel(c.Id, 'off', 'Stats indisponibles');
+          bag.applyStatsIconLevel(c.Id, 'off', 'Stats indisponibles', { cpu: null, mem: null });
         }
       }
     };

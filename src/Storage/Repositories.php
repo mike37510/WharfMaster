@@ -797,15 +797,46 @@ final class Repositories
     }
 
     /**
+     * Metric scopes: ep:{id}, all, or ctr:{ep}:{containerId}.
+     * Must stay long enough for ctr:{ep}:{64-hex} (~70 chars). Legacy rows used a 64-char truncate.
+     */
+    private function normalizeMetricScope(string $scope): string
+    {
+        $scope = trim($scope);
+        if ($scope === '') {
+            return 'ep:1';
+        }
+        if (strlen($scope) > 96) {
+            return substr($scope, 0, 96);
+        }
+        return $scope;
+    }
+
+    /** @return list<string> */
+    private function metricScopeLookupKeys(string $scope): array
+    {
+        $scope = $this->normalizeMetricScope($scope);
+        $keys = [$scope];
+        // Pre-2.2.1 writes truncated to 64 chars — still readable
+        if (strlen($scope) > 64) {
+            $keys[] = substr($scope, 0, 64);
+        }
+        return array_values(array_unique($keys));
+    }
+
+    /**
      * Persist a dashboard metric sample (min gap per scope). Purges rows older than retentionDays.
      * @param array{containers?:int,images?:int,volumes?:int,networks?:int,cpu?:float,mem?:float,disk?:float} $metrics
      * @return array{inserted:bool,sample:array<string,mixed>,purged:int}
      */
     public function recordMetricSample(string $scope, array $metrics, int $minGapSec = 300, int $retentionDays = 90): array
     {
-        $scope = trim($scope) !== '' ? trim($scope) : 'ep:1';
-        if (strlen($scope) > 64) {
-            $scope = substr($scope, 0, 64);
+        $scope = $this->normalizeMetricScope($scope);
+        // Migrate legacy truncated ctr scopes to the full key
+        if (strlen($scope) > 64 && str_starts_with($scope, 'ctr:')) {
+            $legacy = substr($scope, 0, 64);
+            $mig = $this->pdo->prepare('UPDATE metric_samples SET scope = ? WHERE scope = ?');
+            $mig->execute([$scope, $legacy]);
         }
         $now = time();
         $last = $this->pdo->prepare('SELECT sampled_at FROM metric_samples WHERE scope = ? ORDER BY sampled_at DESC LIMIT 1');
@@ -874,7 +905,7 @@ final class Repositories
      */
     public function listMetricSamples(string $scope, int $days = 90, int $maxPoints = 180, ?int $hours = null): array
     {
-        $scope = trim($scope) !== '' ? trim($scope) : 'ep:1';
+        $keys = $this->metricScopeLookupKeys($scope);
         $maxPoints = max(10, min(2000, $maxPoints));
         if ($hours !== null) {
             $hours = max(1, min(365 * 24, $hours));
@@ -883,11 +914,12 @@ final class Repositories
             $days = max(1, min(365, $days));
             $since = time() - $days * 86400;
         }
+        $placeholders = implode(',', array_fill(0, count($keys), '?'));
         $stmt = $this->pdo->prepare(
-            'SELECT sampled_at, containers, images, volumes, networks, cpu, mem, disk
-             FROM metric_samples WHERE scope = ? AND sampled_at >= ? ORDER BY sampled_at ASC'
+            "SELECT sampled_at, containers, images, volumes, networks, cpu, mem, disk
+             FROM metric_samples WHERE scope IN ($placeholders) AND sampled_at >= ? ORDER BY sampled_at ASC"
         );
-        $stmt->execute([$scope, $since]);
+        $stmt->execute([...$keys, $since]);
         $rows = $stmt->fetchAll() ?: [];
         $mapped = array_map(static function (array $r): array {
             return [

@@ -4,6 +4,21 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.2.2] — 2026-11-09
+
+### Ajouté
+- Pastille **CPU / RAM** live dans la liste des conteneurs (barres + %) ; clic → modal ressources
+- Rafraîchissement périodique des charges (~4 s) sur la liste / détail conteneur
+
+### Corrigé
+- Courbes de métriques conteneur vides : scope `ctr:…` tronqué à 64 caractères à l’écriture, clé complète à la lecture
+- Alignement des pastilles « Mise à jour » (libellé toujours présent, halo réservé)
+- Traits de tableau en escalier : `display:flex` retiré de `td.name-cell`
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.2.2`**
+- Anciennes lignes métriques tronquées toujours lisibles / migrées au premier échantillon
+
 ## [2.2.1] — 2026-11-09
 
 ### Ajouté

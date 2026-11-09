@@ -48,7 +48,7 @@ export function install() {
       </td>
       <td>${bag.badge(stLabel)}</td>
       <td class="img-upd-cell" data-upd="${bag.esc(s.Id)}">
-        <span class="img-upd is-loading" title="Vérification des images…"><span class="img-upd-dot"></span></span>
+        <span class="img-upd is-loading" title="Vérification des images…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>
       </td>
       <td>${bag.esc(s.CreatedBy || '')}</td>
       <td class="actions">${actions}</td>
@@ -106,7 +106,7 @@ export function install() {
     });
     document.getElementById('stack-upd-refresh')?.addEventListener('click', () => {
       bag.root.querySelectorAll('[data-upd]').forEach((cell) => {
-        cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span>`;
+        cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>`;
       });
       bag.loadStackUpdateIndicators(true);
     });
@@ -767,7 +767,7 @@ export function install() {
           <dt>Id</dt><dd>${stack.Id}</dd>
           <dt>Type</dt><dd>Compose</dd>
           <dt>Statut</dt><dd>${bag.badge(stLabel)}</dd>
-          <dt>Images</dt><dd id="stack-upd-summary"><span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span></span></dd>
+          <dt>Images</dt><dd id="stack-upd-summary"><span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span></dd>
           <dt>Nœud</dt><dd>${bag.esc(bag.endpointLabel(stack.EndpointId))} <span class="muted">(#${bag.esc(stack.EndpointId)})</span></dd>
         </dl>
       </div>

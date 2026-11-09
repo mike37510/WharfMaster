@@ -433,6 +433,7 @@
       containerTab: "overview",
       logTimer: null,
       statsTimer: null,
+      containerStatsTimer: null,
       term: null,
       publicUrl: "",
       metricsChartHours: 72,
@@ -667,6 +668,7 @@
         }
         bag.state.term = null;
       }
+      if (typeof bag.stopContainerStatsPoll === "function") bag.stopContainerStatsPoll();
       bag.stopDashMetricSampler();
     };
     bag.formatUptime = function formatUptime(status) {
@@ -1142,7 +1144,32 @@
       if (max >= 65) return "warn";
       return "ok";
     };
-    bag.applyStatsIconLevel = function applyStatsIconLevel(containerId, level, title) {
+    bag.statsLoadTone = function statsLoadTone(pct) {
+      const p = Number(pct) || 0;
+      if (p >= 85) return "hot";
+      if (p >= 65) return "warn";
+      return "ok";
+    };
+    bag.statsLoadBtn = function statsLoadBtn({ id, name, running }) {
+      const title = running ? "CPU / RAM en direct \u2014 cliquer pour le d\xE9tail" : "Conteneur arr\xEAt\xE9";
+      const level = running ? "is-stats-ok" : "is-stats-off";
+      return `<button type="button" class="btn btn-stats-load ${level}"
+      data-modal="stats" data-id="${bag.esc(id)}" data-name="${bag.esc(name || "")}"
+      data-running="${running ? "1" : "0"}" data-stats-id="${bag.esc(id)}"
+      title="${bag.esc(title)}" aria-label="${bag.esc(title)}">
+      <span class="sl-row" data-sl="cpu">
+        <span class="sl-k">CPU</span>
+        <span class="sl-bar"><i style="width:0%"></i></span>
+        <span class="sl-v">${running ? "\u2026" : "\u2014"}</span>
+      </span>
+      <span class="sl-row" data-sl="mem">
+        <span class="sl-k">RAM</span>
+        <span class="sl-bar mem"><i style="width:0%"></i></span>
+        <span class="sl-v">${running ? "\u2026" : "\u2014"}</span>
+      </span>
+    </button>`;
+    };
+    bag.applyStatsIconLevel = function applyStatsIconLevel(containerId, level, title, metrics = null) {
       const btn = bag.root.querySelector(`[data-stats-id="${CSS.escape(String(containerId))}"]`);
       if (!btn) return;
       btn.classList.remove("is-stats-ok", "is-stats-warn", "is-stats-hot", "is-stats-off");
@@ -1152,6 +1179,28 @@
         btn.title = title;
         btn.setAttribute("aria-label", title);
       }
+      if (!btn.classList.contains("btn-stats-load")) return;
+      const setRow = (key, pct) => {
+        const row = btn.querySelector(`[data-sl="${key}"]`);
+        if (!row) return;
+        const bar = row.querySelector(".sl-bar");
+        const fill = row.querySelector("i");
+        const val = row.querySelector(".sl-v");
+        row.classList.remove("is-ok", "is-warn", "is-hot");
+        if (level === "off" || pct == null || !Number.isFinite(Number(pct))) {
+          if (fill) fill.style.width = "0%";
+          if (val) val.textContent = "\u2014";
+          return;
+        }
+        const p = Math.max(0, Math.min(100, Number(pct) || 0));
+        const tone = bag.statsLoadTone(p);
+        row.classList.add(`is-${tone}`);
+        if (bar) bar.dataset.tone = tone;
+        if (fill) fill.style.width = `${p.toFixed(0)}%`;
+        if (val) val.textContent = `${Math.round(p)}%`;
+      };
+      setRow("cpu", metrics?.cpu);
+      setRow("mem", metrics?.mem);
     };
     bag.pushContainerMetricSample = async function pushContainerMetricSample(containerId, cpu, mem, net) {
       const clamp = (v) => Math.max(0, Math.min(100, Number(v) || 0));
@@ -1178,8 +1227,27 @@
         return [];
       }
     };
+    bag.stopContainerStatsPoll = function stopContainerStatsPoll() {
+      if (bag.state.containerStatsTimer) {
+        clearInterval(bag.state.containerStatsTimer);
+        bag.state.containerStatsTimer = null;
+      }
+    };
+    bag.startContainerStatsPoll = function startContainerStatsPoll(containers) {
+      bag.stopContainerStatsPoll();
+      const list = containers || [];
+      const tick = () => {
+        if (bag.state.route !== "containers" && bag.state.route !== "container") {
+          bag.stopContainerStatsPoll();
+          return;
+        }
+        void bag.refreshContainerStatsIcons(list);
+      };
+      tick();
+      bag.state.containerStatsTimer = setInterval(tick, 4e3);
+    };
     bag.refreshContainerStatsIcons = async function refreshContainerStatsIcons(containers) {
-      if (bag.state.route !== "containers") return;
+      if (bag.state.route !== "containers" && bag.state.route !== "container") return;
       const running = (containers || []).filter((c) => {
         const st = String(c.State || "").toLowerCase();
         return st === "running" || st === "restarting";
@@ -1187,7 +1255,7 @@
       (containers || []).forEach((c) => {
         const st = String(c.State || "").toLowerCase();
         if (st !== "running" && st !== "restarting") {
-          bag.applyStatsIconLevel(c.Id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge");
+          bag.applyStatsIconLevel(c.Id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge", { cpu: null, mem: null });
         }
       });
       if (!bag.state.containerStatsPrev) bag.state.containerStatsPrev = {};
@@ -1195,7 +1263,7 @@
       const workers = 3;
       const runOne = async () => {
         while (queue.length) {
-          if (bag.state.route !== "containers") return;
+          if (bag.state.route !== "containers" && bag.state.route !== "container") return;
           const c = queue.shift();
           if (!c) return;
           try {
@@ -1218,11 +1286,14 @@
             };
             const net = bag.netLoadScore(rate.rx, rate.tx);
             const level = bag.resourceLoadLevel(computed.cpuPct, computed.memPct, net);
-            const title = `CPU ${computed.cpuPct.toFixed(0)}% \xB7 RAM ${computed.memPct.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate(rate.rx + rate.tx)}`;
-            bag.applyStatsIconLevel(c.Id, level, title);
+            const title = `CPU ${computed.cpuPct.toFixed(0)}% \xB7 RAM ${computed.memPct.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate(rate.rx + rate.tx)} \u2014 cliquer pour le d\xE9tail`;
+            bag.applyStatsIconLevel(c.Id, level, title, {
+              cpu: computed.cpuPct,
+              mem: computed.memPct
+            });
             void bag.pushContainerMetricSample(c.Id, computed.cpuPct, computed.memPct, net);
           } catch (_) {
-            bag.applyStatsIconLevel(c.Id, "off", "Stats indisponibles");
+            bag.applyStatsIconLevel(c.Id, "off", "Stats indisponibles", { cpu: null, mem: null });
           }
         }
       };
@@ -3555,17 +3626,23 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         const lbl = statusEl.querySelector(".label");
         if (lbl) lbl.textContent = label;
       };
-      const refreshChart = async (force = false) => {
+      const refreshChart = async (force = false, livePoint = null) => {
         if (force || !history.length) {
           history = await bag.loadContainerMetricHistory(id);
         }
-        if (chartEl) chartEl.innerHTML = bag.containerResourceChart(history);
+        const series = livePoint ? history.concat([livePoint]) : history;
+        if (chartEl) chartEl.innerHTML = bag.containerResourceChart(series);
       };
       const render = (computed, rate, netScore) => {
         const cpu = Math.max(0, Number(computed.cpuPct) || 0);
         const mem = Math.max(0, Number(computed.memPct) || 0);
         const level = bag.resourceLoadLevel(cpu, mem, netScore);
-        bag.applyStatsIconLevel(id, level, `CPU ${cpu.toFixed(0)}% \xB7 RAM ${mem.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate((rate?.rx || 0) + (rate?.tx || 0))}`);
+        bag.applyStatsIconLevel(
+          id,
+          level,
+          `CPU ${cpu.toFixed(0)}% \xB7 RAM ${mem.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate((rate?.rx || 0) + (rate?.tx || 0))} \u2014 cliquer pour le d\xE9tail`,
+          { cpu, mem }
+        );
         const netRows = Object.entries(computed.networks || {}).map(([iface, n]) => {
           const rx = Number(n?.rx_bytes || 0) || 0;
           const tx = Number(n?.tx_bytes || 0) || 0;
@@ -3611,7 +3688,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           }
           if (!running) {
             setStatus("is-paused", "Conteneur arr\xEAt\xE9");
-            bag.applyStatsIconLevel(id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge");
+            bag.applyStatsIconLevel(id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge", { cpu: null, mem: null });
             body.innerHTML = `<div class="info-box">D\xE9marrez le conteneur pour voir CPU, RAM et r\xE9seau en direct.</div>`;
             return;
           }
@@ -3631,10 +3708,22 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           prevAt = now;
           const netScore = bag.netLoadScore(rate.rx, rate.tx);
           render(computed, rate, netScore);
+          const livePoint = {
+            t: now,
+            cpu: Math.max(0, Number(computed.cpuPct) || 0),
+            mem: Math.max(0, Number(computed.memPct) || 0),
+            disk: netScore,
+            containers: 1,
+            images: 0,
+            volumes: 0,
+            networks: 0
+          };
           if (!lastPersistAt || now - lastPersistAt > 6e4) {
             lastPersistAt = now;
             await bag.pushContainerMetricSample(id, computed.cpuPct, computed.memPct, netScore);
-            await refreshChart(true);
+            await refreshChart(true, livePoint);
+          } else {
+            await refreshChart(false, livePoint);
           }
         } catch (err) {
           setStatus("is-error", "Erreur");
@@ -3965,16 +4054,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           `${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
            ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
            ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
-           ${bag.iconBtn({
-            modal: "stats",
-            id: c.Id,
-            name,
-            running: isRunning,
-            title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
-            icon: "stats",
-            statsId: c.Id,
-            extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
-          })}
+           ${bag.statsLoadBtn({ id: c.Id, name, running: isRunning })}
            ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}`,
           `${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs conteneur", icon: "logs", label: "Logs" })}
            ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console", label: "Console" })}
@@ -3990,7 +4070,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         </td>
         <td class="mono">${bag.esc(c.Image)}</td>
         ${all ? "" : `<td class="img-upd-cell" data-cupd="${bag.esc(c.Id)}">
-          <span class="img-upd is-loading" title="V\xE9rification de l\u2019image\u2026"><span class="img-upd-dot"></span></span>
+          <span class="img-upd is-loading" title="V\xE9rification de l\u2019image\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>
         </td>`}
         <td>${bag.badge(c.State)}</td>
         <td>${bag.formatPorts(c.Ports || [])}</td>
@@ -4052,12 +4132,12 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         });
         document.getElementById("container-upd-refresh")?.addEventListener("click", () => {
           bag.root.querySelectorAll("[data-cupd]").forEach((cell) => {
-            cell.innerHTML = `<span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span></span>`;
+            cell.innerHTML = `<span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>`;
           });
           bag.loadContainerUpdateIndicators(true);
         });
         bag.loadContainerUpdateIndicators(false);
-        void bag.refreshContainerStatsIcons(list);
+        bag.startContainerStatsPoll(list);
       } else {
         bag.root.querySelectorAll("[data-switch-node]").forEach((a) => {
           a.addEventListener("click", () => {
@@ -4118,7 +4198,7 @@ ${title}`;
             <dt>Nom</dt><dd>${bag.esc(name)}</dd>
             <dt>ID</dt><dd class="mono">${bag.esc(info.Id)}</dd>
             <dt>Image</dt><dd class="mono">${bag.esc(info.Config?.Image || "")}</dd>
-            <dt>Mise \xE0 jour</dt><dd id="container-upd-summary"><span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span></span></dd>
+            <dt>Mise \xE0 jour</dt><dd id="container-upd-summary"><span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span></dd>
             <dt>Statut</dt><dd>${bag.badge(info.State?.Status || "")}</dd>
             <dt>Cr\xE9\xE9 le</dt><dd>${bag.esc(info.Created || "")}</dd>
             <dt>Adresse IP</dt><dd class="mono">${bag.esc(info.NetworkSettings?.IPAddress || Object.values(info.NetworkSettings?.Networks || {})[0]?.IPAddress || "\u2014")}</dd>
@@ -4134,16 +4214,7 @@ ${title}`;
         `${bag.iconBtn({ act: "start", title: "D\xE9marrer", icon: "start", success: !running })}
            ${bag.iconBtn({ act: "stop", title: "Arr\xEAter", icon: "stop", danger: running })}
            ${bag.iconBtn({ act: "restart", title: "Red\xE9marrer", icon: "restart" })}
-           ${bag.iconBtn({
-          modal: "stats",
-          id,
-          name,
-          running,
-          title: running ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
-          icon: "stats",
-          statsId: id,
-          extraClass: running ? "is-stats-ok" : "is-stats-off"
-        })}
+           ${bag.statsLoadBtn({ id, name, running })}
            ${bag.iconBtn({ act: "remove", title: "Supprimer", icon: "remove", danger: true })}`,
         `${bag.iconBtn({ modal: "logs", id, name, running, title: "Logs conteneur", icon: "logs", label: "Logs" })}
            ${bag.iconBtn({ modal: "console", id, name, running, title: "Console", icon: "console", label: "Console" })}
@@ -4159,6 +4230,7 @@ ${title}`;
       bag.bindModalActions();
       bag.bindShareButtons();
       bag.bindMoreActions();
+      bag.startContainerStatsPoll([{ Id: id, State: running ? "running" : "exited" }]);
       bag.root.querySelectorAll(".tab").forEach((el) => {
         el.onclick = async () => {
           const t = el.dataset.tab;
@@ -6461,7 +6533,7 @@ ${title}`;
       </td>
       <td>${bag.badge(stLabel)}</td>
       <td class="img-upd-cell" data-upd="${bag.esc(s.Id)}">
-        <span class="img-upd is-loading" title="V\xE9rification des images\u2026"><span class="img-upd-dot"></span></span>
+        <span class="img-upd is-loading" title="V\xE9rification des images\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>
       </td>
       <td>${bag.esc(s.CreatedBy || "")}</td>
       <td class="actions">${actions}</td>
@@ -6519,7 +6591,7 @@ ${title}`;
       });
       document.getElementById("stack-upd-refresh")?.addEventListener("click", () => {
         bag.root.querySelectorAll("[data-upd]").forEach((cell) => {
-          cell.innerHTML = `<span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span></span>`;
+          cell.innerHTML = `<span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>`;
         });
         bag.loadStackUpdateIndicators(true);
       });
@@ -7135,7 +7207,7 @@ ${title}`;
           <dt>Id</dt><dd>${stack.Id}</dd>
           <dt>Type</dt><dd>Compose</dd>
           <dt>Statut</dt><dd>${bag.badge(stLabel)}</dd>
-          <dt>Images</dt><dd id="stack-upd-summary"><span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span></span></dd>
+          <dt>Images</dt><dd id="stack-upd-summary"><span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span></dd>
           <dt>N\u0153ud</dt><dd>${bag.esc(bag.endpointLabel(stack.EndpointId))} <span class="muted">(#${bag.esc(stack.EndpointId)})</span></dd>
         </dl>
       </div>
@@ -8997,7 +9069,7 @@ ${title}`;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.2.1", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.2.2", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");

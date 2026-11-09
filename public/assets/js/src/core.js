@@ -70,6 +70,7 @@ export function installCore() {
     containerTab: 'overview',
     logTimer: null,
     statsTimer: null,
+    containerStatsTimer: null,
     term: null,
     publicUrl: '',
     metricsChartHours: 72,
@@ -322,6 +323,7 @@ export function installCore() {
       try { bag.state.term.dispose(); } catch (_) {}
       bag.state.term = null;
     }
+    if (typeof bag.stopContainerStatsPoll === 'function') bag.stopContainerStatsPoll();
     bag.stopDashMetricSampler();
   }
 
