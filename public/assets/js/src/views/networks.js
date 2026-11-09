@@ -92,6 +92,7 @@ export function install() {
       usage: (n) => Number(n._usageCount) || 0,
       scope: (n) => n.Scope || '',
       node: (n) => n._nodeName || '',
+      created: (n) => bag.createdSortKey(n.Created || n.CreatedAt),
     });
     const rows = list.map((n) => {
       const users = (usageByKey.get(n._sortKey) || {}).users || [];
@@ -109,13 +110,14 @@ export function install() {
       <td>${bag.esc(n.Driver)}</td>
       <td>${usageCell}</td>
       <td>${bag.esc(n.Scope)}</td>
+      <td>${bag.formatCreated(n.Created || n.CreatedAt)}</td>
       <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">
         ${isBuiltin ? '' : bag.shareBtn('network', n.Name || n.Id)}
         ${isBuiltin ? '' : bag.iconBtn({ id: n.Id, title: 'Supprimer', icon: 'remove', danger: true })}
       </div>`}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 7 : 8;
+    const colSpan = all ? 8 : 9;
     bag.root.innerHTML = bag.shell('Réseaux', `
       ${bag.pageHeader(all ? 'Réseaux — tous les nœuds' : 'Réseaux')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
@@ -135,6 +137,7 @@ export function install() {
           ${bag.sortTh('Pilote', 'driver', 'networks')}
           ${bag.sortTh('Usage', 'usage', 'networks')}
           ${bag.sortTh('Portée', 'scope', 'networks')}
+          ${bag.sortTh('Créé', 'created', 'networks')}
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun réseau</td></tr>`}</tbody>

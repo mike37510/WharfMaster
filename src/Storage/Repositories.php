@@ -203,6 +203,32 @@ final class Repositories
         ];
     }
 
+    /** @return list<array<string, mixed>> */
+    public function listApiKeysForUser(int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, description, prefix, raw_hint, date_created, last_used
+             FROM api_keys WHERE user_id = ? ORDER BY date_created DESC, id DESC'
+        );
+        $stmt->execute([$userId]);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    /** @return array<string, mixed>|null */
+    public function findApiKeyById(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM api_keys WHERE id = ?');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
+    public function deleteApiKey(int $id): void
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM api_keys WHERE id = ?');
+        $stmt->execute([$id]);
+    }
+
     /** @return array<string, mixed>|null */
     public function findApiKeyByRaw(string $rawKey): ?array
     {

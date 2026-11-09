@@ -136,9 +136,9 @@ export function install() {
                   <div class="notif-panel-body" id="notif-list">${bag.renderAlertList()}</div>
                 </div>
               </div>
-              <div class="user-chip" title="${bag.esc(username)}">
+              <a href="#profile" class="user-chip${bag.state.route === 'profile' ? ' is-active' : ''}" title="Profil · ${bag.esc(username)}" aria-label="Profil">
                 <span class="avatar">${bag.esc(initial)}</span>
-              </div>
+              </a>
             </div>
           </header>
           <div class="content">${hidePageHeader ? bodyHtml : bodyHtml}</div>
@@ -648,10 +648,13 @@ export function install() {
     return `<img class="${cls}" src="${src}" alt="WharfMaster" decoding="async">`;
   }
 
-  /** Build a sparkline SVG from real numeric samples (oldest → newest). */
-
+  /**
+   * Sparkline from samples (oldest → newest).
+   * Scale is always 0 → max so stable counts (e.g. 30→31) stay near the top
+   * instead of looking empty when min≈max auto-scale was used.
+   */
   bag.sparklineFromValues = function sparklineFromValues(values, tone = 'blue') {
-    const pts = (values || []).map((v) => Number(v) || 0);
+    const pts = (values || []).map((v) => Math.max(0, Number(v) || 0));
     const w = 100;
     const h = 28;
     const padY = 3;
@@ -660,28 +663,29 @@ export function install() {
     if (pts.length === 0) {
       line = `M0 ${h / 2} L${w} ${h / 2}`;
       fill = `M0 ${h} L0 ${h / 2} L${w} ${h / 2} L${w} ${h} Z`;
-    } else if (pts.length === 1) {
-      const y = h / 2;
-      line = `M0 ${y} L${w} ${y}`;
-      fill = `M0 ${h} L0 ${y} L${w} ${y} L${w} ${h} Z`;
     } else {
-      const min = Math.min(...pts);
-      const max = Math.max(...pts);
-      const span = Math.max(1, max - min);
+      const max = Math.max(...pts, 1);
+      const yAt = (v) => padY + (1 - Math.min(1, v / max)) * (h - padY * 2);
       const coords = pts.map((v, i) => {
-        const x = (i / (pts.length - 1)) * w;
-        const y = padY + (1 - (v - min) / span) * (h - padY * 2);
-        return [x, y];
+        const x = pts.length === 1 ? w / 2 : (i / (pts.length - 1)) * w;
+        return [x, yAt(v)];
       });
-      line = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(' ');
-      const last = coords[coords.length - 1];
-      const first = coords[0];
-      fill = `${line} L${last[0].toFixed(2)} ${h} L${first[0].toFixed(2)} ${h} Z`;
+      if (coords.length === 1) {
+        const y = coords[0][1];
+        line = `M0 ${y.toFixed(2)} L${w} ${y.toFixed(2)}`;
+        fill = `M0 ${h} L0 ${y.toFixed(2)} L${w} ${y.toFixed(2)} L${w} ${h} Z`;
+      } else {
+        line = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(' ');
+        const last = coords[coords.length - 1];
+        const first = coords[0];
+        fill = `${line} L${last[0].toFixed(2)} ${h} L${first[0].toFixed(2)} ${h} Z`;
+      }
     }
     const n = pts.length;
+    const last = n ? pts[n - 1] : 0;
     const title = n < 2
       ? 'Historique en construction — revenez plus tard'
-      : `${n} relevés`;
+      : `${n} relevés · dernier ${last} · max ${Math.max(...pts, 0)}`;
     return `<svg class="sparkline ${tone}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${bag.esc(title)}"><title>${bag.esc(title)}</title><path class="fill" d="${fill}" fill="currentColor"/><path d="${line}"/></svg>`;
   }
 

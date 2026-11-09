@@ -23,6 +23,7 @@ export function install() {
       owner: (s) => s.CreatedBy || '',
       node: (s) => bag.endpointLabel(s.EndpointId),
       id: (s) => Number(s.Id) || 0,
+      created: (s) => bag.createdSortKey(s.CreationDate),
     });
     const rows = list.map((s) => {
       const node = bag.endpointLabel(s.EndpointId);
@@ -51,10 +52,11 @@ export function install() {
         <span class="img-upd is-loading" title="Vérification des images…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>
       </td>
       <td>${bag.esc(s.CreatedBy || '')}</td>
+      <td>${bag.formatCreated(s.CreationDate)}</td>
       <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 7 : 6;
+    const colSpan = all ? 8 : 7;
     bag.root.innerHTML = bag.shell('Stacks', `
       ${bag.pageHeader(all ? 'Stacks — tous les nœuds' : 'Stacks')}
       ${all ? bag.pickNodeGuardHtml() : ''}
@@ -77,6 +79,7 @@ export function install() {
           ${bag.sortTh('État', 'state', 'stacks')}
           <th title="Images du registre">Images</th>
           ${bag.sortTh('Créé par', 'owner', 'stacks')}
+          ${bag.sortTh('Créé', 'created', 'stacks')}
           <th>Actions</th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
@@ -113,13 +116,101 @@ export function install() {
     bag.loadStackUpdateIndicators(false);
   }
 
-  bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title) {
+  bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
     const st = status || 'unknown';
     const cls = st === 'update' ? 'is-update' : (st === 'fresh' || st === 'pinned' ? 'is-fresh' : 'is-unknown');
     const label = st === 'update'
       ? (updateCount > 1 ? `${updateCount} mises à jour` : 'Mise à jour')
       : (st === 'fresh' || st === 'pinned' ? 'À jour' : '—');
-    return `<span class="img-upd ${cls}" title="${bag.esc(title || label)}"><span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span></span>`;
+    const tip = st === 'update' && opts.action
+      ? `${title || label}\n\nCliquer pour tirer les images et redéployer`
+      : (title || label);
+    const inner = `<span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span>`;
+    if (st === 'update' && opts.action && opts.id != null) {
+      return `<button type="button" class="img-upd ${cls} img-upd-action"
+        data-upd-action="${bag.esc(opts.action)}" data-upd-id="${bag.esc(String(opts.id))}"
+        title="${bag.esc(tip)}" aria-label="${bag.esc(label)}">${inner}</button>`;
+    }
+    return `<span class="img-upd ${cls}" title="${bag.esc(tip)}">${inner}</span>`;
+  }
+
+  /** Pull images + redeploy a stack (Compose up --pull). */
+  bag.upgradeStackImages = async function upgradeStackImages(stackId) {
+    const id = String(stackId || '');
+    if (!id) throw new Error('Stack introuvable');
+    const [stack, file] = await Promise.all([bag.Api.stack(id), bag.Api.stackFile(id)]);
+    await bag.Api.updateStack(id, file.StackFileContent || '', stack.Env || [], true);
+    return stack;
+  }
+
+  /** Resolve Compose stack for a container via com.docker.compose.project. */
+  bag.findStackForContainer = async function findStackForContainer(containerId) {
+    try {
+      const info = await bag.Api.docker(`/containers/${encodeURIComponent(containerId)}/json`);
+      const project = String(info?.Config?.Labels?.['com.docker.compose.project'] || '').trim();
+      if (!project) return null;
+      const stacks = await bag.Api.stacks();
+      const want = project.toLowerCase();
+      return (stacks || []).find((s) => String(s.Name || '').toLowerCase() === want) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * One-click image upgrade:
+   * - stack → pull + redeploy Compose
+   * - container → upgrade parent stack if Compose, else pull + recreate
+   */
+  bag.upgradeImageUpdateTarget = async function upgradeImageUpdateTarget(action, id) {
+    if (action === 'stack') {
+      await bag.upgradeStackImages(id);
+      return { kind: 'stack', id };
+    }
+    if (action === 'container') {
+      const stack = await bag.findStackForContainer(id);
+      if (stack?.Id != null) {
+        await bag.upgradeStackImages(stack.Id);
+        return { kind: 'stack', id: stack.Id, via: 'container', name: stack.Name };
+      }
+      await bag.Api.updateContainerImage(id, true);
+      return { kind: 'container', id };
+    }
+    throw new Error('Action de mise à jour inconnue');
+  }
+
+  bag.bindImageUpdateActions = function bindImageUpdateActions(scope = bag.root) {
+    if (!scope) return;
+    scope.querySelectorAll('[data-upd-action]').forEach((btn) => {
+      if (btn.dataset.updBound === '1') return;
+      btn.dataset.updBound = '1';
+      const action = btn.dataset.updAction;
+      const confirmMsg = action === 'stack'
+        ? 'Tirer les nouvelles images et redéployer cette stack ? Les services seront recréés.'
+        : 'Tirer l’image et mettre à jour ce conteneur ? (stack Compose si liée, sinon recrée le conteneur)';
+      bag.onBusyClick(btn, async (el) => {
+        const kind = el.dataset.updAction;
+        const targetId = el.dataset.updId;
+        await bag.upgradeImageUpdateTarget(kind, targetId);
+        const route = String(bag.state.route || '');
+        if (route.startsWith('stacks/') && route !== 'stacks/new') {
+          const sid = route.split('/')[1];
+          if (sid) await bag.viewStackDetail(sid);
+          return;
+        }
+        if (route === 'stacks') {
+          await bag.loadStackUpdateIndicators(true);
+          return;
+        }
+        if (route.startsWith('containers/') && route !== 'containers/new') {
+          await bag.route();
+          return;
+        }
+        if (route === 'containers') {
+          await bag.loadContainerUpdateIndicators(true);
+        }
+      }, { confirm: confirmMsg, minMs: 400 });
+    });
   }
 
   bag.loadStackUpdateIndicators = async function loadStackUpdateIndicators(refresh = false) {
@@ -136,7 +227,10 @@ export function install() {
         if (u.FromCache && u.CheckedAt) {
           title += `\n(cache · vérifié ${new Date(u.CheckedAt * 1000).toLocaleString()})`;
         }
-        cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title);
+        cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+          action: 'stack',
+          id,
+        });
       });
       bag.root.querySelectorAll('[data-upd] .img-upd.is-loading').forEach((el) => {
         el.className = 'img-upd is-unknown';
@@ -145,6 +239,7 @@ export function install() {
         if (lbl) lbl.textContent = '—';
         else el.insertAdjacentHTML('beforeend', '<span class="img-upd-lbl">—</span>');
       });
+      bag.bindImageUpdateActions(bag.root);
     } catch {
       bag.root.querySelectorAll('[data-upd]').forEach((cell) => {
         cell.innerHTML = bag.stackUpdatePill('unknown', 0, 'Contrôle indisponible');
@@ -751,15 +846,15 @@ export function install() {
       ${bag.pageHeader(stack.Name, false)}
       <div class="toolbar">
         ${bag.iconBtn({ tag: 'a', href: '#stacks', title: 'Retour', icon: 'back' })}
-        ${bag.moreActions(
-          `${bag.iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: !stackRunning })}
-           ${bag.iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop', danger: stackRunning })}
-           ${bag.iconBtn({ act: 'restart', id: stack.Id, title: 'Redémarrer', icon: 'restart' })}
-           ${bag.iconBtn({ act: 'remove', id: stack.Id, title: 'Supprimer', icon: 'remove', danger: true })}`,
-          `${bag.iconBtn({ elId: 'edit', title: 'Éditeur', icon: 'edit', info: true, label: 'Éditeur' })}
-           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'stack', shareKey: String(stack.Id), label: 'Partager' })}
-           ${bag.iconBtn({ elId: 'stack-pull-redeploy', title: 'Pull images + redéployer', icon: 'pull', label: 'Pull + redéployer' })}`,
-        )}
+        <div class="quick-actions">
+          ${bag.iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: !stackRunning })}
+          ${bag.iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop', danger: stackRunning })}
+          ${bag.iconBtn({ act: 'restart', id: stack.Id, title: 'Redémarrer', icon: 'restart' })}
+          ${bag.iconBtn({ elId: 'edit', title: 'Éditeur', icon: 'edit', info: true })}
+          ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'stack', shareKey: String(stack.Id) })}
+          ${bag.iconBtn({ elId: 'stack-pull-redeploy', title: 'Pull images + redéployer', icon: 'pull' })}
+          ${bag.iconBtn({ act: 'remove', id: stack.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+        </div>
       </div>
       <div id="stack-detail-err"></div>
       <div class="panel" style="margin-bottom:1rem">
@@ -770,6 +865,13 @@ export function install() {
           <dt>Images</dt><dd id="stack-upd-summary"><span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span></dd>
           <dt>Nœud</dt><dd>${bag.esc(bag.endpointLabel(stack.EndpointId))} <span class="muted">(#${bag.esc(stack.EndpointId)})</span></dd>
         </dl>
+      </div>
+      <div class="section-title">Conteneurs</div>
+      <div class="table-wrap" style="margin-bottom:1rem">
+        <table class="data" id="stack-containers-table">
+          <thead><tr><th>Service</th><th>Nom</th><th>État</th><th>Image</th><th>Ports</th><th></th></tr></thead>
+          <tbody><tr><td colspan="6" class="muted">Chargement…</td></tr></tbody>
+        </table>
       </div>
       <div class="section-title">Images des services</div>
       <div class="table-wrap" style="margin-bottom:1rem">
@@ -873,10 +975,92 @@ export function install() {
     };
     document.getElementById('add-schedule').onclick = () => bag.openScheduleModal(stack, renderSchedules);
     renderSchedules();
+
+    const renderStackContainers = async () => {
+      const tb = document.querySelector('#stack-containers-table tbody');
+      if (!tb) return;
+      try {
+        const ep = Number(stack.EndpointId) || bag.Api.getEndpointId();
+        const project = String(stack.Name || '').trim();
+        const filters = encodeURIComponent(JSON.stringify({
+          label: [`com.docker.compose.project=${project}`],
+        }));
+        let list = await bag.Api.dockerOn(ep, `/containers/json?all=true&filters=${filters}`);
+        if (!Array.isArray(list)) list = [];
+        // Fallback: match project label case-insensitively if Docker filter returned nothing
+        if (!list.length && project) {
+          const all = await bag.Api.dockerOn(ep, '/containers/json?all=true');
+          const want = project.toLowerCase();
+          list = (Array.isArray(all) ? all : []).filter((c) => {
+            const labels = c.Labels || {};
+            return String(labels['com.docker.compose.project'] || '').toLowerCase() === want;
+          });
+        }
+        list.sort((a, b) => {
+          const sa = String((a.Labels || {})['com.docker.compose.service'] || '');
+          const sb = String((b.Labels || {})['com.docker.compose.service'] || '');
+          return sa.localeCompare(sb) || String(a.Names?.[0] || '').localeCompare(String(b.Names?.[0] || ''));
+        });
+        if (!list.length) {
+          tb.innerHTML = `<tr><td colspan="6" class="muted">Aucun conteneur pour le projet Compose « ${bag.esc(project)} »</td></tr>`;
+          return;
+        }
+        tb.innerHTML = list.map((c) => {
+          const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : bag.shortId(c.Id));
+          const labels = c.Labels || {};
+          const service = labels['com.docker.compose.service'] || '—';
+          const st = String(c.State || '').toLowerCase();
+          const isRunning = st === 'running' || st === 'restarting';
+          const openHref = `#containers/${bag.esc(c.Id)}`;
+          return `<tr data-container-id="${bag.esc(c.Id)}">
+            <td class="mono">${bag.esc(service)}</td>
+            <td class="name-cell">
+              <strong><a href="${openHref}" data-switch-node="${bag.esc(ep)}">${bag.esc(name)}</a></strong>
+              <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
+            </td>
+            <td>${bag.badge(c.State)}</td>
+            <td class="mono">${bag.esc(c.Image || '')}</td>
+            <td>${bag.formatPorts(c.Ports || [])}</td>
+            <td class="actions"><div class="quick-actions">
+              ${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
+              ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
+              ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
+            </div></td>
+          </tr>`;
+        }).join('');
+        tb.querySelectorAll('[data-switch-node]').forEach((a) => {
+          a.addEventListener('click', () => {
+            const nid = parseInt(a.getAttribute('data-switch-node'), 10);
+            if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+          });
+        });
+        bag.bindModalActions(tb);
+        tb.querySelectorAll('[data-act]').forEach((btn) => {
+          const act = btn.dataset.act;
+          bag.onBusyClick(btn, async (el) => {
+            const nid = Number(stack.EndpointId) || bag.Api.getEndpointId();
+            if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+            await bag.containerAction(el.dataset.id, act);
+            await renderStackContainers();
+          }, { minMs: 300 });
+        });
+      } catch (err) {
+        tb.innerHTML = `<tr><td colspan="6" class="error-box">${bag.esc(err.message || 'Impossible de lister les conteneurs')}</td></tr>`;
+      }
+    };
+    void renderStackContainers();
+
     try {
       const upd = await bag.Api.stackUpdate(id);
       const sum = document.getElementById('stack-upd-summary');
-      if (sum) sum.innerHTML = bag.stackUpdatePill(upd.Status, upd.UpdateCount || 0, `${upd.Checked || 0} image(s) contrôlée(s)`);
+      if (sum) {
+        sum.innerHTML = bag.stackUpdatePill(
+          upd.Status,
+          upd.UpdateCount || 0,
+          `${upd.Checked || 0} image(s) contrôlée(s)`,
+          { action: 'stack', id },
+        );
+      }
       const tb = document.querySelector('#stack-upd-table tbody');
       const imgs = upd.Images || [];
       if (tb) {
@@ -886,11 +1070,15 @@ export function install() {
           tb.innerHTML = imgs.map((i) => `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>
             <td class="mono">${bag.esc(i.Image)}</td>
-            <td>${bag.stackUpdatePill(i.Status, i.Status === 'update' ? 1 : 0, i.Detail || '')}</td>
+            <td>${bag.stackUpdatePill(i.Status, i.Status === 'update' ? 1 : 0, i.Detail || '', {
+              action: i.Status === 'update' ? 'stack' : null,
+              id,
+            })}</td>
             <td class="muted">${bag.esc(i.Detail || '')}</td>
           </tr>`).join('');
         }
       }
+      bag.bindImageUpdateActions(bag.root);
     } catch (err) {
       const sum = document.getElementById('stack-upd-summary');
       if (sum) sum.innerHTML = bag.stackUpdatePill('unknown', 0, err.message || 'Erreur');

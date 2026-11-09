@@ -17,6 +17,7 @@ import { install as install_diagnostics_api } from './views/diagnostics-api.js';
 import { install as install_docs } from './views/docs.js';
 import { install as install_activity } from './views/activity.js';
 import { install as install_users } from './views/users.js';
+import { install as install_profile } from './views/profile.js';
 import { install as install_teams } from './views/teams.js';
 
 import { bag } from './bag.js';
@@ -42,6 +43,7 @@ install_diagnostics_api();
 install_docs();
 install_activity();
 install_users();
+install_profile();
 install_teams();
 
 window.addEventListener('hashchange', () => bag.route());

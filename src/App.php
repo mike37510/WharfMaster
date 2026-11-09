@@ -151,7 +151,9 @@ final class App
         $R->post('/api/users', fn ($r, $p) => $users->createUser($r, $u($p)));
         $R->put('/api/users/{id}/passwd', fn ($r, $p) => $users->changeUserPassword((int) $p['id'], $r, $u($p)));
         $R->delete('/api/users/{id}', fn ($r, $p) => $users->deleteUser((int) $p['id'], $u($p)));
+        $R->get('/api/users/{id}/tokens', fn ($r, $p) => $users->listTokens((int) $p['id'], $u($p)));
         $R->post('/api/users/{id}/tokens', fn ($r, $p) => $users->createToken((int) $p['id'], $r, $u($p)));
+        $R->delete('/api/users/{id}/tokens/{tid}', fn ($r, $p) => $users->revokeToken((int) $p['id'], (int) $p['tid'], $r, $u($p)));
         $R->get('/api/users/{id}', fn ($r, $p) => $users->getUserPortainer((int) $p['id'], $u($p)));
 
         $R->get('/api/teams', function ($r, $p) use ($teams, $u) {

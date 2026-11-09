@@ -1,28 +1,33 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.1.0**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.0**.
 
 | | |
 |---|---|
-| Console | `/app` (`/` redirige vers `/app`) |
+| Console | `/app` |
 | API | `/api` |
 | DocumentRoot | `public/` uniquement |
 | Santé | `GET /api/health` |
+| Vitrine | `/` (site public) |
 | Dépôt | https://github.com/mike37510/WharfMaster |
 
 ---
 
 ## 1. Présentation
 
-**WharfMaster** est une interface web de gestion Docker :
+**WharfMaster** est une interface web de gestion Docker (standalone Compose + multi-nœuds) :
 
 - conteneurs, images, volumes, réseaux ;
 - stacks Compose (nœud local **et** agents distants) ;
 - registres (Docker Hub / Registry V2) ;
-- multi-utilisateurs avec isolation par labels ;
-- **équipes**, **ACL par nœud**, **SSO AD/LDAP**, **scheduler**, **scan CVE Trivy** ;
-- infrastructure **multi-nœuds** via agents HTTPS ;
-- API compatible **Portainer CE** pour scripts et clients existants.
+- multi-utilisateurs (labels owner) + **partages** de ressources ;
+- **équipes**, **ACL par nœud**, **SSO AD/LDAP** ;
+- **scheduler** (start / stop / restart de stacks) ;
+- **scan CVE Trivy** (pastilles Images, cache 24 h) ;
+- **indicateurs de mise à jour** d’images (stacks & conteneurs) avec **mise à jour en un clic** ;
+- **métriques** CPU / RAM / réseau (pastille couleur + historique) ;
+- diagnostics admin + tests API Docker ;
+- API compatible **Portainer CE** + extensions WharfMaster.
 
 Licence : **MIT**.
 
@@ -44,9 +49,11 @@ Principal (PHP/Apache + SQLite)
 |-----------|------|
 | Principal | UI, auth, validation Compose, miroir YAML, proxy Docker |
 | Agent | Proxy Engine + API `/compose/*` sur chaque hôte distant |
-| SQLite `var/` | utilisateurs, endpoints, stacks, registres, audit |
+| SQLite `var/` | utilisateurs, endpoints, stacks, registres, shares, métriques, audit |
 
 Les stacks distantes : le principal **valide** (`ComposePolicy` + `docker compose config`) et **stocke un miroir** ; le déploiement réel (`up` / `down` / start / stop) est délégué à l’agent.
+
+DocumentRoot = **`public/`** uniquement (`src/`, `config/`, `var/`, `agent/` hors webroot). Front controller : `public/index.php`.
 
 ---
 
@@ -56,56 +63,80 @@ Les stacks distantes : le principal **valide** (`ComposePolicy` + `docker compos
 
 1. Ouvrir `/app`.
 2. Premier démarrage : créer l’admin (mot de passe ≥ 10 caractères, lettre + chiffre).
-3. Ensuite : utilisateur / mot de passe → JWT stocké côté navigateur.
+3. Ensuite : utilisateur / mot de passe → JWT (navigateur).
 
 ### Navigation
 
 | Menu | Contenu |
 |------|---------|
-| Tableau de bord | Stats, aperçus, répartition multi-nœuds |
-| Conteneurs / Images / Volumes / Réseaux | CRUD Docker (nœud sélectionné) ; Images : pastilles CVE |
-| Stacks | Compose : déployer, démarrer, arrêter, redémarrer, supprimer, schedules |
+| Tableau de bord | Stats, ressources hôte, activité, prune (admin) |
+| Stacks | Compose : déployer, start/stop/restart, conteneurs liés, schedules, MàJ images |
+| Conteneurs | CRUD, logs, console, inspect, stats, pastille charge, MàJ image |
+| Volumes | Named + binds, explorateur de fichiers |
+| Images | Liste, pull, build, pastilles CVE + usage |
+| Réseaux | Liste, création, schéma d’usage |
 | Journaux | Audit applicatif |
-| Paramètres (admin) | Sous-menus : Général, Authentification (LDAP), Registres, Nœuds, Utilisateurs, Équipes |
+| Paramètres | Général, Auth LDAP, Registres, Nœuds, Users, Équipes, Diagnostics |
 | Documentation | Ce guide |
-| À propos | Version et licence |
 
-#### Paramètres (admin)
+La version affichée dans la barre latérale est lue dynamiquement via `/api/status`.
+
+#### Paramètres
 
 | Sous-menu | Contenu |
 |-----------|---------|
-| Général | Thème, URL publique, métriques, Trivy on/off, backup |
+| Général | Thème, URL publique, fenêtre / rétention métriques, Trivy, backup ZIP |
 | Authentification | Active Directory / LDAP |
 | Registres | Hub / Registry V2 |
-| Nœuds | Agents : ajouter, éditer, **Accès** (ACL user/équipe), ping, délier |
+| Nœuds | Agents : commande / pack ZIP, ping, ACL, pin TLS |
 | Utilisateurs | Comptes locaux |
-| Équipes | Groupes + membres (recherche / ajout / retrait) |
+| Équipes | Groupes + membres (+ mapping AD) |
+| Diagnostics | Santé runtime |
+| Tests API | Smoke Docker (image / volume / réseau / conteneur) |
 
 ### Sélecteur de nœud
 
-En haut à droite : nœud local, agent, ou **Tous les nœuds** (listes agrégées en lecture). Les actions d’écriture Docker exigent en général un nœud précis ; les actions **stack** (start/stop/…) fonctionnent via l’id de stack (nœud d’origine).
+En haut à droite : nœud local, agent, ou **Tous les nœuds** (agrégat surtout en **lecture**). Les écritures Docker demandent un nœud précis ; les actions **stack** passent par l’id de stack (nœud d’origine).
 
 ### Stacks
 
-- Créer / éditer le YAML + variables `.env`.
-- Actions : **Démarrer**, **Arrêter**, **Redémarrer**, **Supprimer** (comme les conteneurs).
-- Sur un agent : fichiers hôte sous `/var/lib/wharfmaster/stacks` (monté dans l’agent).
+- Créer / éditer le YAML + variables `.env` ; option **Pull images** au déploiement.
+- Fiche stack : barre d’actions complète (démarrer, arrêter, redémarrer, éditeur, partager, pull+redéployer, supprimer).
+- Section **Conteneurs** : services Compose du projet (`com.docker.compose.project`) avec start / stop / restart.
+- **Planifications** : cron convivial (tous les jours, lun–ven, hebdo, horaire) → start / stop / restart.
+- Pastille **Images** (vert = à jour, orange = MàJ) : **clic orange** → confirmation → pull + redéploiement Compose.
+- Colonne **Créé** (date) dans la liste.
+
+### Conteneurs
+
+- Actions liste : start / stop / restart, pastille charge (vert / orange ≥ 65 % / rouge ≥ 85 %, refresh ~10 s sur la page visible), logs / console / inspect / partager (menu …).
+- Modal **Ressources** : jauges live + courbes historiques (rétention configurable).
+- Pastille **MàJ** : clic orange → si le conteneur appartient à une stack Compose, upgrade de la **stack** ; sinon pull + recreate du conteneur.
+- Colonne **Créé**.
+
+### Images / CVE
+
+- À l’ouverture de **Images** : scan auto des images taguées (pastille CVE OK / C·H·M), cache **24 h**.
+- Pull Hub / registre, build Dockerfile, usage par conteneurs.
+- Interrupteur global Trivy : Paramètres → Général. L’avis à la création (`advise`) est **non bloquant**.
+
+### Volumes & réseaux
+
+- Volumes named + **binds** (sync auto depuis les Compose, gestion admin).
+- Explorateur de fichiers sur volume.
+- Réseaux : usage / schéma IP·ports ; partage possible.
+
+### Partages
+
+Un utilisateur peut **partager** stack / conteneur / volume / réseau avec un autre (indépendant des ACL nœuds). Partager une stack **cascade** vers les ressources Compose du même projet. Bouton Partager dans les actions.
 
 ### Agents (Paramètres → Nœuds)
 
-1. **Ajouter un nœud** → IP + nom → **Générer la commande**.
-2. Exécuter `install.sh` sur la machine distante (`--advertise https://…` obligatoire).
-3. L’empreinte TLS du certificat agent est **épinglée** (badge `pin …`).
-4. **Accès** (icône users) : rechercher un utilisateur ou une équipe et attribuer `lecture` / `opération` / `admin nœud`.
-5. **Modifier** : renommer, changer l’URL agent / URL publique.
-
-Relancer l’install sur le même advertise = **rejoin** (nouveau secret).
-
-### CVE (Trivy)
-
-- Activable dans **Paramètres → Général**.
-- Pastilles sur Images + scan manuel.
-- À la création conteneur / stack : avis non bloquant (`advise`) ; Trivy KO n’empêche jamais le déploiement.
+1. **Ajouter un nœud** → IP + nom → générer la **commande** ou télécharger le **pack ZIP**.
+2. Exécuter sur la machine distante (`--advertise https://…` obligatoire).
+3. Empreinte TLS **épinglée** (badge `pin …`).
+4. **Accès** : user ou équipe → `lecture` / `opération` / `admin nœud`.
+5. Ping, activer / désactiver, délier, éditer nom / URL.
 
 ---
 
@@ -121,16 +152,20 @@ docker compose up -d --build
 # → http://localhost:9000/app
 ```
 
-Fichiers : `Dockerfile`, `docker-compose.yml`, `.env.example`. Données dans le volume `wharfmaster-data`.
+Données : volume `wharfmaster-data` → `var/`. Après clone / upgrade front : `npm install && npm run build`.
+
+Migration legacy (ancienne base `portainer.sqlite` / ancienne arborescence) :
+
+```bash
+php bin/migrate-legacy.php
+```
 
 ### Apache sur l’hôte
 
-Prérequis : PHP 8.2+, Apache (`mod_rewrite`, `AllowOverride All`), socket Docker, binaires `docker` + Compose.  
-`DocumentRoot` = **`public/`** uniquement. Voir `docker/apache-vhost.conf` et `README.md`.
+Prérequis : PHP 8.2+, Apache (`mod_rewrite`, `AllowOverride All`), socket Docker, `docker` + Compose.  
+`DocumentRoot` = **`public/`**. Voir `docker/apache-vhost.conf` et `README.md`.
 
 ```bash
-git clone https://github.com/mike37510/WharfMaster.git
-cd WharfMaster
 php bin/init.php
 chown -R www-data:www-data var && chmod 700 var
 ```
@@ -140,13 +175,14 @@ Variables utiles :
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.1.0
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.0
 ```
 
-Backup admin (ZIP complet ; `?format=sqlite` = base seule) :
+Backup admin :
 
 ```bash
 curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.zip https://SERVEUR/api/backup
+# Restauration : voir RESTORE.md dans l’archive (pas d’upload in-app)
 ```
 
 ---
@@ -161,213 +197,119 @@ https://votre-serveur/api
 
 ### Authentification
 
-Deux modes :
-
-1. **JWT** (console / scripts)  
-   `Authorization: Bearer <jwt>`
-2. **Clé API** (intégrations)  
-   `X-API-Key: ptr_<48 hex>`  
-   (générée depuis la console utilisateurs)
+1. **JWT** — `Authorization: Bearer <jwt>`
+2. **Clé API** — `X-API-Key: ptr_<48 hex>`  
+   Générée depuis **Profil** (avatar en haut à droite) ou `POST /api/users/{id}/tokens`.  
+   La clé agit avec les **droits du propriétaire** (rôle, ACL, partages).
 
 ### Format
 
-- Corps JSON : `Content-Type: application/json`
+- JSON : `Content-Type: application/json`
 - Erreurs : `{ "message": "…" }` + code HTTP
-- Alignement volontaire avec **Portainer CE** sur de nombreux chemins
-- Extensions WharfMaster (`/api/acls`, `/api/schedules`, scans Trivy, `AccessRole`, `RegistryKind`) : **additives**, n’écrasent pas les shapes CE
-- Policies d’accès nœud exposées comme Portainer : `UserAccessPolicies` / `TeamAccessPolicies` avec `{ "RoleId": 1|2|3 }`
-  (1 ≈ admin nœud, 2 ≈ operate, 3 ≈ read) — aussi via `PUT /api/endpoints/{id}`
-- Équipes : `GET /api/teams` = tableau CE ; memberships CE via `/api/team_memberships`
-- LDAP : `AuthenticationMethod` + `LDAPSettings` (shape CE) en plus de `Ldap` (UI WM)
+- Alignement **Portainer CE** sur de nombreux chemins
+- Extensions WharfMaster additives : `/api/acls`, `/api/shares`, `/api/schedules`, `/api/metrics/*`, diagnostics, scans Trivy, updates d’images, etc.
 
 ### Exemple de session
 
 ```bash
-# 1. Login
 TOKEN=$(curl -fsS -X POST https://SERVEUR/api/auth \
   -H 'Content-Type: application/json' \
   -d '{"Username":"admin","Password":"VotreMotDePasse1"}' \
   | jq -r .jwt)
 
-# 2. Qui suis-je ?
-curl -fsS https://SERVEUR/api/users/me \
-  -H "Authorization: Bearer $TOKEN"
-
-# 3. Santé (sans auth)
+curl -fsS https://SERVEUR/api/users/me -H "Authorization: Bearer $TOKEN"
 curl -fsS https://SERVEUR/api/health
-```
-
-Réponse login :
-
-```json
-{ "jwt": "eyJ…" }
 ```
 
 ---
 
-## 6. API — endpoints publics / système
+## 6. API — publics / système
 
 | Méthode | Chemin | Auth | Description |
 |---------|--------|------|-------------|
 | GET | `/api/status` | non | Version + InstanceID |
 | GET | `/api/system/status` | non | Alias status |
-| GET | `/api/system/version` | non | Version détaillée + image agent |
+| GET | `/api/system/version` | non | Version + image agent |
 | GET | `/api/health` | non | Checks docker / compose / data / sqlite |
+| GET | `/api/system/diagnostics` | admin | Diagnostics détaillés |
 | GET | `/api/users/admin/check` | non | `{ "adminInit": true\|false }` |
-| POST | `/api/users/admin/init` | non* | Créer le premier admin (*si aucun user) |
+| POST | `/api/users/admin/init` | non* | Premier admin |
 | POST | `/api/auth` | non | Login → `{ jwt }` |
-| POST | `/api/nodes/join` | token wmj_ | Enrôlement agent (pas de JWT) |
+| POST | `/api/nodes/join` | token wmj_ | Enrôlement agent |
+| GET | `/api/metrics/history?scope=&hours=` | user | Historique courbes |
+| POST | `/api/metrics/sample` | user | Échantillon (CPU/RAM/…) |
 
-### Init admin
-
-```http
-POST /api/users/admin/init
-Content-Type: application/json
-
-{ "Username": "admin", "Password": "MotDePasse12" }
-```
-
-### Health
-
-```json
-{
-  "ok": true,
-  "version": "2.1.0",
-  "checks": {
-    "docker": true,
-    "dockerSocket": true,
-    "compose": true,
-    "dataWritable": true,
-    "composeDirWritable": true,
-    "sqlite": true
-  }
-}
-```
+`scope` métriques : `ep:{id}`, `all`, ou `ctr:{ep}:{containerId}`.
 
 ---
 
-## 7. API — utilisateurs & paramètres
+## 7. API — utilisateurs, paramètres, audit
 
 | Méthode | Chemin | Rôle | Description |
 |---------|--------|------|-------------|
-| GET | `/api/users/me` | user | Profil courant |
-| GET | `/api/users` | admin | Liste |
-| POST | `/api/users` | admin | Créer `{ Username, Password, Role }` (1=admin, 2=user) |
-| PUT | `/api/users/{id}/passwd` | self/admin | Changer mot de passe |
+| GET | `/api/users/me` | user | Profil |
+| GET/POST | `/api/users` | admin | Liste / créer |
+| PUT | `/api/users/{id}/passwd` | self/admin | Mot de passe |
 | DELETE | `/api/users/{id}` | admin | Supprimer |
-| POST | `/api/users/{id}/tokens` | self/admin | Créer clé API |
-| GET | `/api/settings` | user | Paramètres (`PublicURL`, `Ldap`/`LDAPSettings`, `TrivyEnabled`…) |
-| PUT | `/api/settings` | admin | MAJ (URL, métriques, LDAP, `TrivyEnabled`) |
-| GET | `/api/backup` | admin | Backup ZIP complet (SQLite, Compose, Dockerfiles, JWT). `?format=sqlite` = base seule |
-| GET | `/api/audit` | user | Journaux (`?limit=&offset=&action=`) |
+| GET | `/api/users/{id}/tokens` | self/admin | Lister les clés API |
+| POST | `/api/users/{id}/tokens` | self/admin | Créer une clé (`password` + `description`) → `rawAPIKey` une fois |
+| DELETE | `/api/users/{id}/tokens/{tid}` | self/admin | Révoquer une clé |
+| GET/PUT | `/api/settings` | user / admin | PublicURL, métriques, LDAP, Trivy… |
+| GET | `/api/backup` | admin | ZIP (`?format=sqlite` = base seule) |
+| GET | `/api/audit` | user | Journaux |
 | GET | `/api/system/host` | user | Ressources hôte |
 
-### Changement de mot de passe
-
-```http
-PUT /api/users/1/passwd
-Authorization: Bearer …
-Content-Type: application/json
-
-{
-  "Password": "NouveauMot12",
-  "PasswordConfirm": "NouveauMot12",
-  "CurrentPassword": "AncienMot12"
-}
-```
-
-`CurrentPassword` obligatoire pour soi-même. `PasswordConfirm` vérifié s’il est envoyé.
-
 ---
 
-## 8. API — endpoints / nœuds
+## 8. API — nœuds, équipes, ACL, partages
 
-| Méthode | Chemin | Rôle | Description |
-|---------|--------|------|-------------|
-| GET | `/api/endpoints` | user | Liste (format Portainer + `AccessRole`) |
-| GET | `/api/endpoints/{id}` | user | Détail |
-| PUT | `/api/endpoints/{id}` | admin | MAJ policies CE (`UserAccessPolicies` / `TeamAccessPolicies`) |
-| GET | `/api/teams` | admin | Liste CE `[{Id,Name}]` — `?detail=1` pour Members/AD |
-| GET/POST | `/api/team_memberships` | admin | Memberships shape Portainer |
-| GET | `/api/teams/{id}/memberships` | admin | Memberships d’une équipe |
-| GET | `/api/users/{id}` | admin | Détail utilisateur |
-| GET | `/api/nodes` | admin | Liste enrichie (TLS, pin, `Disabled`…) |
-| PUT | `/api/nodes/{id}` | admin | Renommer / URL agent / URL publique |
-| GET | `/api/nodes/join-token` | admin | Métadonnées token actif |
-| POST | `/api/nodes/join-token` | admin | Générer commande + token |
-| POST | `/api/nodes/join-token/rotate` | admin | Rotation |
-| POST | `/api/nodes/{id}/ping` | admin | Ping + refresh TLS |
-| POST | `/api/nodes/{id}/disable` | admin | Désactiver |
-| POST | `/api/nodes/{id}/enable` | admin | Activer |
-| DELETE | `/api/nodes/{id}` | admin | Délier |
-| POST | `/api/nodes/join` | wmj_ | Join agent |
-| GET | `/api/acls?endpointId=` | admin | Liste ACL (filtre nœud optionnel) |
-| POST | `/api/acls` | admin | Upsert `{ EndpointId, SubjectType, SubjectId, Role }` |
-| DELETE | `/api/acls/{id}` | admin | Retirer un droit |
-| GET/POST | `/api/teams` | admin | CRUD équipes (`?detail=1`) |
-| PUT/DELETE | `/api/teams/{id}` | admin | MAJ / supprimer |
-| POST/DELETE | `/api/teams/{id}/members[/{uid}]` | admin | Membres |
+| Méthode | Chemin | Description |
+|---------|--------|-------------|
+| GET | `/api/endpoints` | Liste (+ `AccessRole`) |
+| GET/PUT | `/api/endpoints/{id}` | Détail / policies CE |
+| GET | `/api/nodes` | Liste enrichie (admin) |
+| POST | `/api/nodes/join-token` | Commande + token |
+| GET/POST | `/api/nodes/agent-bundle` | Pack ZIP agent |
+| POST | `/api/nodes/{id}/ping` | Ping + refresh TLS |
+| GET/POST/DELETE | `/api/acls` | ACL nœud user/équipe |
+| GET/POST/DELETE | `/api/shares` | Partages ressources |
+| GET/POST | `/api/teams` | Équipes (`?detail=1`) |
+| POST/DELETE | `/api/teams/{id}/members…` | Membres |
 
-### Join agent (côté machine distante via install.sh)
+### Partages
 
 ```http
-POST /api/nodes/join
-Content-Type: application/json
-
-{
-  "token": "wmj_…",
-  "name": "node5",
-  "agentUrl": "https://192.168.1.5:9001"
-}
+POST /api/shares
+{ "ResourceType": "stack|container|volume|network", "ResourceKey": "…", "ToUserId": 2 }
 ```
 
-Réponse : `NodeSecret`, `NodeId`, éventuelle `TlsFingerprint`.
+Une stack partagée donne accès aux conteneurs / volumes / réseaux Compose du même projet.
 
 ---
 
 ## 9. API — proxy Docker
-
-Toute l’API Engine Docker est exposée sous :
 
 ```http
 {METHOD} /api/endpoints/{endpointId}/docker/{chemin Engine}
 Authorization: Bearer …
 ```
 
-Exemples :
+Exemples : `/containers/json?all=true`, `/containers/{id}/start|stop`, `/images/json`, prune, etc. Sur agent : vérification de l’empreinte TLS épinglée.
 
-```bash
-# Conteneurs
-curl -fsS -H "Authorization: Bearer $TOKEN" \
-  "$BASE/api/endpoints/1/docker/containers/json?all=true"
-
-# Start / stop
-curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
-  "$BASE/api/endpoints/1/docker/containers/ID/start"
-
-curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
-  "$BASE/api/endpoints/1/docker/containers/ID/stop"
-
-# Images
-curl -fsS -H "Authorization: Bearer $TOKEN" \
-  "$BASE/api/endpoints/1/docker/images/json"
-```
-
-Sur un **agent**, le principal vérifie l’empreinte TLS épinglée avant le proxy.
-
-### Helpers WharfMaster (hors Engine brut)
+### Helpers WharfMaster
 
 | Méthode | Chemin | Description |
 |---------|--------|-------------|
-| GET | `/api/endpoints/{id}/containers` | Liste filtrée (scope user) |
-| GET | `/api/endpoints/{id}/containers/{cid}/logs` | Logs enrichis |
-| POST | `/api/endpoints/{id}/containers/{cid}/exec` | Exécuter une commande (pas un attach TTY interactif) |
+| GET | `/api/endpoints/{id}/containers/{cid}/logs` | Logs |
+| POST | `/api/endpoints/{id}/containers/{cid}/exec` | Exec (pas d’attach TTY) |
+| GET | `/api/endpoints/{id}/containers/updates` | Statuts MàJ images (liste) |
+| GET | `/api/endpoints/{id}/containers/{cid}/updates` | Statut MàJ d’un conteneur |
+| POST | `/api/endpoints/{id}/containers/{cid}/update` | Pull + recreate |
 | GET | `/api/images/search?q=` | Recherche Hub |
-| GET | `/api/images/tags?repo=` | Tags |
-| POST | `/api/images/build` | Build Dockerfile |
-| GET/POST/DELETE | `/api/dockerfiles[/{name}]` | Bibliothèque Dockerfiles |
-| GET | `/api/volumes/{name}/browse?path=` | Explorateur volume |
-| GET/POST/DELETE | `/api/volumes/{name}/file` … | Fichiers volume |
+| POST | `/api/images/build` | Build |
+| GET/POST | `/api/endpoints/{id}/images/scans…` | CVE Trivy |
+| GET | `/api/volumes/{name}/browse` | Explorateur |
+| GET | `/api/bind-volumes` | Binds déclarés |
 
 ---
 
@@ -375,17 +317,17 @@ Sur un **agent**, le principal vérifie l’empreinte TLS épinglée avant le pr
 
 | Méthode | Chemin | Description |
 |---------|--------|-------------|
-| GET | `/api/stacks?endpointId=` | Liste (`0` / absent = tous) |
-| POST | `/api/stacks/create/standalone/string?endpointId=` | Créer + déployer |
+| GET | `/api/stacks?endpointId=` | Liste |
+| POST | `/api/stacks/create/standalone/string?endpointId=` | Créer + déployer (`PullImages` optionnel) |
 | GET | `/api/stacks/{id}` | Métadonnées |
-| GET | `/api/stacks/{id}/file` | Contenu YAML (miroir) |
-| PUT | `/api/stacks/{id}` | Mettre à jour + `up` |
-| POST | `/api/stacks/{id}/start` | `compose start` (ou `up`) |
-| POST | `/api/stacks/{id}/stop` | `compose stop` |
-| POST | `/api/stacks/{id}/restart` | `compose restart` |
+| GET | `/api/stacks/{id}/file` | YAML miroir |
+| PUT | `/api/stacks/{id}` | MAJ + `up` (`PullImages`, `prune`) |
+| POST | `/api/stacks/{id}/start\|stop\|restart` | Lifecycle |
 | DELETE | `/api/stacks/{id}` | `down` + purge |
+| GET | `/api/stacks/updates` | Statuts MàJ images (toutes stacks du nœud) |
+| GET | `/api/stacks/{id}/updates` | Détail MàJ par service |
 
-### Créer une stack
+Création :
 
 ```bash
 curl -fsS -X POST \
@@ -394,12 +336,11 @@ curl -fsS -X POST \
   "$BASE/api/stacks/create/standalone/string?endpointId=1" \
   -d '{
     "Name": "demo",
-    "StackFileContent": "services:\n  web:\n    image: nginx:alpine\n    ports:\n      - \"8088:80\"\n",
-    "Env": [{ "name": "FOO", "value": "bar" }]
+    "StackFileContent": "services:\n  web:\n    image: nginx:alpine\n",
+    "Env": [],
+    "PullImages": true
   }'
 ```
-
-Sur `endpointId` agent : validation locale + `POST` agent `/compose/up`.
 
 ---
 
@@ -407,15 +348,14 @@ Sur `endpointId` agent : validation locale + `POST` agent `/compose/up`.
 
 | Méthode | Chemin | Description |
 |---------|--------|-------------|
-| GET | `/api/registries` | Liste |
-| POST | `/api/registries` | Créer |
+| GET/POST | `/api/registries` | Liste / créer |
 | GET/PUT/DELETE | `/api/registries/{id}` | CRUD |
 | GET | `/api/registries/{id}/ping` | Test |
-| GET | `/api/registries/{id}/repositories?q=` | Dépôts |
-| GET | `/api/registries/{id}/tags?repo=` | Tags |
-| POST | `/api/registries/{id}/pull` | Pull `{ Repository, Tag }` |
+| GET | `/api/registries/{id}/repositories` | Dépôts |
+| GET | `/api/registries/{id}/tags` | Tags |
+| POST | `/api/registries/{id}/pull` | Pull |
 
-Les mots de passe sont stockés chiffrés (`enc:v1:…`) ; l’API de liste n’expose pas le secret en clair (flag `Authentication`).
+Secrets chiffrés (`enc:v1:…`) ; la liste n’expose pas le mot de passe.
 
 ---
 
@@ -424,31 +364,29 @@ Les mots de passe sont stockés chiffrés (`enc:v1:…`) ; l’API de liste n’
 | Méthode | Chemin | Description |
 |---------|--------|-------------|
 | GET | `/api/schedules` | Liste (`?stackId=` / `?endpointId=`) |
-| POST | `/api/schedules` | Créer (cron + action start/stop/restart) |
+| POST | `/api/schedules` | Créer (`Action` start\|stop\|restart, `Cron` 5 champs) |
 | PUT/DELETE | `/api/schedules/{id}` | MAJ / supprimer |
 | POST | `/api/schedules/{id}/run` | Exécuter maintenant |
-| GET | `/api/endpoints/{id}/images/scans` | Résumés scans Trivy |
-| GET | `/api/endpoints/{id}/images/scan?ref=` | Dernier scan + findings |
-| POST | `/api/endpoints/{id}/images/scan` | Lancer un scan (`Force` optionnel) |
-| POST | `/api/endpoints/{id}/images/advise` | Avis soft (création/deploy) — **jamais bloquant** |
+| POST | `/api/schedules/run-due` | Sidecar admin : due now |
+| GET/POST | `/api/endpoints/{id}/images/scan…` | Scans Trivy |
+| POST | `/api/endpoints/{id}/images/scans/ensure` | Scan auto liste |
+| POST | `/api/endpoints/{id}/images/advise` | Avis soft (jamais bloquant) |
 
-Si `TrivyEnabled=false` : advise renvoie `Worst=disabled` ; scan manuel → 403.
+Si `TrivyEnabled=false` : advise → `Worst=disabled` ; scan manuel → 403.
 
 ---
 
-## 13. Agent distant (référence)
+## 13. Agent distant
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:2.1.0` (ou build local).
+Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.0` (ou `WHARFMASTER_AGENT_IMAGE`).
 
 | Chemin agent | Description |
 |--------------|-------------|
-| `GET /health` | Docker + `compose` + TLS expiry |
-| `*` `/docker/…` | Proxy Engine (Bearer `NODE_SECRET`) |
-| `POST /compose/up\|down\|start\|stop\|restart\|config` | Runtime Compose |
-| `GET /compose/file?name=` | Lire YAML distant |
-| `POST /scan/image` | Scan Trivy local à l’agent |
-
-Install :
+| `GET /health` | Docker + compose + TLS |
+| `*` `/docker/…` | Proxy Engine |
+| `POST /compose/up\|down\|start\|stop\|restart\|config` | Compose |
+| `GET /compose/file?name=` | YAML distant |
+| `POST /scan/image` | Trivy local |
 
 ```bash
 curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
@@ -456,32 +394,36 @@ curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:2.1.0
+  --image ghcr.io/mike37510/wharfmaster-agent:2.3.0
 ```
+
+Pack ZIP : Paramètres → Nœuds → bundle (Dockerfile, sources, `deploy.sh`, `.env`).
 
 ---
 
 ## 14. Sécurité (points clés)
 
 - Non-admin : pas de privileged / bind hôte / docker.sock / network|pid host ; Compose validé résolu.
-- ACL nœud : `read` / `operate` / `admin` (direct user ou via équipe) ; admins globaux toujours autorisés.
-- Rate-limit login / join.
-- JWT TTL 4 h ; rôle relu en base à chaque requête.
-- TLS agent : empreinte SHA-256 ; refresh pin seulement si `/health` Bearer OK (renouvellement cert).
-- HSTS si `HTTPS=on`.
-- DocumentRoot = `public/` uniquement ; `var/`, `src/`, `config/`, `agent/` hors webroot.
+- ACL nœud : `read` / `operate` / `admin` (user ou équipe) ; admins globaux toujours OK.
+- Partages = exception explicite ressource par ressource (en plus des ACL).
+- Rate-limit login / join ; JWT TTL 4 h ; rôle relu en base.
+- TLS agent : empreinte SHA-256 ; refresh pin si `/health` Bearer OK.
+- DocumentRoot = `public/` uniquement.
 
 ---
 
 ## 15. Limites connues
 
-- Mode **Tous les nœuds** : agrégation surtout en lecture pour Docker.
+- **Tous les nœuds** : agrégation surtout en lecture pour Docker.
 - Pas de placement multi-nœud d’une même stack.
 - Pas de sync si édition manuelle des fichiers sur l’agent.
-- Console conteneur = exécution de commandes (pas d’attach TTY interactif).
-- Swarm / secrets Engine bloqués au proxy.
-- L’agent doit être joignable depuis le principal (pas de mode edge/NAT).
-- Scan CVE dépend de Trivy (local ou agent) ; désactivable sans bloquer les déploiements.
+- Console = exec de commandes (pas d’attach TTY interactif).
+- Swarm / secrets Engine / plugins : bloqués au proxy.
+- Pas de Kubernetes / Edge / NAT-tunnel ; l’agent doit être joignable depuis le principal.
+- Pas de SSO OIDC/SAML (LDAP/AD uniquement).
+- Backup = téléchargement ; restore manuel (`RESTORE.md`).
+- Templates « App Templates » / stacks Git : non fournis (Compose string uniquement).
+- Scan CVE dépend de Trivy ; désactivable sans bloquer les déploiements.
 
 ---
 
@@ -491,11 +433,12 @@ curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
 |---------|------|
 | `README.md` | Install & overview |
 | `CHANGELOG.md` | Historique versions |
-| `SECURITY.md` | Modèle de durcissement |
-| `docs/DOCUMENTATION.md` | Ce guide (servi en console via `/docs/…`) |
-| `config/app.php` | Configuration (lecture seule) |
-| `bin/init.php` | Init runtime `var/` |
-| `public/index.php` | Front controller unique |
-| `agent/install.sh` | Installer un nœud (`/agent/install.sh`) |
+| `SECURITY.md` | Durcissement |
+| `docs/DOCUMENTATION.md` | Ce guide (`/docs/…` en console) |
+| `config/app.php` | Config lecture seule |
+| `bin/init.php` / `bin/migrate-legacy.php` | Init / migration |
+| `public/index.php` | Front controller |
+| `agent/install.sh` | Installer un nœud |
+| `package.json` | `npm run build` → `public/assets/js/app.js` |
 
-Pour toute évolution API, privilégier la compatibilité Portainer CE lorsque c’est pertinent, et documenter les extensions WharfMaster (`/api/health`, `/api/backup`, `/api/stacks/{id}/start|stop|restart`, nœuds, etc.) dans ce fichier.
+Pour toute évolution API, privilégier la compatibilité Portainer CE lorsque c’est pertinent, et documenter les extensions WharfMaster ici.

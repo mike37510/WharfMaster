@@ -16,13 +16,22 @@ final class UsersController extends BaseController
             return Response::error('Accès refusé', 403);
         }
         $body = $request->json();
-        $description = (string) ($body['description'] ?? $body['Description'] ?? 'api-key');
+        $description = trim((string) ($body['description'] ?? $body['Description'] ?? 'api-key'));
+        if ($description === '') {
+            $description = 'api-key';
+        }
+        if (mb_strlen($description) > 120) {
+            return Response::error('Description trop longue (max 120)', 400);
+        }
+        if ($description === 'scheduler-sidecar') {
+            return Response::error('Description réservée', 400);
+        }
         $password = (string) ($body['password'] ?? $body['Password'] ?? '');
         $dbUser = $this->repo->findUserById($userId);
         if (!$dbUser) {
             return Response::error('Utilisateur introuvable', 404);
         }
-        if ($password === '' || !password_verify($password, $dbUser['password_hash'])) {
+        if (!$this->verifyUserPassword($dbUser, $password)) {
             return Response::error('Mot de passe requis pour créer une clé API', 422);
         }
         $raw = 'ptr_' . bin2hex(random_bytes(24));
@@ -35,9 +44,81 @@ final class UsersController extends BaseController
             'id' => $meta['id'],
             'description' => $description,
             'prefix' => $meta['prefix'],
+            'rawHint' => substr($raw, -4),
             'dateCreated' => $meta['dateCreated'],
             'rawAPIKey' => $raw,
         ]);
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    public function listTokens(int $userId, array $user): Response
+    {
+        if ((int) $user['id'] !== $userId && (int) $user['role'] !== 1) {
+            return Response::error('Accès refusé', 403);
+        }
+        if (!$this->repo->findUserById($userId)) {
+            return Response::error('Utilisateur introuvable', 404);
+        }
+        $rows = array_values(array_filter(
+            $this->repo->listApiKeysForUser($userId),
+            static fn(array $row): bool => (string) ($row['description'] ?? '') !== 'scheduler-sidecar',
+        ));
+        return Response::json(array_map(static function (array $row): array {
+            return [
+                'id' => (int) $row['id'],
+                'description' => (string) ($row['description'] ?? ''),
+                'prefix' => (string) ($row['prefix'] ?? ''),
+                'rawHint' => (string) ($row['raw_hint'] ?? ''),
+                'dateCreated' => (int) ($row['date_created'] ?? 0),
+                'lastUsed' => isset($row['last_used']) && $row['last_used'] !== null
+                    ? (int) $row['last_used']
+                    : null,
+            ];
+        }, $rows));
+    }
+
+    /** @param array{id:int,username:string,role:int} $user */
+    public function revokeToken(int $userId, int $tokenId, Request $request, array $user): Response
+    {
+        if ((int) $user['id'] !== $userId && (int) $user['role'] !== 1) {
+            return Response::error('Accès refusé', 403);
+        }
+        $row = $this->repo->findApiKeyById($tokenId);
+        if (!$row || (int) $row['user_id'] !== $userId) {
+            return Response::error('Clé API introuvable', 404);
+        }
+        if ((string) ($row['description'] ?? '') === 'scheduler-sidecar') {
+            return Response::error('Cette clé système ne peut pas être révoquée ici', 400);
+        }
+        $this->repo->deleteApiKey($tokenId);
+        $this->audit($user, 'api_key.revoke', 'Révocation d’une clé API (« ' . ($row['description'] ?? '') . ' »)', $request, [
+            'targetUserId' => $userId,
+            'prefix' => (string) ($row['prefix'] ?? ''),
+            'tokenId' => $tokenId,
+        ]);
+        return Response::empty(204);
+    }
+
+    /** @param array<string, mixed> $dbUser */
+    private function verifyUserPassword(array $dbUser, string $password): bool
+    {
+        if ($password === '') {
+            return false;
+        }
+        $authSource = (string) ($dbUser['auth_source'] ?? 'local');
+        if ($authSource === 'ldap') {
+            $ldapCfg = $this->ldapConfig();
+            if (empty($ldapCfg['enabled'])) {
+                return false;
+            }
+            try {
+                return $this->ldap->authenticate($ldapCfg, (string) $dbUser['username'], $password) !== null;
+            } catch (\Throwable $e) {
+                error_log('[WharfMaster] LDAP verify for API key: ' . $e->getMessage());
+                return false;
+            }
+        }
+        return password_verify($password, (string) $dbUser['password_hash']);
     }
 
     /** @param array{id:int,username:string,role:int} $user */

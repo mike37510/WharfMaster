@@ -138,6 +138,11 @@ export const Api = (() => {
     deleteUser: (id) => request(`/api/users/${id}`, { method: 'DELETE' }),
     changePassword: (id, payload) =>
       request(`/api/users/${id}/passwd`, { method: 'PUT', body: JSON.stringify(payload) }),
+    listUserTokens: (id) => request(`/api/users/${id}/tokens`),
+    createUserToken: (id, payload) =>
+      request(`/api/users/${id}/tokens`, { method: 'POST', body: JSON.stringify(payload) }),
+    revokeUserToken: (id, tid) =>
+      request(`/api/users/${id}/tokens/${tid}`, { method: 'DELETE' }),
     listShares: (type, endpointId, key) => {
       const q = new URLSearchParams({
         type: String(type),
@@ -242,6 +247,12 @@ export const Api = (() => {
     containerUpdateStatus: (id, refresh = false) =>
       request(
         `/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/updates${refresh ? '?refresh=1' : ''}`,
+      ),
+    /** Pull image + recreate container (standalone). Prefer stack upgrade when Compose-managed. */
+    updateContainerImage: (id, pull = true) =>
+      request(
+        `/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/update`,
+        { method: 'POST', body: JSON.stringify({ Pull: !!pull }) },
       ),
     buildImage: (payload) =>
       request('/api/images/build', { method: 'POST', body: JSON.stringify(payload) }),

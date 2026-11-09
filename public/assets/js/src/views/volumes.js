@@ -127,6 +127,7 @@ export function install() {
       usage: (v) => Number(v._usageCount) || 0,
       mount: (v) => v.Mountpoint || v.HostPath || '',
       node: (v) => v._nodeName || '',
+      created: (v) => bag.createdSortKey(v.CreatedAt || v.created_at || v.Created),
     });
     const rows = volumes.map((v) => {
       const users = (usageByKey.get(v._sortKey) || {}).users || [];
@@ -163,10 +164,11 @@ export function install() {
       <td>${bag.esc(driverLabel)}</td>
       <td>${usageCell}</td>
       <td class="mono cell-clip" title="${bag.esc(mount)}">${bag.esc(mount)}</td>
+      <td>${bag.formatCreated(v.CreatedAt || v.created_at || v.Created)}</td>
       <td class="actions">${actions}</td>
     </tr>`;
     }).join('');
-    const colSpan = all ? 6 : 7;
+    const colSpan = all ? 7 : 8;
     bag.root.innerHTML = bag.shell('Volumes', `
       ${bag.pageHeader(all ? 'Volumes — tous les nœuds' : 'Volumes')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
@@ -186,6 +188,7 @@ export function install() {
           ${bag.sortTh('Pilote', 'driver', 'volumes')}
           ${bag.sortTh('Usage', 'usage', 'volumes')}
           ${bag.sortTh('Point de montage', 'mount', 'volumes')}
+          ${bag.sortTh('Créé', 'created', 'volumes')}
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>

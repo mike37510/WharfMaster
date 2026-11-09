@@ -506,6 +506,33 @@ export function installCore() {
     }
   }
 
+  /** Normalize Docker / API created fields (unix s|ms or ISO) → Date or null. */
+  bag.parseCreatedDate = function parseCreatedDate(value) {
+    if (value == null || value === '' || value === 0 || value === '0') return null;
+    if (typeof value === 'number' || /^\d+(\.\d+)?$/.test(String(value).trim())) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) return null;
+      const d = new Date(n < 1e12 ? n * 1000 : n);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const d = new Date(String(value));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  bag.createdSortKey = function createdSortKey(value) {
+    const d = bag.parseCreatedDate(value);
+    return d ? d.getTime() : 0;
+  }
+
+  /** Created label for tables (date visible, relative age in title). */
+  bag.formatCreated = function formatCreated(value) {
+    const d = bag.parseCreatedDate(value);
+    if (!d) return '—';
+    const full = d.toLocaleString();
+    const rel = bag.relativeTime(d.getTime());
+    return `<span class="cell-nowrap" title="${bag.esc(rel)}">${bag.esc(full)}</span>`;
+  }
+
   bag.route = async function route() {
     bag.stopTimers();
     bag.closeAppModal();
@@ -598,6 +625,7 @@ export function installCore() {
         }
         await bag.viewNodes();
       }
+      else if (bag.state.route === 'profile') await bag.viewProfile();
       else if (bag.state.route === 'settings' || bag.state.route === 'settings/') await bag.viewSettings();
       else if (bag.state.route === 'settings/auth') await bag.viewSettingsAuth();
       else if (bag.state.route === 'settings/diagnostics/api') {

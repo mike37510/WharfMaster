@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 2.1.0 |
+| **Version** | 2.3.0 |
 | **Console** | `/app` |
 | **API** | `/api` |
 | **DocumentRoot** | `public/` uniquement |
@@ -75,22 +75,32 @@ npm install && npm run build   # régénère public/assets/js/app.js
 ## Fonctionnalités
 
 - **Tableau de bord** — stats, conteneurs, ressources hôte (CPU / RAM / disque), activité ; vue **Tous les nœuds** agrégée
-- **Conteneurs** — création, start / stop / restart, logs (suivi live, recherche, export), console, inspect
-- **Images** — recherche locale + Docker Hub, pull, build Dockerfile, **pastilles CVE** (Trivy)
-- **Volumes** — création, explorateur de fichiers (créer / renommer / supprimer au clic droit)
-- **Réseaux & stacks Compose** — éditeur YAML, variables `.env`, pull forcé, indicateur d’images à jour, déploiement local **et sur agents**
-- **Registres** — Docker Hub / Registry V2, parcours dépôts & tags, pull
-- **Utilisateurs** — rôles admin / utilisateur, isolation par labels `dockermanager.owner*`
-- **Équipes** — CRUD, recherche, ajout / retrait de membres, mapping groupe AD (Paramètres → Équipes)
-- **ACL par nœud** — droits `lecture` / `opération` / `admin nœud` pour un **user** ou une **équipe** (Paramètres → Nœuds → Accès)
-- **SSO Active Directory / LDAP** — host, TLS/LDAPS, bind, filtre ; provision users + sync groupes → équipes (Paramètres → Authentification)
-- **Scheduler** — cron start / stop / restart **par stack** (détail stack → Planifications) + sidecar Compose
-- **Scan CVE Trivy** — scan manuel, avis non bloquant à la création conteneur / stack, interrupteur global (Paramètres → Général)
-- **Paramètres** — sous-menus : Général, Authentification, Registres, Nœuds, Utilisateurs, Équipes ; backup ZIP
-- **Journaux** — audit applicatif (connexions, actions Docker / stacks / utilisateurs)
-- **Nœuds (multinode)** — agents HTTPS, modal d’ajout, édition (nom / URL), ping, activer / désactiver, délier, TLS pin
-- **Sécurité** — rate-limit login, politique Compose résolue (`docker compose config`), proxy Docker restreint pour les non-admins
-- **API** — compatible **Portainer CE** (teams, memberships, policies, LDAPSettings…) + extensions WharfMaster (`/api/acls`, `/api/schedules`, scans Trivy)
+- **Conteneurs** — CRUD, logs / console / inspect, charge CPU·RAM (icônes), métriques historiques, date de création, MàJ image en un clic
+- **Images** — Hub / local, pull, build, **pastilles CVE** auto (Trivy, cache 24 h)
+- **Volumes** — named + binds (sync Compose), explorateur de fichiers
+- **Réseaux & stacks Compose** — YAML + `.env`, conteneurs liés + actions, schedules, pastille MàJ **cliquable** (pull + redeploy), multi-nœud
+- **Profil** — avatar → compte, mot de passe, **clés API** personnelles (droits = ceux de l’utilisateur)
+- **Partages** — stack / conteneur / volume / réseau entre utilisateurs (cascade stack → Compose)
+- **Registres** — Hub / Registry V2, parcours dépôts & tags, pull
+- **Utilisateurs / équipes / ACL nœud** — isolation labels, droits lecture·opération·admin, mapping AD
+- **SSO Active Directory / LDAP** — Paramètres → Authentification
+- **Scheduler** — start / stop / restart de stacks + sidecar Compose
+- **Diagnostics** — santé + tests API Docker (Paramètres)
+- **Nœuds** — agents HTTPS, commande ou pack ZIP, TLS pin, ping
+- **Backup** — ZIP admin (`GET /api/backup`) ; restore manuel
+- **API** — JWT ou `X-API-Key` ; compatible **Portainer CE** + extensions (`/api/acls`, `/api/shares`, `/api/schedules`, `/api/metrics/*`, updates images, Trivy)
+
+### Profil & clés API (2.3)
+
+1. Cliquer l’**avatar** (barre du haut) → page **Profil**.
+2. **Générer une clé** (description + confirmation mot de passe) — la valeur complète n’est montrée qu’une fois.
+3. Appeler l’API avec `X-API-Key: ptr_…` : la clé agit avec le **rôle, les ACL et les partages** du propriétaire.
+4. Lister / révoquer les clés depuis le même écran (`GET/POST/DELETE /api/users/{id}/tokens`).
+
+### Mises à jour d’images (2.3)
+
+- **Stack** : pastille « Mise à jour » cliquable → pull des images + redeploy Compose.
+- **Conteneur** (hors stack) : action MàJ image en un clic depuis la barre d’actions.
 
 ### Équipes & droits d’accès (2.0)
 
@@ -321,7 +331,7 @@ export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
 export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.1.0
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.0
 ```
 
 ### Backup / restauration
@@ -336,7 +346,7 @@ curl -fsS -H "Authorization: Bearer $TOKEN" -o backup.zip https://VOTRE-SERVEUR/
 # Conserver aussi var/jwt.secret (et WM_MASTER_KEY) pour déchiffrer les registres.
 ```
 
-Sources agent : éditer [`agent/`](agent/) puis `sh (supprimé — une seule copie agent/)` avant release.
+Sources agent : dossier [`agent/`](agent/) (une seule copie, servie via `/agent/…`).
 
 ---
 
@@ -395,7 +405,10 @@ GET|POST /api/stacks
 GET|POST /api/registries
 ```
 
-Authentification : header `Authorization: Bearer <jwt>` (obtenu via `POST /api/auth`).
+Authentification :
+
+- `Authorization: Bearer <jwt>` (via `POST /api/auth`)
+- ou `X-API-Key: ptr_…` (clé générée dans **Profil**)
 
 ---
 

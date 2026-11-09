@@ -536,6 +536,7 @@ export function install() {
       size: (img) => Number(img.Size) || 0,
       usage: (img) => Number(img._usageCount) || 0,
       node: (img) => img._nodeName || '',
+      created: (img) => bag.createdSortKey(img.Created),
     });
     const rows = list.map((img) => {
       const tags = img._tagsLabel || bag.imageTagsLabel(img);
@@ -558,12 +559,13 @@ export function install() {
         <td>${usageCell}</td>
         ${cveCell}
         <td>${bag.esc(sizeMb)} MB</td>
+        <td>${bag.formatCreated(img.Created)}</td>
         <td class="actions">${all ? '<span class="muted">—</span>' : `<div class="quick-actions">
           ${bag.iconBtn({ id: img.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div>`}</td>
       </tr>`;
     }).join('');
-    const colSpan = (all ? 6 : 7) + (cveOn && !all ? 1 : 0);
+    const colSpan = (all ? 7 : 8) + (cveOn && !all ? 1 : 0);
     bag.root.innerHTML = bag.shell('Images', `
       ${bag.pageHeader(all ? 'Images — tous les nœuds' : 'Images')}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agrégat partiel : certains nœuds n’ont pas répondu.</div>' : ''}
@@ -584,6 +586,7 @@ export function install() {
           ${bag.sortTh('Usage', 'usage', 'images')}
           ${cveOn && !all ? '<th>CVE</th>' : ''}
           ${bag.sortTh('Taille', 'size', 'images')}
+          ${bag.sortTh('Créé', 'created', 'images')}
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune image</td></tr>`}</tbody>

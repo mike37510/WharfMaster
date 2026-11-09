@@ -136,6 +136,9 @@
       createUser: (Username, Password, Role = 2) => request("/api/users", { method: "POST", body: JSON.stringify({ Username, Password, Role }) }),
       deleteUser: (id) => request(`/api/users/${id}`, { method: "DELETE" }),
       changePassword: (id, payload) => request(`/api/users/${id}/passwd`, { method: "PUT", body: JSON.stringify(payload) }),
+      listUserTokens: (id) => request(`/api/users/${id}/tokens`),
+      createUserToken: (id, payload) => request(`/api/users/${id}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
+      revokeUserToken: (id, tid) => request(`/api/users/${id}/tokens/${tid}`, { method: "DELETE" }),
       listShares: (type, endpointId, key) => {
         const q = new URLSearchParams({
           type: String(type),
@@ -236,6 +239,11 @@
       ),
       containerUpdateStatus: (id, refresh = false) => request(
         `/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/updates${refresh ? "?refresh=1" : ""}`
+      ),
+      /** Pull image + recreate container (standalone). Prefer stack upgrade when Compose-managed. */
+      updateContainerImage: (id, pull = true) => request(
+        `/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/update`,
+        { method: "POST", body: JSON.stringify({ Pull: !!pull }) }
       ),
       buildImage: (payload) => request("/api/images/build", { method: "POST", body: JSON.stringify(payload) }),
       searchImages: (q) => request(`/api/images/search?q=${encodeURIComponent(q)}`),
@@ -833,6 +841,28 @@
         return String(ts);
       }
     };
+    bag.parseCreatedDate = function parseCreatedDate(value) {
+      if (value == null || value === "" || value === 0 || value === "0") return null;
+      if (typeof value === "number" || /^\d+(\.\d+)?$/.test(String(value).trim())) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        const d2 = new Date(n < 1e12 ? n * 1e3 : n);
+        return Number.isNaN(d2.getTime()) ? null : d2;
+      }
+      const d = new Date(String(value));
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+    bag.createdSortKey = function createdSortKey(value) {
+      const d = bag.parseCreatedDate(value);
+      return d ? d.getTime() : 0;
+    };
+    bag.formatCreated = function formatCreated(value) {
+      const d = bag.parseCreatedDate(value);
+      if (!d) return "\u2014";
+      const full = d.toLocaleString();
+      const rel = bag.relativeTime(d.getTime());
+      return `<span class="cell-nowrap" title="${bag.esc(rel)}">${bag.esc(full)}</span>`;
+    };
     bag.route = async function route() {
       bag.stopTimers();
       bag.closeAppModal();
@@ -916,7 +946,8 @@
             return;
           }
           await bag.viewNodes();
-        } else if (bag.state.route === "settings" || bag.state.route === "settings/") await bag.viewSettings();
+        } else if (bag.state.route === "profile") await bag.viewProfile();
+        else if (bag.state.route === "settings" || bag.state.route === "settings/") await bag.viewSettings();
         else if (bag.state.route === "settings/auth") await bag.viewSettingsAuth();
         else if (bag.state.route === "settings/diagnostics/api") {
           if (Number(bag.state.user?.Role) !== 1) {
@@ -1144,32 +1175,7 @@
       if (max >= 65) return "warn";
       return "ok";
     };
-    bag.statsLoadTone = function statsLoadTone(pct) {
-      const p = Number(pct) || 0;
-      if (p >= 85) return "hot";
-      if (p >= 65) return "warn";
-      return "ok";
-    };
-    bag.statsLoadBtn = function statsLoadBtn({ id, name, running }) {
-      const title = running ? "CPU / RAM en direct \u2014 cliquer pour le d\xE9tail" : "Conteneur arr\xEAt\xE9";
-      const level = running ? "is-stats-ok" : "is-stats-off";
-      return `<button type="button" class="btn btn-stats-load ${level}"
-      data-modal="stats" data-id="${bag.esc(id)}" data-name="${bag.esc(name || "")}"
-      data-running="${running ? "1" : "0"}" data-stats-id="${bag.esc(id)}"
-      title="${bag.esc(title)}" aria-label="${bag.esc(title)}">
-      <span class="sl-row" data-sl="cpu">
-        <span class="sl-k">CPU</span>
-        <span class="sl-bar"><i style="width:0%"></i></span>
-        <span class="sl-v">${running ? "\u2026" : "\u2014"}</span>
-      </span>
-      <span class="sl-row" data-sl="mem">
-        <span class="sl-k">RAM</span>
-        <span class="sl-bar mem"><i style="width:0%"></i></span>
-        <span class="sl-v">${running ? "\u2026" : "\u2014"}</span>
-      </span>
-    </button>`;
-    };
-    bag.applyStatsIconLevel = function applyStatsIconLevel(containerId, level, title, metrics = null) {
+    bag.applyStatsIconLevel = function applyStatsIconLevel(containerId, level, title) {
       const btn = bag.root.querySelector(`[data-stats-id="${CSS.escape(String(containerId))}"]`);
       if (!btn) return;
       btn.classList.remove("is-stats-ok", "is-stats-warn", "is-stats-hot", "is-stats-off");
@@ -1179,28 +1185,6 @@
         btn.title = title;
         btn.setAttribute("aria-label", title);
       }
-      if (!btn.classList.contains("btn-stats-load")) return;
-      const setRow = (key, pct) => {
-        const row = btn.querySelector(`[data-sl="${key}"]`);
-        if (!row) return;
-        const bar = row.querySelector(".sl-bar");
-        const fill = row.querySelector("i");
-        const val = row.querySelector(".sl-v");
-        row.classList.remove("is-ok", "is-warn", "is-hot");
-        if (level === "off" || pct == null || !Number.isFinite(Number(pct))) {
-          if (fill) fill.style.width = "0%";
-          if (val) val.textContent = "\u2014";
-          return;
-        }
-        const p = Math.max(0, Math.min(100, Number(pct) || 0));
-        const tone = bag.statsLoadTone(p);
-        row.classList.add(`is-${tone}`);
-        if (bar) bar.dataset.tone = tone;
-        if (fill) fill.style.width = `${p.toFixed(0)}%`;
-        if (val) val.textContent = `${Math.round(p)}%`;
-      };
-      setRow("cpu", metrics?.cpu);
-      setRow("mem", metrics?.mem);
     };
     bag.pushContainerMetricSample = async function pushContainerMetricSample(containerId, cpu, mem, net) {
       const clamp = (v) => Math.max(0, Math.min(100, Number(v) || 0));
@@ -1244,18 +1228,35 @@
         void bag.refreshContainerStatsIcons(list);
       };
       tick();
-      bag.state.containerStatsTimer = setInterval(tick, 4e3);
+      bag.state.containerStatsTimer = setInterval(tick, 1e4);
+    };
+    bag.visibleContainerIds = function visibleContainerIds() {
+      const ids = /* @__PURE__ */ new Set();
+      bag.root.querySelectorAll("tbody tr[data-container-id]").forEach((tr) => {
+        if (tr.style.display === "none") return;
+        const id = tr.getAttribute("data-container-id");
+        if (id) ids.add(id);
+      });
+      if (ids.size === 0) {
+        bag.root.querySelectorAll("[data-stats-id]").forEach((el) => {
+          const id = el.getAttribute("data-stats-id");
+          if (id) ids.add(id);
+        });
+      }
+      return ids;
     };
     bag.refreshContainerStatsIcons = async function refreshContainerStatsIcons(containers) {
       if (bag.state.route !== "containers" && bag.state.route !== "container") return;
-      const running = (containers || []).filter((c) => {
+      const visible = bag.visibleContainerIds();
+      const onPage = (containers || []).filter((c) => visible.size === 0 || visible.has(c.Id));
+      const running = onPage.filter((c) => {
         const st = String(c.State || "").toLowerCase();
         return st === "running" || st === "restarting";
-      }).slice(0, 24);
-      (containers || []).forEach((c) => {
+      });
+      onPage.forEach((c) => {
         const st = String(c.State || "").toLowerCase();
         if (st !== "running" && st !== "restarting") {
-          bag.applyStatsIconLevel(c.Id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge", { cpu: null, mem: null });
+          bag.applyStatsIconLevel(c.Id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge");
         }
       });
       if (!bag.state.containerStatsPrev) bag.state.containerStatsPrev = {};
@@ -1286,14 +1287,11 @@
             };
             const net = bag.netLoadScore(rate.rx, rate.tx);
             const level = bag.resourceLoadLevel(computed.cpuPct, computed.memPct, net);
-            const title = `CPU ${computed.cpuPct.toFixed(0)}% \xB7 RAM ${computed.memPct.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate(rate.rx + rate.tx)} \u2014 cliquer pour le d\xE9tail`;
-            bag.applyStatsIconLevel(c.Id, level, title, {
-              cpu: computed.cpuPct,
-              mem: computed.memPct
-            });
+            const title = `CPU ${computed.cpuPct.toFixed(0)}% \xB7 RAM ${computed.memPct.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate(rate.rx + rate.tx)}`;
+            bag.applyStatsIconLevel(c.Id, level, title);
             void bag.pushContainerMetricSample(c.Id, computed.cpuPct, computed.memPct, net);
           } catch (_) {
-            bag.applyStatsIconLevel(c.Id, "off", "Stats indisponibles", { cpu: null, mem: null });
+            bag.applyStatsIconLevel(c.Id, "off", "Stats indisponibles");
           }
         }
       };
@@ -1737,9 +1735,9 @@
                   <div class="notif-panel-body" id="notif-list">${bag.renderAlertList()}</div>
                 </div>
               </div>
-              <div class="user-chip" title="${bag.esc(username)}">
+              <a href="#profile" class="user-chip${bag.state.route === "profile" ? " is-active" : ""}" title="Profil \xB7 ${bag.esc(username)}" aria-label="Profil">
                 <span class="avatar">${bag.esc(initial)}</span>
-              </div>
+              </a>
             </div>
           </header>
           <div class="content">${hidePageHeader ? bodyHtml : bodyHtml}</div>
@@ -2214,7 +2212,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       return `<img class="${cls}" src="${src}" alt="WharfMaster" decoding="async">`;
     };
     bag.sparklineFromValues = function sparklineFromValues(values, tone = "blue") {
-      const pts = (values || []).map((v) => Number(v) || 0);
+      const pts = (values || []).map((v) => Math.max(0, Number(v) || 0));
       const w = 100;
       const h = 28;
       const padY = 3;
@@ -2223,26 +2221,27 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       if (pts.length === 0) {
         line = `M0 ${h / 2} L${w} ${h / 2}`;
         fill = `M0 ${h} L0 ${h / 2} L${w} ${h / 2} L${w} ${h} Z`;
-      } else if (pts.length === 1) {
-        const y = h / 2;
-        line = `M0 ${y} L${w} ${y}`;
-        fill = `M0 ${h} L0 ${y} L${w} ${y} L${w} ${h} Z`;
       } else {
-        const min = Math.min(...pts);
-        const max = Math.max(...pts);
-        const span = Math.max(1, max - min);
+        const max = Math.max(...pts, 1);
+        const yAt = (v) => padY + (1 - Math.min(1, v / max)) * (h - padY * 2);
         const coords = pts.map((v, i) => {
-          const x = i / (pts.length - 1) * w;
-          const y = padY + (1 - (v - min) / span) * (h - padY * 2);
-          return [x, y];
+          const x = pts.length === 1 ? w / 2 : i / (pts.length - 1) * w;
+          return [x, yAt(v)];
         });
-        line = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(" ");
-        const last = coords[coords.length - 1];
-        const first = coords[0];
-        fill = `${line} L${last[0].toFixed(2)} ${h} L${first[0].toFixed(2)} ${h} Z`;
+        if (coords.length === 1) {
+          const y = coords[0][1];
+          line = `M0 ${y.toFixed(2)} L${w} ${y.toFixed(2)}`;
+          fill = `M0 ${h} L0 ${y.toFixed(2)} L${w} ${y.toFixed(2)} L${w} ${h} Z`;
+        } else {
+          line = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(" ");
+          const last2 = coords[coords.length - 1];
+          const first = coords[0];
+          fill = `${line} L${last2[0].toFixed(2)} ${h} L${first[0].toFixed(2)} ${h} Z`;
+        }
       }
       const n = pts.length;
-      const title = n < 2 ? "Historique en construction \u2014 revenez plus tard" : `${n} relev\xE9s`;
+      const last = n ? pts[n - 1] : 0;
+      const title = n < 2 ? "Historique en construction \u2014 revenez plus tard" : `${n} relev\xE9s \xB7 dernier ${last} \xB7 max ${Math.max(...pts, 0)}`;
       return `<svg class="sparkline ${tone}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${bag.esc(title)}"><title>${bag.esc(title)}</title><path class="fill" d="${fill}" fill="currentColor"/><path d="${line}"/></svg>`;
     };
     bag.sparkline = function sparkline(tone = "blue") {
@@ -3640,8 +3639,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         bag.applyStatsIconLevel(
           id,
           level,
-          `CPU ${cpu.toFixed(0)}% \xB7 RAM ${mem.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate((rate?.rx || 0) + (rate?.tx || 0))} \u2014 cliquer pour le d\xE9tail`,
-          { cpu, mem }
+          `CPU ${cpu.toFixed(0)}% \xB7 RAM ${mem.toFixed(0)}% \xB7 R\xE9seau ${bag.formatBitRate((rate?.rx || 0) + (rate?.tx || 0))}`
         );
         const netRows = Object.entries(computed.networks || {}).map(([iface, n]) => {
           const rx = Number(n?.rx_bytes || 0) || 0;
@@ -3688,7 +3686,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           }
           if (!running) {
             setStatus("is-paused", "Conteneur arr\xEAt\xE9");
-            bag.applyStatsIconLevel(id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge", { cpu: null, mem: null });
+            bag.applyStatsIconLevel(id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge");
             body.innerHTML = `<div class="info-box">D\xE9marrez le conteneur pour voir CPU, RAM et r\xE9seau en direct.</div>`;
             return;
           }
@@ -4042,7 +4040,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         image: (c) => c.Image || "",
         state: (c) => String(c.State || ""),
         node: (c) => c._nodeName || "",
-        ports: (c) => bag.formatPorts(c.Ports || [])
+        ports: (c) => bag.formatPorts(c.Ports || []),
+        created: (c) => bag.createdSortKey(c.Created)
       });
       const rows = list.map((c) => {
         const name = containerName(c);
@@ -4054,7 +4053,16 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           `${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
            ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
            ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
-           ${bag.statsLoadBtn({ id: c.Id, name, running: isRunning })}
+           ${bag.iconBtn({
+            modal: "stats",
+            id: c.Id,
+            name,
+            running: isRunning,
+            title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
+            icon: "stats",
+            statsId: c.Id,
+            extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
+          })}
            ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}`,
           `${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs conteneur", icon: "logs", label: "Logs" })}
            ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console", label: "Console" })}
@@ -4074,10 +4082,11 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         </td>`}
         <td>${bag.badge(c.State)}</td>
         <td>${bag.formatPorts(c.Ports || [])}</td>
+        <td>${bag.formatCreated(c.Created)}</td>
         <td class="actions">${actions}</td>
       </tr>`;
       }).join("");
-      const colSpan = all ? 6 : 8;
+      const colSpan = all ? 7 : 9;
       bag.root.innerHTML = bag.shell("Conteneurs", `
       ${bag.pageHeader(all ? "Conteneurs \u2014 tous les n\u0153uds" : "Liste des conteneurs")}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agr\xE9gat partiel.${bag.esc(failMsg)}</div>` : ""}
@@ -4101,6 +4110,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
             ${all ? "" : '<th title="Image du registre">M\xE0j</th>'}
             ${bag.sortTh("\xC9tat", "state", "containers")}
             ${bag.sortTh("Ports publi\xE9s", "ports", "containers")}
+            ${bag.sortTh("Cr\xE9\xE9", "created", "containers")}
             <th>Actions</th>
           </tr></thead>
           <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun conteneur</td></tr>`}</tbody>
@@ -4161,7 +4171,10 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           let title = u.Detail || u.Error || "Aucun contr\xF4le";
           if (u.Image) title = `${u.Image}
 ${title}`;
-          cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title);
+          cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+            action: "container",
+            id
+          });
         });
         bag.root.querySelectorAll("[data-cupd] .img-upd.is-loading").forEach((el) => {
           el.className = "img-upd is-unknown";
@@ -4170,6 +4183,7 @@ ${title}`;
           if (lbl) lbl.textContent = "\u2014";
           else el.insertAdjacentHTML("beforeend", '<span class="img-upd-lbl">\u2014</span>');
         });
+        bag.bindImageUpdateActions(bag.root);
       } catch {
         bag.root.querySelectorAll("[data-cupd]").forEach((cell) => {
           cell.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible");
@@ -4210,17 +4224,26 @@ ${title}`;
       ${bag.pageHeader(name, false)}
       <div class="toolbar">
         ${bag.iconBtn({ tag: "a", href: "#containers", title: "Retour", icon: "back" })}
-        ${bag.moreActions(
-        `${bag.iconBtn({ act: "start", title: "D\xE9marrer", icon: "start", success: !running })}
-           ${bag.iconBtn({ act: "stop", title: "Arr\xEAter", icon: "stop", danger: running })}
-           ${bag.iconBtn({ act: "restart", title: "Red\xE9marrer", icon: "restart" })}
-           ${bag.statsLoadBtn({ id, name, running })}
-           ${bag.iconBtn({ act: "remove", title: "Supprimer", icon: "remove", danger: true })}`,
-        `${bag.iconBtn({ modal: "logs", id, name, running, title: "Logs conteneur", icon: "logs", label: "Logs" })}
-           ${bag.iconBtn({ modal: "console", id, name, running, title: "Console", icon: "console", label: "Console" })}
-           ${bag.iconBtn({ modal: "inspect", id, name, running, title: "Inspecter", icon: "inspect", label: "Inspecter" })}
-           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || id, label: "Partager" })}`
-      )}
+        <div class="quick-actions">
+          ${bag.iconBtn({ act: "start", title: "D\xE9marrer", icon: "start", success: !running })}
+          ${bag.iconBtn({ act: "stop", title: "Arr\xEAter", icon: "stop", danger: running })}
+          ${bag.iconBtn({ act: "restart", title: "Red\xE9marrer", icon: "restart" })}
+          ${bag.iconBtn({
+        modal: "stats",
+        id,
+        name,
+        running,
+        title: running ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
+        icon: "stats",
+        statsId: id,
+        extraClass: running ? "is-stats-ok" : "is-stats-off"
+      })}
+          ${bag.iconBtn({ modal: "logs", id, name, running, title: "Logs", icon: "logs" })}
+          ${bag.iconBtn({ modal: "console", id, name, running, title: "Console", icon: "console" })}
+          ${bag.iconBtn({ modal: "inspect", id, name, running, title: "Inspecter", icon: "inspect" })}
+          ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || id })}
+          ${bag.iconBtn({ act: "remove", title: "Supprimer", icon: "remove", danger: true })}
+        </div>
         <div class="spacer"></div>
         ${bag.formatPorts(ports)}
       </div>
@@ -4268,8 +4291,10 @@ ${title}`;
           sum.innerHTML = bag.stackUpdatePill(
             upd.Status,
             upd.UpdateCount || 0,
-            upd.Detail || `${upd.Checked || 0} contr\xF4le(s)`
+            upd.Detail || `${upd.Checked || 0} contr\xF4le(s)`,
+            { action: "container", id }
           );
+          bag.bindImageUpdateActions(sum);
         }
       } catch (err) {
         const sum = document.getElementById("container-upd-summary");
@@ -5180,7 +5205,8 @@ ${title}`;
         id: (img) => img.Id || "",
         size: (img) => Number(img.Size) || 0,
         usage: (img) => Number(img._usageCount) || 0,
-        node: (img) => img._nodeName || ""
+        node: (img) => img._nodeName || "",
+        created: (img) => bag.createdSortKey(img.Created)
       });
       const rows = list.map((img) => {
         const tags = img._tagsLabel || bag.imageTagsLabel(img);
@@ -5199,12 +5225,13 @@ ${title}`;
         <td>${usageCell}</td>
         ${cveCell}
         <td>${bag.esc(sizeMb)} MB</td>
+        <td>${bag.formatCreated(img.Created)}</td>
         <td class="actions">${all ? '<span class="muted">\u2014</span>' : `<div class="quick-actions">
           ${bag.iconBtn({ id: img.Id, title: "Supprimer", icon: "remove", danger: true })}
         </div>`}</td>
       </tr>`;
       }).join("");
-      const colSpan = (all ? 6 : 7) + (cveOn && !all ? 1 : 0);
+      const colSpan = (all ? 7 : 8) + (cveOn && !all ? 1 : 0);
       bag.root.innerHTML = bag.shell("Images", `
       ${bag.pageHeader(all ? "Images \u2014 tous les n\u0153uds" : "Images")}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agr\xE9gat partiel : certains n\u0153uds n\u2019ont pas r\xE9pondu.</div>' : ""}
@@ -5225,6 +5252,7 @@ ${title}`;
           ${bag.sortTh("Usage", "usage", "images")}
           ${cveOn && !all ? "<th>CVE</th>" : ""}
           ${bag.sortTh("Taille", "size", "images")}
+          ${bag.sortTh("Cr\xE9\xE9", "created", "images")}
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune image</td></tr>`}</tbody>
@@ -5434,7 +5462,8 @@ ${title}`;
         driver: (v) => v.Driver || "",
         usage: (v) => Number(v._usageCount) || 0,
         mount: (v) => v.Mountpoint || v.HostPath || "",
-        node: (v) => v._nodeName || ""
+        node: (v) => v._nodeName || "",
+        created: (v) => bag.createdSortKey(v.CreatedAt || v.created_at || v.Created)
       });
       const rows = volumes.map((v) => {
         const users = (usageByKey.get(v._sortKey) || {}).users || [];
@@ -5463,10 +5492,11 @@ ${title}`;
       <td>${bag.esc(driverLabel)}</td>
       <td>${usageCell}</td>
       <td class="mono cell-clip" title="${bag.esc(mount)}">${bag.esc(mount)}</td>
+      <td>${bag.formatCreated(v.CreatedAt || v.created_at || v.Created)}</td>
       <td class="actions">${actions}</td>
     </tr>`;
       }).join("");
-      const colSpan = all ? 6 : 7;
+      const colSpan = all ? 7 : 8;
       bag.root.innerHTML = bag.shell("Volumes", `
       ${bag.pageHeader(all ? "Volumes \u2014 tous les n\u0153uds" : "Volumes")}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agr\xE9gat partiel : certains n\u0153uds n\u2019ont pas r\xE9pondu.</div>' : ""}
@@ -5486,6 +5516,7 @@ ${title}`;
           ${bag.sortTh("Pilote", "driver", "volumes")}
           ${bag.sortTh("Usage", "usage", "volumes")}
           ${bag.sortTh("Point de montage", "mount", "volumes")}
+          ${bag.sortTh("Cr\xE9\xE9", "created", "volumes")}
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun volume</td></tr>`}</tbody>
@@ -6275,7 +6306,8 @@ ${title}`;
         driver: (n) => n.Driver || "",
         usage: (n) => Number(n._usageCount) || 0,
         scope: (n) => n.Scope || "",
-        node: (n) => n._nodeName || ""
+        node: (n) => n._nodeName || "",
+        created: (n) => bag.createdSortKey(n.Created || n.CreatedAt)
       });
       const rows = list.map((n) => {
         const users = (usageByKey.get(n._sortKey) || {}).users || [];
@@ -6291,13 +6323,14 @@ ${title}`;
       <td>${bag.esc(n.Driver)}</td>
       <td>${usageCell}</td>
       <td>${bag.esc(n.Scope)}</td>
+      <td>${bag.formatCreated(n.Created || n.CreatedAt)}</td>
       <td class="actions">${all ? '<span class="muted">\u2014</span>' : `<div class="quick-actions">
         ${isBuiltin ? "" : bag.shareBtn("network", n.Name || n.Id)}
         ${isBuiltin ? "" : bag.iconBtn({ id: n.Id, title: "Supprimer", icon: "remove", danger: true })}
       </div>`}</td>
     </tr>`;
       }).join("");
-      const colSpan = all ? 7 : 8;
+      const colSpan = all ? 8 : 9;
       bag.root.innerHTML = bag.shell("R\xE9seaux", `
       ${bag.pageHeader(all ? "R\xE9seaux \u2014 tous les n\u0153uds" : "R\xE9seaux")}
       ${partial ? '<div class="info-box" style="margin-bottom:12px">Agr\xE9gat partiel : certains n\u0153uds n\u2019ont pas r\xE9pondu.</div>' : ""}
@@ -6317,6 +6350,7 @@ ${title}`;
           ${bag.sortTh("Pilote", "driver", "networks")}
           ${bag.sortTh("Usage", "usage", "networks")}
           ${bag.sortTh("Port\xE9e", "scope", "networks")}
+          ${bag.sortTh("Cr\xE9\xE9", "created", "networks")}
           <th></th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucun r\xE9seau</td></tr>`}</tbody>
@@ -6508,7 +6542,8 @@ ${title}`;
         state: (s) => stackStatusLabel(s.Status),
         owner: (s) => s.CreatedBy || "",
         node: (s) => bag.endpointLabel(s.EndpointId),
-        id: (s) => Number(s.Id) || 0
+        id: (s) => Number(s.Id) || 0,
+        created: (s) => bag.createdSortKey(s.CreationDate)
       });
       const rows = list.map((s) => {
         const node = bag.endpointLabel(s.EndpointId);
@@ -6536,10 +6571,11 @@ ${title}`;
         <span class="img-upd is-loading" title="V\xE9rification des images\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>
       </td>
       <td>${bag.esc(s.CreatedBy || "")}</td>
+      <td>${bag.formatCreated(s.CreationDate)}</td>
       <td class="actions">${actions}</td>
     </tr>`;
       }).join("");
-      const colSpan = all ? 7 : 6;
+      const colSpan = all ? 8 : 7;
       bag.root.innerHTML = bag.shell("Stacks", `
       ${bag.pageHeader(all ? "Stacks \u2014 tous les n\u0153uds" : "Stacks")}
       ${all ? bag.pickNodeGuardHtml() : ""}
@@ -6562,6 +6598,7 @@ ${title}`;
           ${bag.sortTh("\xC9tat", "state", "stacks")}
           <th title="Images du registre">Images</th>
           ${bag.sortTh("Cr\xE9\xE9 par", "owner", "stacks")}
+          ${bag.sortTh("Cr\xE9\xE9", "created", "stacks")}
           <th>Actions</th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="${colSpan}" class="empty">Aucune stack disponible.</td></tr>`}</tbody>
@@ -6597,11 +6634,86 @@ ${title}`;
       });
       bag.loadStackUpdateIndicators(false);
     };
-    bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title) {
+    bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
       const st = status || "unknown";
       const cls = st === "update" ? "is-update" : st === "fresh" || st === "pinned" ? "is-fresh" : "is-unknown";
       const label = st === "update" ? updateCount > 1 ? `${updateCount} mises \xE0 jour` : "Mise \xE0 jour" : st === "fresh" || st === "pinned" ? "\xC0 jour" : "\u2014";
-      return `<span class="img-upd ${cls}" title="${bag.esc(title || label)}"><span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span></span>`;
+      const tip = st === "update" && opts.action ? `${title || label}
+
+Cliquer pour tirer les images et red\xE9ployer` : title || label;
+      const inner = `<span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span>`;
+      if (st === "update" && opts.action && opts.id != null) {
+        return `<button type="button" class="img-upd ${cls} img-upd-action"
+        data-upd-action="${bag.esc(opts.action)}" data-upd-id="${bag.esc(String(opts.id))}"
+        title="${bag.esc(tip)}" aria-label="${bag.esc(label)}">${inner}</button>`;
+      }
+      return `<span class="img-upd ${cls}" title="${bag.esc(tip)}">${inner}</span>`;
+    };
+    bag.upgradeStackImages = async function upgradeStackImages(stackId) {
+      const id = String(stackId || "");
+      if (!id) throw new Error("Stack introuvable");
+      const [stack, file] = await Promise.all([bag.Api.stack(id), bag.Api.stackFile(id)]);
+      await bag.Api.updateStack(id, file.StackFileContent || "", stack.Env || [], true);
+      return stack;
+    };
+    bag.findStackForContainer = async function findStackForContainer(containerId) {
+      try {
+        const info = await bag.Api.docker(`/containers/${encodeURIComponent(containerId)}/json`);
+        const project = String(info?.Config?.Labels?.["com.docker.compose.project"] || "").trim();
+        if (!project) return null;
+        const stacks = await bag.Api.stacks();
+        const want = project.toLowerCase();
+        return (stacks || []).find((s) => String(s.Name || "").toLowerCase() === want) || null;
+      } catch (_) {
+        return null;
+      }
+    };
+    bag.upgradeImageUpdateTarget = async function upgradeImageUpdateTarget(action, id) {
+      if (action === "stack") {
+        await bag.upgradeStackImages(id);
+        return { kind: "stack", id };
+      }
+      if (action === "container") {
+        const stack = await bag.findStackForContainer(id);
+        if (stack?.Id != null) {
+          await bag.upgradeStackImages(stack.Id);
+          return { kind: "stack", id: stack.Id, via: "container", name: stack.Name };
+        }
+        await bag.Api.updateContainerImage(id, true);
+        return { kind: "container", id };
+      }
+      throw new Error("Action de mise \xE0 jour inconnue");
+    };
+    bag.bindImageUpdateActions = function bindImageUpdateActions(scope = bag.root) {
+      if (!scope) return;
+      scope.querySelectorAll("[data-upd-action]").forEach((btn) => {
+        if (btn.dataset.updBound === "1") return;
+        btn.dataset.updBound = "1";
+        const action = btn.dataset.updAction;
+        const confirmMsg = action === "stack" ? "Tirer les nouvelles images et red\xE9ployer cette stack ? Les services seront recr\xE9\xE9s." : "Tirer l\u2019image et mettre \xE0 jour ce conteneur ? (stack Compose si li\xE9e, sinon recr\xE9e le conteneur)";
+        bag.onBusyClick(btn, async (el) => {
+          const kind = el.dataset.updAction;
+          const targetId = el.dataset.updId;
+          await bag.upgradeImageUpdateTarget(kind, targetId);
+          const route = String(bag.state.route || "");
+          if (route.startsWith("stacks/") && route !== "stacks/new") {
+            const sid = route.split("/")[1];
+            if (sid) await bag.viewStackDetail(sid);
+            return;
+          }
+          if (route === "stacks") {
+            await bag.loadStackUpdateIndicators(true);
+            return;
+          }
+          if (route.startsWith("containers/") && route !== "containers/new") {
+            await bag.route();
+            return;
+          }
+          if (route === "containers") {
+            await bag.loadContainerUpdateIndicators(true);
+          }
+        }, { confirm: confirmMsg, minMs: 400 });
+      });
     };
     bag.loadStackUpdateIndicators = async function loadStackUpdateIndicators(refresh = false) {
       try {
@@ -6618,7 +6730,10 @@ ${title}`;
             title += `
 (cache \xB7 v\xE9rifi\xE9 ${new Date(u.CheckedAt * 1e3).toLocaleString()})`;
           }
-          cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title);
+          cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+            action: "stack",
+            id
+          });
         });
         bag.root.querySelectorAll("[data-upd] .img-upd.is-loading").forEach((el) => {
           el.className = "img-upd is-unknown";
@@ -6627,6 +6742,7 @@ ${title}`;
           if (lbl) lbl.textContent = "\u2014";
           else el.insertAdjacentHTML("beforeend", '<span class="img-upd-lbl">\u2014</span>');
         });
+        bag.bindImageUpdateActions(bag.root);
       } catch {
         bag.root.querySelectorAll("[data-upd]").forEach((cell) => {
           cell.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible");
@@ -7191,15 +7307,15 @@ ${title}`;
       ${bag.pageHeader(stack.Name, false)}
       <div class="toolbar">
         ${bag.iconBtn({ tag: "a", href: "#stacks", title: "Retour", icon: "back" })}
-        ${bag.moreActions(
-        `${bag.iconBtn({ act: "start", id: stack.Id, title: "D\xE9marrer", icon: "start", success: !stackRunning })}
-           ${bag.iconBtn({ act: "stop", id: stack.Id, title: "Arr\xEAter", icon: "stop", danger: stackRunning })}
-           ${bag.iconBtn({ act: "restart", id: stack.Id, title: "Red\xE9marrer", icon: "restart" })}
-           ${bag.iconBtn({ act: "remove", id: stack.Id, title: "Supprimer", icon: "remove", danger: true })}`,
-        `${bag.iconBtn({ elId: "edit", title: "\xC9diteur", icon: "edit", info: true, label: "\xC9diteur" })}
-           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "stack", shareKey: String(stack.Id), label: "Partager" })}
-           ${bag.iconBtn({ elId: "stack-pull-redeploy", title: "Pull images + red\xE9ployer", icon: "pull", label: "Pull + red\xE9ployer" })}`
-      )}
+        <div class="quick-actions">
+          ${bag.iconBtn({ act: "start", id: stack.Id, title: "D\xE9marrer", icon: "start", success: !stackRunning })}
+          ${bag.iconBtn({ act: "stop", id: stack.Id, title: "Arr\xEAter", icon: "stop", danger: stackRunning })}
+          ${bag.iconBtn({ act: "restart", id: stack.Id, title: "Red\xE9marrer", icon: "restart" })}
+          ${bag.iconBtn({ elId: "edit", title: "\xC9diteur", icon: "edit", info: true })}
+          ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "stack", shareKey: String(stack.Id) })}
+          ${bag.iconBtn({ elId: "stack-pull-redeploy", title: "Pull images + red\xE9ployer", icon: "pull" })}
+          ${bag.iconBtn({ act: "remove", id: stack.Id, title: "Supprimer", icon: "remove", danger: true })}
+        </div>
       </div>
       <div id="stack-detail-err"></div>
       <div class="panel" style="margin-bottom:1rem">
@@ -7210,6 +7326,13 @@ ${title}`;
           <dt>Images</dt><dd id="stack-upd-summary"><span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span></dd>
           <dt>N\u0153ud</dt><dd>${bag.esc(bag.endpointLabel(stack.EndpointId))} <span class="muted">(#${bag.esc(stack.EndpointId)})</span></dd>
         </dl>
+      </div>
+      <div class="section-title">Conteneurs</div>
+      <div class="table-wrap" style="margin-bottom:1rem">
+        <table class="data" id="stack-containers-table">
+          <thead><tr><th>Service</th><th>Nom</th><th>\xC9tat</th><th>Image</th><th>Ports</th><th></th></tr></thead>
+          <tbody><tr><td colspan="6" class="muted">Chargement\u2026</td></tr></tbody>
+        </table>
       </div>
       <div class="section-title">Images des services</div>
       <div class="table-wrap" style="margin-bottom:1rem">
@@ -7312,10 +7435,89 @@ ${title}`;
       };
       document.getElementById("add-schedule").onclick = () => bag.openScheduleModal(stack, renderSchedules);
       renderSchedules();
+      const renderStackContainers = async () => {
+        const tb = document.querySelector("#stack-containers-table tbody");
+        if (!tb) return;
+        try {
+          const ep = Number(stack.EndpointId) || bag.Api.getEndpointId();
+          const project = String(stack.Name || "").trim();
+          const filters = encodeURIComponent(JSON.stringify({
+            label: [`com.docker.compose.project=${project}`]
+          }));
+          let list = await bag.Api.dockerOn(ep, `/containers/json?all=true&filters=${filters}`);
+          if (!Array.isArray(list)) list = [];
+          if (!list.length && project) {
+            const all = await bag.Api.dockerOn(ep, "/containers/json?all=true");
+            const want = project.toLowerCase();
+            list = (Array.isArray(all) ? all : []).filter((c) => {
+              const labels = c.Labels || {};
+              return String(labels["com.docker.compose.project"] || "").toLowerCase() === want;
+            });
+          }
+          list.sort((a, b) => {
+            const sa = String((a.Labels || {})["com.docker.compose.service"] || "");
+            const sb = String((b.Labels || {})["com.docker.compose.service"] || "");
+            return sa.localeCompare(sb) || String(a.Names?.[0] || "").localeCompare(String(b.Names?.[0] || ""));
+          });
+          if (!list.length) {
+            tb.innerHTML = `<tr><td colspan="6" class="muted">Aucun conteneur pour le projet Compose \xAB ${bag.esc(project)} \xBB</td></tr>`;
+            return;
+          }
+          tb.innerHTML = list.map((c) => {
+            const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : bag.shortId(c.Id);
+            const labels = c.Labels || {};
+            const service = labels["com.docker.compose.service"] || "\u2014";
+            const st = String(c.State || "").toLowerCase();
+            const isRunning = st === "running" || st === "restarting";
+            const openHref = `#containers/${bag.esc(c.Id)}`;
+            return `<tr data-container-id="${bag.esc(c.Id)}">
+            <td class="mono">${bag.esc(service)}</td>
+            <td class="name-cell">
+              <strong><a href="${openHref}" data-switch-node="${bag.esc(ep)}">${bag.esc(name)}</a></strong>
+              <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
+            </td>
+            <td>${bag.badge(c.State)}</td>
+            <td class="mono">${bag.esc(c.Image || "")}</td>
+            <td>${bag.formatPorts(c.Ports || [])}</td>
+            <td class="actions"><div class="quick-actions">
+              ${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
+              ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
+              ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
+            </div></td>
+          </tr>`;
+          }).join("");
+          tb.querySelectorAll("[data-switch-node]").forEach((a) => {
+            a.addEventListener("click", () => {
+              const nid = parseInt(a.getAttribute("data-switch-node"), 10);
+              if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+            });
+          });
+          bag.bindModalActions(tb);
+          tb.querySelectorAll("[data-act]").forEach((btn) => {
+            const act = btn.dataset.act;
+            bag.onBusyClick(btn, async (el) => {
+              const nid = Number(stack.EndpointId) || bag.Api.getEndpointId();
+              if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+              await bag.containerAction(el.dataset.id, act);
+              await renderStackContainers();
+            }, { minMs: 300 });
+          });
+        } catch (err) {
+          tb.innerHTML = `<tr><td colspan="6" class="error-box">${bag.esc(err.message || "Impossible de lister les conteneurs")}</td></tr>`;
+        }
+      };
+      void renderStackContainers();
       try {
         const upd = await bag.Api.stackUpdate(id);
         const sum = document.getElementById("stack-upd-summary");
-        if (sum) sum.innerHTML = bag.stackUpdatePill(upd.Status, upd.UpdateCount || 0, `${upd.Checked || 0} image(s) contr\xF4l\xE9e(s)`);
+        if (sum) {
+          sum.innerHTML = bag.stackUpdatePill(
+            upd.Status,
+            upd.UpdateCount || 0,
+            `${upd.Checked || 0} image(s) contr\xF4l\xE9e(s)`,
+            { action: "stack", id }
+          );
+        }
         const tb = document.querySelector("#stack-upd-table tbody");
         const imgs = upd.Images || [];
         if (tb) {
@@ -7325,11 +7527,15 @@ ${title}`;
             tb.innerHTML = imgs.map((i) => `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>
             <td class="mono">${bag.esc(i.Image)}</td>
-            <td>${bag.stackUpdatePill(i.Status, i.Status === "update" ? 1 : 0, i.Detail || "")}</td>
+            <td>${bag.stackUpdatePill(i.Status, i.Status === "update" ? 1 : 0, i.Detail || "", {
+              action: i.Status === "update" ? "stack" : null,
+              id
+            })}</td>
             <td class="muted">${bag.esc(i.Detail || "")}</td>
           </tr>`).join("");
           }
         }
+        bag.bindImageUpdateActions(bag.root);
       } catch (err) {
         const sum = document.getElementById("stack-upd-summary");
         if (sum) sum.innerHTML = bag.stackUpdatePill("unknown", 0, err.message || "Erreur");
@@ -9069,7 +9275,7 @@ ${title}`;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.2.2", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.0", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");
@@ -9331,8 +9537,226 @@ ${title}`;
     };
   }
 
-  // public/assets/js/src/views/teams.js
+  // public/assets/js/src/views/profile.js
   function install19() {
+    bag.viewProfile = async function viewProfile() {
+      const me = bag.state.user || {};
+      const userId = Number(me.Id);
+      const isLdap = String(me.AuthSource || "") === "ldap";
+      let tokens = [];
+      try {
+        tokens = await bag.Api.listUserTokens(userId);
+      } catch (_) {
+        tokens = [];
+      }
+      if (!Array.isArray(tokens)) tokens = [];
+      const tokenRows = tokens.map((t) => {
+        const hint = t.rawHint ? `\u2026${t.rawHint}` : "";
+        const prefix = `${t.prefix || "ptr_"}${hint}`;
+        return `<tr data-token-id="${bag.esc(t.id)}">
+        <td>${bag.esc(t.description || "\u2014")}</td>
+        <td class="mono">${bag.esc(prefix)}</td>
+        <td class="muted">${bag.esc(bag.fmtTs(t.dateCreated))}</td>
+        <td class="muted">${t.lastUsed ? bag.esc(bag.fmtTs(t.lastUsed)) : "\u2014"}</td>
+        <td class="actions"><div class="quick-actions">
+          ${bag.iconBtn({ del: t.id, title: "R\xE9voquer cette cl\xE9", icon: "remove", danger: true })}
+        </div></td>
+      </tr>`;
+      }).join("");
+      bag.root.innerHTML = bag.shell("Profil", `
+      ${bag.pageHeader("Profil", false)}
+      <div id="profile-err"></div>
+      <div class="panel" style="max-width:720px; margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">Compte</div>
+        <dl class="kv" style="margin:0">
+          <dt>Nom d'utilisateur</dt><dd><strong>${bag.esc(me.Username || "\u2014")}</strong></dd>
+          <dt>R\xF4le</dt><dd>${bag.esc(typeof bag.roleLabel === "function" ? bag.roleLabel(me.Role) : Number(me.Role) === 1 ? "Administrateur" : "Utilisateur")}</dd>
+          <dt>Authentification</dt><dd>${isLdap ? "AD / LDAP" : "Local"}</dd>
+        </dl>
+        <p class="muted" style="margin:14px 0 0">
+          Les cl\xE9s API cr\xE9\xE9es ci-dessous agissent <strong>avec vos droits</strong>
+          (r\xF4le, ACL n\u0153uds, partages) \u2014 pas plus, pas moins.
+        </p>
+      </div>
+
+      ${isLdap ? "" : `
+      <div class="panel" style="max-width:720px; margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">Mot de passe</div>
+        <p class="muted" style="margin:0 0 14px">Modifier le mot de passe de votre compte local.</p>
+        <div class="actions-bar">
+          <button type="button" class="btn" id="profile-change-pass">Changer le mot de passe</button>
+        </div>
+      </div>`}
+
+      <div class="panel" style="max-width:900px; margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">Cl\xE9s API</div>
+        <p class="muted" style="margin:0 0 14px">
+          Utilisez l\u2019en-t\xEAte <code>X-API-Key</code> pour appeler l\u2019API sans session.
+          La cl\xE9 compl\xE8te n\u2019est affich\xE9e qu\u2019une seule fois \xE0 la cr\xE9ation.
+        </p>
+        <div class="toolbar" style="margin:0 0 12px">
+          <button type="button" class="btn btn-primary" id="profile-new-token">G\xE9n\xE9rer une cl\xE9</button>
+          <div class="spacer"></div>
+          <span class="muted mono">${tokens.length} cl\xE9${tokens.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr>
+            <th>Description</th><th>Pr\xE9fixe</th><th>Cr\xE9\xE9e</th><th>Dernier usage</th><th></th>
+          </tr></thead>
+          <tbody>${tokenRows || `<tr><td colspan="5" class="empty">Aucune cl\xE9 API</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div id="profile-modal"></div>
+    `);
+      const changePassBtn = document.getElementById("profile-change-pass");
+      if (changePassBtn) {
+        changePassBtn.onclick = () => {
+          bag.showProfilePasswordModal(userId, me.Username || "");
+        };
+      }
+      document.getElementById("profile-new-token").onclick = () => {
+        bag.showCreateTokenModal(userId);
+      };
+      bag.root.querySelectorAll("[data-del]").forEach((btn) => {
+        bag.onBusyClick(btn, async (el) => {
+          await bag.Api.revokeUserToken(userId, el.dataset.del);
+        }, { confirm: "R\xE9voquer cette cl\xE9 API ? Les int\xE9grations qui l\u2019utilisent cesseront de fonctionner.", reload: true });
+      });
+    };
+    bag.showProfilePasswordModal = function showProfilePasswordModal(userId, username) {
+      const slot = document.getElementById("profile-modal");
+      if (!slot) return;
+      slot.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal" style="max-width:480px">
+          <h3>Changer le mot de passe \xB7 ${bag.esc(username)}</h3>
+          <div id="profile-form-err"></div>
+          <div class="form-group">
+            <label class="field-label">Mot de passe actuel</label>
+            <input id="cur-password" type="password" autocomplete="current-password">
+          </div>
+          <div class="form-group">
+            <label class="field-label">Nouveau mot de passe <span class="req">*</span></label>
+            <input id="new-password" type="password" minlength="10" autocomplete="new-password">
+          </div>
+          <div class="form-group">
+            <label class="field-label">Confirmer <span class="req">*</span></label>
+            <input id="confirm-password" type="password" minlength="10" autocomplete="new-password">
+          </div>
+          <div class="actions-bar">
+            <button class="btn btn-primary" id="save-pass">Mettre \xE0 jour</button>
+            <button class="btn" id="cancel-profile-modal" style="margin-left:8px">Annuler</button>
+          </div>
+        </div>
+      </div>`;
+      document.getElementById("cancel-profile-modal").onclick = () => {
+        slot.innerHTML = "";
+      };
+      bag.onBusyClick(document.getElementById("save-pass"), async () => {
+        const errBox = document.getElementById("profile-form-err");
+        errBox.innerHTML = "";
+        const password = document.getElementById("new-password").value;
+        const confirm2 = document.getElementById("confirm-password").value;
+        if (password !== confirm2) {
+          errBox.innerHTML = '<div class="error-box">Les mots de passe ne correspondent pas</div>';
+          return;
+        }
+        try {
+          await bag.Api.changePassword(userId, {
+            Password: password,
+            PasswordConfirm: confirm2,
+            CurrentPassword: document.getElementById("cur-password").value
+          });
+          slot.innerHTML = "";
+        } catch (err) {
+          errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
+        }
+      }, { disableSiblings: false, minMs: 250 });
+    };
+    bag.showCreateTokenModal = function showCreateTokenModal(userId) {
+      const slot = document.getElementById("profile-modal");
+      if (!slot) return;
+      slot.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal" style="max-width:520px">
+          <h3>G\xE9n\xE9rer une cl\xE9 API</h3>
+          <div id="profile-form-err"></div>
+          <p class="muted" style="margin:0 0 12px">
+            La cl\xE9 h\xE9ritera de <strong>vos</strong> droits actuels. Confirmez avec votre mot de passe.
+          </p>
+          <div class="form-group">
+            <label class="field-label">Description</label>
+            <input id="token-desc" maxlength="120" placeholder="ex. scripts CI, monitoring\u2026" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="field-label">Mot de passe <span class="req">*</span></label>
+            <input id="token-password" type="password" autocomplete="current-password">
+          </div>
+          <div class="actions-bar">
+            <button class="btn btn-primary" id="create-token">Cr\xE9er</button>
+            <button class="btn" id="cancel-profile-modal" style="margin-left:8px">Annuler</button>
+          </div>
+        </div>
+      </div>`;
+      document.getElementById("cancel-profile-modal").onclick = () => {
+        slot.innerHTML = "";
+      };
+      bag.onBusyClick(document.getElementById("create-token"), async () => {
+        const errBox = document.getElementById("profile-form-err");
+        errBox.innerHTML = "";
+        const description = document.getElementById("token-desc").value.trim() || "api-key";
+        const password = document.getElementById("token-password").value;
+        try {
+          const created = await bag.Api.createUserToken(userId, { description, password });
+          bag.showTokenCreatedModal(created);
+        } catch (err) {
+          errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
+        }
+      }, { disableSiblings: false, minMs: 250 });
+    };
+    bag.showTokenCreatedModal = function showTokenCreatedModal(created) {
+      const slot = document.getElementById("profile-modal");
+      if (!slot) return;
+      const raw = String(created?.rawAPIKey || "");
+      slot.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal" style="max-width:560px">
+          <h3>Cl\xE9 API cr\xE9\xE9e</h3>
+          <div class="info-box" style="margin-bottom:12px">
+            Copiez-la maintenant \u2014 elle ne sera plus jamais affich\xE9e.
+          </div>
+          <div class="form-group">
+            <label class="field-label">Cl\xE9</label>
+            <div style="display:flex;gap:8px;align-items:stretch">
+              <input id="token-raw" class="mono" readonly value="${bag.esc(raw)}" style="flex:1">
+              <button type="button" class="btn" id="copy-token">Copier</button>
+            </div>
+          </div>
+          <p class="muted" style="margin:0 0 14px;font-size:12px">
+            Exemple : <code>curl -H "X-API-Key: ${bag.esc(raw.slice(0, 12))}\u2026" https://\u2026/api/stacks</code>
+          </p>
+          <div class="actions-bar">
+            <button class="btn btn-primary" id="close-token-modal">J\u2019ai copi\xE9 la cl\xE9</button>
+          </div>
+        </div>
+      </div>`;
+      document.getElementById("copy-token").onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(raw);
+          const btn = document.getElementById("copy-token");
+          if (btn) btn.textContent = "Copi\xE9";
+        } catch (_) {
+        }
+      };
+      document.getElementById("close-token-modal").onclick = async () => {
+        slot.innerHTML = "";
+        await bag.viewProfile();
+      };
+    };
+  }
+
+  // public/assets/js/src/views/teams.js
+  function install20() {
     bag.viewTeams = async function viewTeams() {
       const [teamsRes, users] = await Promise.all([
         bag.Api.teams(true),
@@ -9588,6 +10012,7 @@ ${title}`;
   install17();
   install18();
   install19();
+  install20();
   window.addEventListener("hashchange", () => bag.route());
   bag.boot();
 })();

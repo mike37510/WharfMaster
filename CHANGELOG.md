@@ -4,6 +4,24 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.0] — 2026-11-09
+
+### Ajouté
+- **Profil** (avatar) : compte, changement de mot de passe, gestion des **clés API** personnelles
+- API tokens self-service : `GET/POST /api/users/{id}/tokens`, `DELETE /api/users/{id}/tokens/{tid}` — la clé hérite des droits du propriétaire (rôle, ACL, partages)
+- **MàJ image en un clic** : pastille stack cliquable (pull + redeploy) ; action équivalente côté conteneur
+- Détail stack : liste des **conteneurs liés** avec actions rapides
+- Toolbars d’actions **à plat** (stacks / conteneurs) ; dates de création visibles
+
+### Amélioré
+- Courbes / sparklines : échelle depuis 0 (plus de courbes « plates » invisibles)
+- Polling métriques (page visible, seuils de charge)
+- Documentation console (`docs/DOCUMENTATION.md`) alignée 2.3
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.0`**
+- Auth API : JWT **ou** `X-API-Key` (Profil)
+
 ## [2.2.2] — 2026-11-09
 
 ### Ajouté
