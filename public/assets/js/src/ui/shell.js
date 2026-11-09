@@ -29,11 +29,16 @@ export function install() {
       ['users', 'Utilisateurs', isAdmin, '#users'],
       ['teams', 'Équipes', isAdmin, '#teams'],
       ['settings/diagnostics', 'Diagnostics', isAdmin, '#settings/diagnostics'],
+      ['settings/diagnostics/api', 'Tests API', isAdmin, '#settings/diagnostics/api'],
     ].filter((row) => row[2]);
     return `<nav class="settings-subnav" aria-label="Sections paramètres">
-      ${tabs.map(([id, label, , href]) =>
-        `<a href="${href}" class="settings-subnav-link${active === id ? ' active' : ''}"><span class="nav-ico">${bag.ico(id === 'settings/auth' ? 'users' : (id === 'settings/diagnostics' ? 'inspect' : id.split('/')[0]))}</span>${bag.esc(label)}</a>`
-      ).join('')}
+      ${tabs.map(([id, label, , href]) => {
+        const isActive = active === id;
+        const ico = id === 'settings/auth'
+          ? 'users'
+          : (id.startsWith('settings/diagnostics') ? 'inspect' : id.split('/')[0]);
+        return `<a href="${href}" class="settings-subnav-link${isActive ? ' active' : ''}"><span class="nav-ico">${bag.ico(ico)}</span>${bag.esc(label)}</a>`;
+      }).join('')}
     </nav>`;
   }
 
@@ -42,11 +47,11 @@ export function install() {
     const hidePageHeader = !!opts.hidePageHeader;
     const items = [
       ['dashboard', 'Tableau de bord'],
-      ['containers', 'Conteneurs'],
-      ['images', 'Images'],
-      ['volumes', 'Volumes'],
-      ['networks', 'Réseaux'],
       ['stacks', 'Stacks'],
+      ['containers', 'Conteneurs'],
+      ['volumes', 'Volumes'],
+      ['images', 'Images'],
+      ['networks', 'Réseaux'],
       ['activity', 'Journaux'],
       ['settings', 'Paramètres'],
     ];

@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 
 use App\Access\EndpointAcl;
 use App\Access\Ownership;
+use App\Docker\ContainerRecreate;
 use App\Http\Request;
 use App\Http\Response;
+use App\Stack\ImageUpdateChecker;
 
 final class ContainersController extends BaseController
 {

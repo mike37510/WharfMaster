@@ -5,6 +5,7 @@ Toutes les dates sont en UTC+1.
 ## Unreleased
 
 ### Ajouté
+- **Tests API Docker** (Diagnostics) : suite création → suppression (image, volume, réseau, conteneur) sur `#settings/diagnostics/api`
 - **Partage de ressources** : un utilisateur peut partager stack / conteneur / volume / réseau avec un autre utilisateur (indépendant des ACL nœuds) ; bouton Partager + `GET/POST/DELETE /api/shares`
 
 ## [2.2.0] — 2026-11-09

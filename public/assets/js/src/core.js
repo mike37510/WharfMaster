@@ -598,6 +598,13 @@ export function installCore() {
       }
       else if (bag.state.route === 'settings' || bag.state.route === 'settings/') await bag.viewSettings();
       else if (bag.state.route === 'settings/auth') await bag.viewSettingsAuth();
+      else if (bag.state.route === 'settings/diagnostics/api') {
+        if (Number(bag.state.user?.Role) !== 1) {
+          location.hash = '#settings';
+          return;
+        }
+        await bag.viewDiagnosticsApi();
+      }
       else if (bag.state.route === 'settings/diagnostics') {
         if (Number(bag.state.user?.Role) !== 1) {
           location.hash = '#settings';
