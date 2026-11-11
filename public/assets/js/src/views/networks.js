@@ -102,7 +102,7 @@ export function install() {
         : `<span class="badge badge-unused">Inutilisé</span>`;
       const search = `${n.Id} ${n.Name} ${n.Driver} ${n.Scope} ${n._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
       const isBuiltin = ['bridge', 'host', 'none'].includes(n.Name);
-      return `<tr data-search="${bag.esc(search)}">
+      return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(n.Id)}" data-resource-name="${bag.esc(n.Name || '')}">
       ${all ? '' : bag.bulkSelectTd(n.Id, { disabled: isBuiltin, title: 'Réseau système' })}
       ${all ? `<td class="muted">${bag.esc(n._nodeName || '—')}</td>` : ''}
       <td class="mono">${bag.esc(bag.shortId(n.Id))}</td>
@@ -174,6 +174,7 @@ export function install() {
         reload: () => bag.viewNetworks(),
       });
     }
+    bag.restoreListFocus();
   }
 
   bag.containerNetworkEntries = function containerNetworkEntries(container) {
@@ -267,7 +268,7 @@ export function install() {
       return `<tr>
         <td><a class="res-user-link" href="#containers/${bag.esc(c.Id)}">${bag.esc(name)}</a></td>
         <td class="mono">${bag.esc(entry?.ip || '—')}</td>
-        <td>${bag.formatPorts(c.Ports || [])}</td>
+        <td>${bag.formatPorts(c.Ports || [], c._nodeId || bag.state.endpointId)}</td>
         <td>${bag.badge(c.State)}</td>
       </tr>`;
     }).join('');

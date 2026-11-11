@@ -8,7 +8,7 @@ ADVERTISE=""
 NAME=""
 PORT="9001"
 # Prefer versioned tag (principal injects --image); latest only as last resort
-IMAGE="${WHARFMASTER_AGENT_IMAGE:-ghcr.io/mike37510/wharfmaster-agent:2.3.0}"
+IMAGE="${WHARFMASTER_AGENT_IMAGE:-ghcr.io/mike37510/wharfmaster-agent:2.3.1}"
 CONTAINER_NAME="wharfmaster-agent"
 TLS_CN=""
 TLS_DAYS="365"
@@ -181,12 +181,18 @@ build_local_agent() {
   fetch "$URL/agent/agent.php" "$BUILD/agent.php"
   fetch "$URL/agent/router.php" "$BUILD/router.php"
   fetch "$URL/agent/entrypoint.sh" "$BUILD/entrypoint.sh"
+  curl -fsS "$URL/agent/console-ws" -o "$BUILD/console-ws" || {
+    echo "console-ws binary missing on principal — interactive console will be unavailable on this agent" >&2
+    : > "$BUILD/console-ws"
+  }
+  chmod +x "$BUILD/console-ws" 2>/dev/null || true
   curl -fsS "$URL/agent/Dockerfile" -o "$BUILD/Dockerfile" 2>/dev/null || cat > "$BUILD/Dockerfile" <<'DF'
 FROM php:8.3-cli-alpine
 RUN apk add --no-cache curl openssl socat docker-cli docker-cli-compose
 WORKDIR /app
 COPY agent.php router.php entrypoint.sh /app/
-RUN chmod +x /app/entrypoint.sh
+COPY console-ws /usr/local/bin/console-ws
+RUN chmod +x /app/entrypoint.sh /usr/local/bin/console-ws || true
 ENV AGENT_PORT=9001 AGENT_CERT_DIR=/data/certs AGENT_STACKS_DIR=/data/stacks AGENT_TLS_DAYS=365
 VOLUME ["/data/certs", "/data/stacks"]
 EXPOSE 9001

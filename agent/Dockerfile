@@ -27,13 +27,16 @@ WORKDIR /app
 COPY agent.php /app/agent.php
 COPY router.php /app/router.php
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+# Prebuilt console-ws (interactive TTY) — fetched by install.sh into build context
+COPY console-ws /usr/local/bin/console-ws
+RUN chmod +x /app/entrypoint.sh /usr/local/bin/console-ws
 
 ENV NODE_SECRET= \
     DOCKER_SOCKET=/var/run/docker.sock \
     DOCKER_API_VERSION=v1.45 \
     AGENT_PORT=9001 \
     AGENT_INTERNAL_PORT=9002 \
+    AGENT_WS_PORT=9003 \
     AGENT_CERT_DIR=/data/certs \
     AGENT_STACKS_DIR=/data/stacks \
     AGENT_TLS_DAYS=365 \

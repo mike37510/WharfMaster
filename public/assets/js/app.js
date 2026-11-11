@@ -231,9 +231,27 @@
           cwd,
           cols: opts.cols || 120,
           rows: opts.rows || 40,
-          tty: opts.tty !== false
+          tty: opts.tty !== false,
+          timeout: opts.timeout || 45
+        }),
+        signal: opts.signal
+      }),
+      createConsoleSession: (id, opts = {}) => request(`/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/console`, {
+        method: "POST",
+        body: JSON.stringify({
+          shell: opts.shell || "/bin/sh",
+          cols: opts.cols || 120,
+          rows: opts.rows || 40,
+          user: opts.user || void 0
         })
       }),
+      resizeConsole: (execId, h, w, endpointId = null) => {
+        const ep = endpointId != null ? endpointId : getEndpointId();
+        return request(
+          `/api/endpoints/${ep}/console/${encodeURIComponent(execId)}/resize?h=${encodeURIComponent(h)}&w=${encodeURIComponent(w)}`,
+          { method: "POST" }
+        );
+      },
       containerUpdates: (refresh = false) => request(
         `/api/endpoints/${getEndpointId()}/containers/updates${refresh ? "?refresh=1" : ""}`
       ),
@@ -384,16 +402,27 @@
     bag.root = document.getElementById("app");
     bag.THEME_KEY = "dm_theme";
     bag.SIDEBAR_KEY = "wm_sidebar_collapsed";
+    bag.THEMES = ["dark", "aurora", "light"];
     bag.readTheme = function readTheme() {
       const saved = localStorage.getItem(bag.THEME_KEY);
-      if (saved === "light" || saved === "dark") return saved;
-      return "dark";
+      if (bag.THEMES.includes(saved)) return saved;
+      return "aurora";
     };
     bag.applyTheme = function applyTheme(theme) {
-      const t = theme === "light" ? "light" : "dark";
+      const t = bag.THEMES.includes(theme) ? theme : "aurora";
       document.documentElement.setAttribute("data-theme", t);
       localStorage.setItem(bag.THEME_KEY, t);
       return t;
+    };
+    bag.themeToggleLabel = function themeToggleLabel(theme) {
+      if (theme === "light") return "\u263E";
+      if (theme === "aurora") return "\u2726";
+      return "\u2600";
+    };
+    bag.themeToggleTitle = function themeToggleTitle(theme) {
+      if (theme === "light") return "Th\xE8me clair \u2014 cliquer pour basculer";
+      if (theme === "aurora") return "Th\xE8me Aurora \u2014 cliquer pour basculer";
+      return "Th\xE8me sombre \u2014 cliquer pour basculer";
     };
     bag.readSidebarCollapsed = function readSidebarCollapsed() {
       return localStorage.getItem(bag.SIDEBAR_KEY) === "1";
@@ -444,6 +473,7 @@
       containerStatsTimer: null,
       term: null,
       publicUrl: "",
+      portsHostUrl: "",
       metricsChartHours: 72,
       metricsRetentionDays: 90,
       trivyEnabled: true,
@@ -460,9 +490,14 @@
     };
     bag.metricCache = { scope: "", series: [] };
     bag.toggleTheme = function toggleTheme() {
-      bag.state.theme = bag.applyTheme(bag.state.theme === "dark" ? "light" : "dark");
+      const cur = bag.THEMES.indexOf(bag.state.theme);
+      const next = bag.THEMES[(cur >= 0 ? cur + 1 : 0) % bag.THEMES.length];
+      bag.state.theme = bag.applyTheme(next);
       const btn = document.getElementById("theme-toggle");
-      if (btn) btn.textContent = bag.state.theme === "dark" ? "\u2600" : "\u263E";
+      if (btn) {
+        btn.textContent = bag.themeToggleLabel(bag.state.theme);
+        btn.title = bag.themeToggleTitle(bag.state.theme);
+      }
     };
     bag.toggleSidebar = function toggleSidebar() {
       bag.state.sidebarCollapsed = bag.applySidebarCollapsed(!bag.state.sidebarCollapsed);
@@ -728,14 +763,22 @@
       if (v < 1024 ** 3) return `${(v / 1024 ** 2).toFixed(1)} MB/s`;
       return `${(v / 1024 ** 3).toFixed(2)} GB/s`;
     };
-    bag.hostBase = function hostBase() {
-      const configured = (bag.state.publicUrl || "").trim().replace(/\/$/, "");
+    bag.hostBase = function hostBase(endpointId) {
+      const normalize = (u) => String(u || "").trim().replace(/\/$/, "");
+      const configured = normalize(bag.state.portsHostUrl);
+      const manager = normalize(bag.state.publicUrl);
+      const eid = endpointId != null ? Number(endpointId) : Number(bag.state.endpointId);
+      if (Number.isFinite(eid) && eid > 0) {
+        const ep = (bag.state.endpoints || []).find((e) => Number(e.Id) === eid);
+        const nodeUrl = normalize(ep?.PublicURL);
+        if (nodeUrl && (!manager || nodeUrl !== manager)) return nodeUrl;
+      }
       if (configured) return configured;
       const { protocol, hostname } = window.location;
       return `${protocol}//${hostname}`;
     };
-    bag.portHref = function portHref(pub) {
-      const base = bag.hostBase();
+    bag.portHref = function portHref(pub, endpointId) {
+      const base = bag.hostBase(endpointId);
       try {
         const u = new URL(base.includes("://") ? base : `https://${base}`);
         u.port = String(pub);
@@ -744,7 +787,7 @@
         return `${base.replace(/\/$/, "")}:${pub}`;
       }
     };
-    bag.formatPorts = function formatPorts(ports) {
+    bag.formatPorts = function formatPorts(ports, endpointId) {
       if (!ports || !ports.length) return '<span class="muted">\u2014</span>';
       const seen = /* @__PURE__ */ new Set();
       const chips = [];
@@ -758,7 +801,7 @@
           const key = `${pub}:${priv}/${type}`;
           if (seen.has(key)) continue;
           seen.add(key);
-          const href = bag.portHref(pub);
+          const href = bag.portHref(pub, endpointId);
           chips.push(
             `<a class="port-link" href="${bag.esc(href)}" target="_blank" rel="noopener" title="${bag.esc(href)}">${bag.esc(pub)}:${bag.esc(priv)}/${bag.esc(type)} \u2197</a>`
           );
@@ -871,6 +914,7 @@
         bag.Api.setToken("");
         bag.state.user = null;
         bag.state.publicUrl = "";
+        bag.state.portsHostUrl = "";
         if (bag.state.alertTimer) {
           clearInterval(bag.state.alertTimer);
           bag.state.alertTimer = null;
@@ -1081,12 +1125,24 @@
       const w = 320;
       const h = 88;
       const padY = 4;
-      const yAt = (pct) => padY + (1 - Math.max(0, Math.min(100, pct)) / 100) * (h - padY * 2);
       const keys = opts.keys || [
         { key: "cpu", color: "#3b82f6", label: "CPU" },
         { key: "mem", color: "#22c55e", label: "M\xE9moire" },
         { key: "disk", color: "#fb923c", label: "Disque" }
       ];
+      let maxY = Number(opts.maxY);
+      if (!Number.isFinite(maxY) || maxY <= 0) {
+        maxY = 100;
+        keys.forEach(({ key }) => {
+          const vals = bag.metricValues(series, key);
+          vals.forEach((v) => {
+            if (v > maxY && opts.autoScale) maxY = v;
+          });
+        });
+        if (!opts.autoScale) maxY = 100;
+      }
+      maxY = Math.max(1, maxY);
+      const yAt = (v) => padY + (1 - Math.max(0, Math.min(maxY, Number(v) || 0)) / maxY) * (h - padY * 2);
       const wrapId = opts.wrapId || "host-wave-wrap";
       const n = Math.max(1, (series || []).length);
       const paths = keys.map(({ key, color }) => {
@@ -1100,32 +1156,36 @@
         });
         if (coords.length === 1) {
           const y = coords[0][1];
-          return `<path d="M0 ${y.toFixed(2)} L${w} ${y.toFixed(2)}" fill="none" stroke="${color}" stroke-width="2"/>`;
+          return `<path d="M0 ${y.toFixed(2)} L${w} ${y.toFixed(2)}" fill="none" stroke="${color}" stroke-width="2.4"/>`;
         }
         const d = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(" ");
-        return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+        return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>`;
       }).join("");
       const labels = keys.map((k) => k.label).join(" / ");
-      const title = n < 2 ? "Historique ressources en construction" : `\xC9volution ${labels} \u2014 ${n} relev\xE9s (\xE9chelle 0\u2013100 %)`;
+      const isPct = !opts.maxY && !opts.autoScale;
+      const title = n < 2 ? "Historique en construction" : `\xC9volution ${labels} \u2014 ${n} relev\xE9s`;
       const legend = keys.map(
         ({ color, label }) => `<span class="wave-leg"><i style="background:${color}"></i>${bag.esc(label)}</span>`
       ).join("");
-      const y100 = yAt(100).toFixed(1);
-      const y50 = yAt(50).toFixed(1);
-      const y0 = yAt(0).toFixed(1);
+      const topLbl = isPct ? "100%" : String(Math.round(maxY));
+      const midLbl = isPct ? "50%" : String(Math.round(maxY / 2));
+      const botLbl = isPct ? "0%" : "0";
+      const yTop = yAt(maxY).toFixed(1);
+      const yMid = yAt(maxY / 2).toFixed(1);
+      const yBot = yAt(0).toFixed(1);
       return `<div class="wave-wrap" id="${bag.esc(wrapId)}">
       <div class="wave-head"><span class="stat-hint" title="Fen\xEAtre configurable dans Param\xE8tres">Courbes \xB7 ${bag.esc(bag.metricWindowLabel())} \xB7 r\xE9tention ${bag.esc(String(bag.metricRetentionDays()))} j</span></div>
       <div class="wave-plot">
         <div class="wave-y" aria-hidden="true">
-          <span>100%</span>
-          <span>50%</span>
-          <span>0%</span>
+          <span>${bag.esc(topLbl)}</span>
+          <span>${bag.esc(midLbl)}</span>
+          <span>${bag.esc(botLbl)}</span>
         </div>
         <svg class="wave-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${bag.esc(title)}">
           <title>${bag.esc(title)}</title>
-          <line x1="0" y1="${y100}" x2="${w}" y2="${y100}" class="wave-grid"/>
-          <line x1="0" y1="${y50}" x2="${w}" y2="${y50}" class="wave-grid"/>
-          <line x1="0" y1="${y0}" x2="${w}" y2="${y0}" class="wave-grid"/>
+          <line x1="0" y1="${yTop}" x2="${w}" y2="${yTop}" class="wave-grid"/>
+          <line x1="0" y1="${yMid}" x2="${w}" y2="${yMid}" class="wave-grid"/>
+          <line x1="0" y1="${yBot}" x2="${w}" y2="${yBot}" class="wave-grid"/>
           ${paths}
         </svg>
       </div>
@@ -1401,6 +1461,7 @@
       }
     };
     bag.updateDashStatCards = function updateDashStatCards(series, counts) {
+      bag._dashMetricSeries = series;
       const map = [
         ["containers", "blue"],
         ["images", "purple"],
@@ -1412,11 +1473,76 @@
         if (!card) return;
         const val = card.querySelector(".stat-value");
         const delta = card.querySelector(".stat-delta");
-        const spark = card.querySelector(".sparkline");
+        const sparkBtn = card.querySelector(".sparkline-btn");
+        const spark = sparkBtn?.querySelector(".sparkline") || card.querySelector(".sparkline");
         if (val && counts && counts[key] != null) val.textContent = String(counts[key]);
         if (delta) delta.outerHTML = bag.metricDeltaHtml(series, key);
         if (spark) spark.outerHTML = bag.sparklineFromValues(bag.metricValues(series, key), tone);
       });
+    };
+    bag.bindDashMetricSparklines = function bindDashMetricSparklines(series) {
+      bag._dashMetricSeries = series || bag.getMetricSeries();
+      bag.root.querySelectorAll("[data-metric-detail]").forEach((btn) => {
+        if (btn.dataset.boundDetail === "1") return;
+        btn.dataset.boundDetail = "1";
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const key = btn.dataset.metricDetail;
+          bag.openMetricDetailModal(key, bag._dashMetricSeries || bag.getMetricSeries());
+        });
+      });
+    };
+    bag.openMetricDetailModal = function openMetricDetailModal(key, series) {
+      const meta = bag.dashMetricMeta?.[key] || {
+        label: key,
+        tone: "blue",
+        color: "#38bdf8",
+        href: `#${key}`
+      };
+      const vals = bag.metricValues(series, key);
+      const n = vals.length;
+      const last = n ? vals[n - 1] : 0;
+      const max = n ? Math.max(...vals) : 0;
+      const min = n ? Math.min(...vals) : 0;
+      const avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
+      const delta = n >= 2 ? vals[n - 1] - vals[n - 2] : 0;
+      const chart = bag.resourceChart(series, {
+        wrapId: "metric-detail-wave",
+        keys: [{ key, color: meta.color, label: meta.label }],
+        maxY: Math.max(max, 1) * 1.15
+      });
+      bag.closeAppModal();
+      const host = bag.modalHost();
+      host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form-wide" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div class="metric-detail-head">
+              <div class="stat-ico ${bag.esc(meta.tone)}">${bag.ico(key === "networks" ? "networks" : key)}</div>
+              <div>
+                <h3>${bag.esc(meta.label)}</h3>
+                <div class="modal-sub">Historique \xB7 ${bag.esc(bag.metricWindowLabel())} \xB7 r\xE9tention ${bag.esc(String(bag.metricRetentionDays()))} j</div>
+              </div>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">\u2715</button>
+          </div>
+          <div class="metric-detail-kpis">
+            <div class="metric-kpi"><span class="muted">Actuel</span><strong>${last}</strong></div>
+            <div class="metric-kpi"><span class="muted">Min</span><strong>${min}</strong></div>
+            <div class="metric-kpi"><span class="muted">Max</span><strong>${max}</strong></div>
+            <div class="metric-kpi"><span class="muted">Moyenne</span><strong>${avg.toFixed(1)}</strong></div>
+            <div class="metric-kpi"><span class="muted">\u0394 dernier</span><strong class="${delta > 0 ? "ok" : delta < 0 ? "bad" : ""}">${delta > 0 ? "+" : ""}${delta}</strong></div>
+            <div class="metric-kpi"><span class="muted">Relev\xE9s</span><strong>${n}</strong></div>
+          </div>
+          <div class="metric-detail-chart">${chart}</div>
+          <div class="actions-bar">
+            <a class="btn btn-primary" href="${bag.esc(meta.href)}">Ouvrir ${bag.esc(meta.label)}</a>
+            <button type="button" class="btn" data-close-modal>Fermer</button>
+          </div>
+        </div>
+      </div>`;
+      bag.bindAppModalChrome();
     };
     bag.updateHostResourceChart = function updateHostResourceChart(series, counts) {
       const wrap = document.getElementById("host-wave-wrap");
@@ -1721,7 +1847,7 @@
               <span class="status-online ${bag.state.dockerOnline ? "" : "is-offline"}" id="status-online">
                 <span class="dot"></span>${bag.state.dockerOnline ? "En ligne" : "Hors ligne"}
               </span>
-              <button type="button" class="theme-toggle" id="theme-toggle" title="Basculer clair / sombre">${bag.state.theme === "dark" ? "\u2600" : "\u263E"}</button>
+              <button type="button" class="theme-toggle" id="theme-toggle" title="${bag.esc(bag.themeToggleTitle(bag.state.theme))}">${bag.themeToggleLabel(bag.state.theme)}</button>
               <div class="notif-wrap">
                 <button type="button" class="icon-btn notif-btn" id="notif-bell" title="Notifications" aria-label="Notifications" aria-expanded="false">
                   ${bag.ico("bell")}
@@ -1823,6 +1949,7 @@
         if (!ids.length) return;
         const msg = ids.length === 1 ? opts.confirmOne ? opts.confirmOne(ids[0]) : "Supprimer cet \xE9l\xE9ment ?" : opts.confirmMany ? opts.confirmMany(ids.length) : `Supprimer ${ids.length} \xE9l\xE9ments ?`;
         if (!window.confirm(msg)) return;
+        const focus = { y: window.scrollY || window.pageYOffset || 0, id: "", name: "" };
         const errors = [];
         for (const id of ids) {
           try {
@@ -1837,7 +1964,9 @@
 ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           );
         }
+        bag.rememberListFocus(focus);
         await opts.reload();
+        bag.restoreListFocus(focus);
       }, { disableSiblings: false, minMs: 300 });
       sync();
     };
@@ -2146,10 +2275,11 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       const icons = {
         dashboard: '<svg viewBox="0 0 16 16"><path d="M1 1h6v6H1V1zm8 0h6v6H9V1zM1 9h6v6H1V9zm8 0h6v6H9V9z"/></svg>',
         stacks: '<svg viewBox="0 0 16 16"><path d="M0 4l8-3 8 3-8 3L0 4zm0 4l8 3 8-3v2l-8 3-8-3V8zm0 4l8 3 8-3v2l-8 3-8-3v-2z"/></svg>',
-        containers: '<svg viewBox="0 0 16 16"><path d="M1 3h14v2H1V3zm0 4h14v2H1V7zm0 4h14v2H1v-2z"/></svg>',
-        images: '<svg viewBox="0 0 16 16"><path d="M1 2h14v12H1V2zm2 2v8h10V4H3zm2 2h2v2H5V6zm4 0h3v1H9V6zm0 2h3v1H9V8z"/></svg>',
-        networks: '<svg viewBox="0 0 16 16"><path d="M8 1a3 3 0 110 6 3 3 0 010-6zM2 9a2 2 0 110 4 2 2 0 010-4zm12 0a2 2 0 110 4 2 2 0 010-4zM8 8v2.5M3.5 10.5L6.5 8.5m6 2L9.5 8.5"/></svg>',
-        volumes: '<svg viewBox="0 0 16 16"><path d="M3 2h10v12H3V2zm2 2v8h6V4H5z"/></svg>',
+        /* Mockup-style resource icons (cube / picture / cylinder / nodes) */
+        containers: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3.2L20 7.4v9.2L12 20.8 4 16.6V7.4L12 3.2z" fill="currentColor" opacity=".22"/><path d="M12 3.2L20 7.4v9.2L12 20.8 4 16.6V7.4L12 3.2z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 12.2L20 7.4M12 12.2L4 7.4M12 12.2V20.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+        images: '<svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="currentColor" opacity=".2" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="10" r="2" fill="currentColor"/><path d="M4.5 16.5l4.2-4.2a1.4 1.4 0 012 0L14 16l2.2-2.2a1.4 1.4 0 012 0l1.3 1.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        volumes: '<svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6.5" rx="6.5" ry="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 6.5v11c0 1.4 2.9 2.6 6.5 2.6s6.5-1.2 6.5-2.6v-11" stroke="currentColor" stroke-width="1.6"/><ellipse cx="12" cy="12" rx="6.5" ry="2.6" stroke="currentColor" stroke-width="1.4" opacity=".7"/><ellipse cx="12" cy="17.5" rx="6.5" ry="2.6" stroke="currentColor" stroke-width="1.4" opacity=".55"/></svg>',
+        networks: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="6.5" r="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><circle cx="6.2" cy="16.8" r="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><circle cx="17.8" cy="16.8" r="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><path d="M10.2 8.4L7.6 14.4M13.8 8.4l2.6 6M8.8 16.8h6.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
         settings: '<svg viewBox="0 0 16 16"><path d="M6.5 1h3l.4 2.1a5 5 0 011.4.8L13.5 3l1.5 2.6-1.7 1.2a5 5 0 010 1.6l1.7 1.2L13.5 13l-2.2-.9a5 5 0 01-1.4.8L9.5 15h-3l-.4-2.1a5 5 0 01-1.4-.8L2.5 13 1 10.4l1.7-1.2a5 5 0 010-1.6L1 6.4 2.5 3.8l2.2.9a5 5 0 011.4-.8L6.5 1zM8 6a2 2 0 100 4 2 2 0 000-4z"/></svg>',
         users: '<svg viewBox="0 0 16 16"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6v-1a4 4 0 014-4h2a4 4 0 014 4v1H3zm10-7a2 2 0 100-4 2 2 0 000 4zm1 7v-1a4.9 4.9 0 00-1.5-3.5A4 4 0 0115 13v1h-1z"/></svg>',
         teams: '<svg viewBox="0 0 16 16"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6v-1a4 4 0 014-4h2a4 4 0 014 4v1H3zm10-7a2 2 0 100-4 2 2 0 000 4zm1 7v-1a4.9 4.9 0 00-1.5-3.5A4 4 0 0115 13v1h-1z"/><path d="M1 5.5A1.5 1.5 0 012.5 4h1a.5.5 0 010 1h-1a.5.5 0 00-.5.5v1a.5.5 0 01-1 0v-1z"/></svg>',
@@ -2188,22 +2318,27 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
     };
     bag.badge = function badge(stateName) {
       const s = String(stateName || "").toLowerCase();
-      let cls = "badge";
+      let cls = "badge badge-status";
       let label = stateName || "inconnu";
-      if (s.includes("running")) {
+      if (s.includes("running") || s === "restarting") {
         cls += " badge-running";
-        label = "En cours";
-      } else if (s.includes("exit") || s.includes("dead")) {
-        cls += " badge-exited";
-        label = "Arr\xEAt\xE9";
+        label = s === "restarting" || s.includes("restart") ? "Restarting" : "Running";
+      } else if (s.includes("exit") || s.includes("dead") || s === "stopped" || s.includes("stop")) {
+        cls += " badge-stopped";
+        label = "Stopped";
       } else if (s.includes("pause")) {
         cls += " badge-paused";
-        label = "En pause";
+        label = "Paused";
       } else if (s.includes("creat")) {
         cls += " badge-created";
-        label = "Cr\xE9\xE9";
-      } else cls += " badge-created";
-      return `<span class="${cls}">${bag.esc(label)}</span>`;
+        label = "Created";
+      } else if (s.includes("remov") || s.includes("delet")) {
+        cls += " badge-exited";
+        label = "Removed";
+      } else {
+        cls += " badge-created";
+      }
+      return `<span class="${cls}" title="${bag.esc(String(stateName || label))}"><span class="badge-dot" aria-hidden="true"></span>${bag.esc(label)}</span>`;
     };
     bag.brandMarkImg = function brandMarkImg(cls = "brand-mark-img") {
       return `<img class="${cls}" src="/assets/img/wharfmaster-mark.png" width="40" height="40" alt="" decoding="async">`;
@@ -2247,17 +2382,41 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
     bag.sparkline = function sparkline(tone = "blue") {
       return bag.sparklineFromValues([], tone);
     };
+    bag.dashMetricMeta = {
+      containers: { label: "Conteneurs", tone: "blue", color: "#38bdf8", href: "#containers" },
+      images: { label: "Images", tone: "purple", color: "#c084fc", href: "#images" },
+      volumes: { label: "Volumes", tone: "green", color: "#4ade80", href: "#volumes" },
+      networks: { label: "R\xE9seaux", tone: "orange", color: "#fb923c", href: "#networks" }
+    };
     bag.dashStatCard = function dashStatCard(key, tone, label, value, series) {
-      return `<div class="stat-card" data-metric="${bag.esc(key)}">
-      <div class="stat-top">
-        <div class="stat-ico ${tone}">${bag.ico(key === "networks" ? "networks" : key)}</div>
-        ${bag.metricDeltaHtml(series, key)}
+      const icoKey = key === "networks" ? "networks" : key;
+      return `<div class="stat-card stat-card-row" data-metric="${bag.esc(key)}" data-tone="${bag.esc(tone)}">
+      <div class="stat-ico ${tone}" aria-hidden="true">${bag.ico(icoKey)}</div>
+      <div class="stat-mid">
+        <div class="stat-value">${Number(value) || 0}</div>
+        <div class="stat-label">${bag.esc(label)}</div>
       </div>
-      <div class="stat-value">${Number(value) || 0}</div>
-      <div class="stat-label">${bag.esc(label)}</div>
-      ${bag.sparklineFromValues(bag.metricValues(series, key), tone)}
-      <div class="stat-hint" title="Fen\xEAtre configurable dans Param\xE8tres">Courbe \xB7 ${bag.esc(bag.metricWindowLabel())}</div>
+      <div class="stat-right">
+        ${bag.metricDeltaHtml(series, key)}
+        <button type="button" class="sparkline-btn" data-metric-detail="${bag.esc(key)}" title="Voir l\u2019historique d\xE9taill\xE9" aria-label="Ouvrir l\u2019historique ${bag.esc(label)}">
+          ${bag.sparklineFromValues(bag.metricValues(series, key), tone)}
+        </button>
+      </div>
     </div>`;
+    };
+    bag.dashHeroHtml = function dashHeroHtml(opts = {}) {
+      const title = opts.title || "Bienvenue sur WharfMaster !";
+      const parts = String(title).split(/WharfMaster/);
+      const heading = parts.length > 1 ? `${bag.esc(parts[0])}<span class="dash-hero-brand">WharfMaster</span>${bag.esc(parts.slice(1).join("WharfMaster"))}` : bag.esc(title);
+      const sub = opts.subtitle || "Une interface moderne pour g\xE9rer votre environnement Docker.";
+      return `<section class="dash-hero" aria-label="Bienvenue">
+      <div class="dash-hero-bg" role="presentation"></div>
+      <div class="dash-hero-veil" aria-hidden="true"></div>
+      <div class="dash-hero-body">
+        <h2 class="dash-hero-title">${heading}</h2>
+        <p class="dash-hero-sub">${bag.esc(sub)}</p>
+      </div>
+    </section>`;
     };
     bag.gaugeRing = function gaugeRing(pct, color = "#3b82f6") {
       const p = Math.max(0, Math.min(100, Number(pct) || 0));
@@ -2327,15 +2486,68 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         if (row && row.isConnected) row.classList.remove("row-busy");
       }
     };
+    bag.captureListFocus = function captureListFocus(fromEl) {
+      const tr = fromEl?.closest?.("tr") || null;
+      const id = String(
+        fromEl?.dataset?.id || fromEl?.dataset?.name || fromEl?.dataset?.updId || tr?.dataset?.stackId || tr?.dataset?.containerId || tr?.dataset?.resourceId || ""
+      );
+      const name = String(
+        fromEl?.dataset?.name || tr?.dataset?.resourceName || ""
+      );
+      return {
+        y: window.scrollY || window.pageYOffset || 0,
+        id,
+        name
+      };
+    };
+    bag.rememberListFocus = function rememberListFocus(focusOrEl) {
+      const focus = focusOrEl && focusOrEl.nodeType ? bag.captureListFocus(focusOrEl) : focusOrEl || null;
+      bag.pendingListFocus = focus;
+      return focus;
+    };
+    bag.restoreListFocus = function restoreListFocus(focus) {
+      const f = focus || bag.pendingListFocus;
+      bag.pendingListFocus = null;
+      if (!f) return;
+      const run = () => {
+        const root = bag.root;
+        let row = null;
+        if (root && f.id) {
+          const id = String(f.id);
+          row = root.querySelector(`tr[data-stack-id="${CSS.escape(id)}"]`) || root.querySelector(`tr[data-container-id="${CSS.escape(id)}"]`) || root.querySelector(`tr[data-resource-id="${CSS.escape(id)}"]`) || root.querySelector(`[data-id="${CSS.escape(id)}"]`)?.closest("tr") || root.querySelector(`[data-upd-id="${CSS.escape(id)}"]`)?.closest("tr");
+        }
+        if (!row && root && f.name) {
+          const name = String(f.name);
+          row = root.querySelector(`tr[data-resource-name="${CSS.escape(name)}"]`) || root.querySelector(`[data-name="${CSS.escape(name)}"]`)?.closest("tr");
+        }
+        if (row) {
+          row.scrollIntoView({ block: "nearest", inline: "nearest" });
+          row.classList.add("row-flash");
+          window.setTimeout(() => {
+            if (row.isConnected) row.classList.remove("row-flash");
+          }, 1400);
+          return;
+        }
+        window.scrollTo(0, f.y || 0);
+      };
+      requestAnimationFrame(() => requestAnimationFrame(run));
+    };
     bag.onBusyClick = function onBusyClick(el, handler, opts = {}) {
       if (!el) return;
       el.addEventListener("click", async (e) => {
         e.preventDefault();
         if (opts.confirm && !window.confirm(opts.confirm)) return;
         const target = e.currentTarget;
+        const focus = bag.captureListFocus(target);
         try {
-          await bag.withBusy(target, () => handler(target, e), opts);
-          if (opts.reload) await bag.route();
+          const result = await bag.withBusy(target, () => handler(target, e), opts);
+          if (result === "navigated") return;
+          if (opts.reload) {
+            bag.rememberListFocus(focus);
+            if (typeof opts.reload === "function") await opts.reload();
+            else await bag.route();
+            bag.restoreListFocus(focus);
+          }
         } catch (err) {
           alert(err.message || String(err));
         }
@@ -2366,7 +2578,9 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         clearInterval(bag.state.statsTimer);
         bag.state.statsTimer = null;
       }
-      if (bag.state.term) {
+      if (typeof bag.closeConsoleSession === "function") {
+        bag.closeConsoleSession();
+      } else if (bag.state.term) {
         try {
           bag.state.term.dispose();
         } catch (_) {
@@ -3101,7 +3315,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         disk: diskPct
       });
       bag.root.innerHTML = bag.shell("Tableau de bord", `
-      <div class="stat-grid">
+      ${bag.dashHeroHtml()}
+      <div class="stat-grid dash-hero-stats">
         ${bag.dashStatCard("containers", "blue", "Conteneurs", list.length, metricSeries)}
         ${bag.dashStatCard("images", "purple", "Images", imgs.length, metricSeries)}
         ${bag.dashStatCard("volumes", "green", "Volumes", volList.length, metricSeries)}
@@ -3174,6 +3389,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
     `, { subtitle: "Vue d\u2019ensemble de votre environnement Docker", hidePageHeader: true });
       bag.bindSearch("dashboard");
       bag.startDashMetricSampler();
+      bag.bindDashMetricSparklines(metricSeries);
       document.getElementById("dash-filters")?.querySelectorAll("button").forEach((btn) => {
         btn.onclick = () => {
           bag.state.dashFilter = btn.dataset.f;
@@ -3264,9 +3480,12 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         networks: nets.length
       });
       bag.root.innerHTML = bag.shell("Tableau de bord", `
+      ${bag.dashHeroHtml({
+        subtitle: "Vue agr\xE9g\xE9e de tous vos n\u0153uds Docker \u2014 une interface moderne."
+      })}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agr\xE9gat partiel.${failMsg}</div>` : ""}
       ${perNodeHint ? `<div class="muted" style="margin-bottom:10px">R\xE9partition conteneurs \u2014 ${bag.esc(perNodeHint)}</div>` : ""}
-      <div class="stat-grid">
+      <div class="stat-grid dash-hero-stats">
         ${bag.dashStatCard("containers", "blue", "Conteneurs", list.length, metricSeriesAll)}
         ${bag.dashStatCard("images", "purple", "Images", imgs.length, metricSeriesAll)}
         ${bag.dashStatCard("volumes", "green", "Volumes", volList.length, metricSeriesAll)}
@@ -3322,6 +3541,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
     `, { subtitle: "Vue agr\xE9g\xE9e \u2014 tous les n\u0153uds", hidePageHeader: true });
       bag.bindSearch("dashboard");
       bag.startDashMetricSampler();
+      bag.bindDashMetricSparklines(metricSeriesAll);
       document.getElementById("dash-filters")?.querySelectorAll("button").forEach((btn) => {
         btn.onclick = () => {
           bag.state.dashFilter = btn.dataset.f;
@@ -4009,10 +4229,10 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
             <div class="console-wrap" id="term">
               <div class="console-placeholder" id="console-placeholder">
                 <div style="font-size:28px;opacity:.5">\u2B1B</div>
-                <p>${running ? "Choisissez un bag.shell puis cliquez sur <strong>Connecter</strong> pour ouvrir une console dans ce conteneur." : "D\xE9marrez le conteneur avant d'ouvrir la console."}</p>
+                <p>${running ? "Choisissez un shell puis cliquez sur <strong>Connecter</strong> pour ouvrir une console dans ce conteneur." : "D\xE9marrez le conteneur avant d'ouvrir la console."}</p>
               </div>
             </div>
-            <div class="console-hint">Console exec \xB7 Entr\xE9e ex\xE9cute chaque commande \xB7 Builtins : clear, cd, pwd</div>
+            <div class="console-hint">TTY interactif (WebSocket) \xB7 comme un vrai shell \xB7 Ctrl+C / vi / top support\xE9s</div>
           </div>
         </div>
       </div>`;
@@ -4040,7 +4260,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         image: (c) => c.Image || "",
         state: (c) => String(c.State || ""),
         node: (c) => c._nodeName || "",
-        ports: (c) => bag.formatPorts(c.Ports || []),
+        ports: (c) => bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId),
         created: (c) => bag.createdSortKey(c.Created)
       });
       const rows = list.map((c) => {
@@ -4049,26 +4269,26 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         const isRunning = st === "running" || st === "restarting";
         const rowCls = isRunning ? "" : "row-stopped";
         const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ""}`.toLowerCase();
-        const actions = all ? `<span class="muted">\u2014</span>` : bag.moreActions(
-          `${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
-           ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
-           ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
-           ${bag.iconBtn({
-            modal: "stats",
-            id: c.Id,
-            name,
-            running: isRunning,
-            title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
-            icon: "stats",
-            statsId: c.Id,
-            extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
-          })}
-           ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}`,
-          `${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs conteneur", icon: "logs", label: "Logs" })}
-           ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console", label: "Console" })}
-           ${bag.iconBtn({ modal: "inspect", id: c.Id, name, running: isRunning, title: "Inspecter", icon: "inspect", label: "Inspecter" })}
-           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || c.Id, label: "Partager" })}`
-        );
+        const actions = all ? `<span class="muted">\u2014</span>` : `<div class="quick-actions">
+          ${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
+          ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
+          ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
+          ${bag.iconBtn({
+          modal: "stats",
+          id: c.Id,
+          name,
+          running: isRunning,
+          title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
+          icon: "stats",
+          statsId: c.Id,
+          extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
+        })}
+          ${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs", icon: "logs" })}
+          ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console" })}
+          ${bag.iconBtn({ modal: "inspect", id: c.Id, name, running: isRunning, title: "Inspecter", icon: "inspect" })}
+          ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || c.Id })}
+          ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}
+        </div>`;
         return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}">
         ${all ? "" : bag.bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${bag.esc(c._nodeName || "\u2014")}</td>` : ""}
@@ -4076,17 +4296,21 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           <strong><a href="#containers/${bag.esc(c.Id)}" ${all ? `data-switch-node="${bag.esc(c._nodeId)}"` : ""}>${bag.esc(name)}</a></strong>
           <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
         </td>
-        <td class="mono">${bag.esc(c.Image)}</td>
-        ${all ? "" : `<td class="img-upd-cell" data-cupd="${bag.esc(c.Id)}">
-          <span class="img-upd is-loading" title="V\xE9rification de l\u2019image\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>
-        </td>`}
+        <td class="mono cell-clip cell-image" title="${bag.esc(c.Image || "")}">
+          <span class="img-with-upd">
+            ${all ? "" : `<span class="img-upd-slot" data-cupd="${bag.esc(c.Id)}">
+              <span class="img-upd is-loading img-upd-dot-only" title="V\xE9rification de l\u2019image\u2026"><span class="img-upd-dot"></span></span>
+            </span>`}
+            <span class="img-name">${bag.esc(c.Image || "")}</span>
+          </span>
+        </td>
         <td>${bag.badge(c.State)}</td>
-        <td>${bag.formatPorts(c.Ports || [])}</td>
+        <td>${bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId)}</td>
         <td>${bag.formatCreated(c.Created)}</td>
         <td class="actions">${actions}</td>
       </tr>`;
       }).join("");
-      const colSpan = all ? 7 : 9;
+      const colSpan = all ? 7 : 8;
       bag.root.innerHTML = bag.shell("Conteneurs", `
       ${bag.pageHeader(all ? "Conteneurs \u2014 tous les n\u0153uds" : "Liste des conteneurs")}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agr\xE9gat partiel.${bag.esc(failMsg)}</div>` : ""}
@@ -4107,7 +4331,6 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
             ${all ? bag.sortTh("N\u0153ud", "node", "containers") : ""}
             ${bag.sortTh("Nom", "name", "containers")}
             ${bag.sortTh("Image", "image", "containers")}
-            ${all ? "" : '<th title="Image du registre">M\xE0j</th>'}
             ${bag.sortTh("\xC9tat", "state", "containers")}
             ${bag.sortTh("Ports publi\xE9s", "ports", "containers")}
             ${bag.sortTh("Cr\xE9\xE9", "created", "containers")}
@@ -4141,8 +4364,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           reload: () => bag.viewContainers()
         });
         document.getElementById("container-upd-refresh")?.addEventListener("click", () => {
-          bag.root.querySelectorAll("[data-cupd]").forEach((cell) => {
-            cell.innerHTML = `<span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>`;
+          bag.root.querySelectorAll("[data-cupd]").forEach((slot) => {
+            slot.innerHTML = `<span class="img-upd is-loading img-upd-dot-only" title="V\xE9rification\u2026"><span class="img-upd-dot"></span></span>`;
           });
           bag.loadContainerUpdateIndicators(true);
         });
@@ -4159,34 +4382,33 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           });
         });
       }
+      bag.restoreListFocus();
     };
     bag.loadContainerUpdateIndicators = async function loadContainerUpdateIndicators(refresh = false) {
       try {
         const data = await bag.Api.containerUpdates(!!refresh);
         const map = data?.Updates || {};
         Object.keys(map).forEach((id) => {
-          const cell = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
-          if (!cell) return;
+          const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
+          if (!slot) return;
           const u = map[id] || {};
           let title = u.Detail || u.Error || "Aucun contr\xF4le";
           if (u.Image) title = `${u.Image}
 ${title}`;
-          cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+          slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
             action: "container",
-            id
+            id,
+            dotOnly: true
           });
         });
         bag.root.querySelectorAll("[data-cupd] .img-upd.is-loading").forEach((el) => {
-          el.className = "img-upd is-unknown";
+          el.className = "img-upd is-unknown img-upd-dot-only";
           el.title = "Contr\xF4le indisponible";
-          const lbl = el.querySelector(".img-upd-lbl");
-          if (lbl) lbl.textContent = "\u2014";
-          else el.insertAdjacentHTML("beforeend", '<span class="img-upd-lbl">\u2014</span>');
         });
         bag.bindImageUpdateActions(bag.root);
       } catch {
-        bag.root.querySelectorAll("[data-cupd]").forEach((cell) => {
-          cell.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible");
+        bag.root.querySelectorAll("[data-cupd]").forEach((slot) => {
+          slot.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible", { dotOnly: true });
         });
       }
     };
@@ -4216,7 +4438,7 @@ ${title}`;
             <dt>Statut</dt><dd>${bag.badge(info.State?.Status || "")}</dd>
             <dt>Cr\xE9\xE9 le</dt><dd>${bag.esc(info.Created || "")}</dd>
             <dt>Adresse IP</dt><dd class="mono">${bag.esc(info.NetworkSettings?.IPAddress || Object.values(info.NetworkSettings?.Networks || {})[0]?.IPAddress || "\u2014")}</dd>
-            <dt>Ports publi\xE9s</dt><dd>${bag.formatPorts(ports)}</dd>
+            <dt>Ports publi\xE9s</dt><dd>${bag.formatPorts(ports, bag.state.endpointId)}</dd>
             <dt>Commande</dt><dd class="mono">${bag.esc((info.Config?.Cmd || []).join(" "))}</dd>
           </dl>
         </div>`;
@@ -4245,7 +4467,7 @@ ${title}`;
           ${bag.iconBtn({ act: "remove", title: "Supprimer", icon: "remove", danger: true })}
         </div>
         <div class="spacer"></div>
-        ${bag.formatPorts(ports)}
+        ${bag.formatPorts(ports, bag.state.endpointId)}
       </div>
       <div class="tabs">${tabs}</div>
       ${body}
@@ -4274,11 +4496,14 @@ ${title}`;
       });
       bag.root.querySelectorAll("[data-act]").forEach((btn) => {
         bag.onBusyClick(btn, async (el) => {
+          const focus = bag.captureListFocus(el);
           await bag.containerAction(id, el.dataset.act);
           if (el.dataset.act === "remove") {
             location.hash = "#containers";
             return "navigated";
           }
+          bag.rememberListFocus(focus);
+          return;
         }, {
           confirm: btn.dataset.act === "remove" ? "Supprimer ce conteneur ?" : null,
           reload: btn.dataset.act !== "remove"
@@ -4322,16 +4547,9 @@ ${title}`;
         connectBtn.disabled = true;
         shellSelect.disabled = true;
         disconnectBtn.disabled = false;
-        bag.setConsoleStatus("is-connected", "Connect\xE9");
       }, { disableSiblings: false });
       disconnectBtn.onclick = () => {
-        if (bag.state.term) {
-          try {
-            bag.state.term.dispose();
-          } catch (_) {
-          }
-          bag.state.term = null;
-        }
+        bag.closeConsoleSession();
         const wrap = document.getElementById("term");
         if (wrap) {
           wrap.innerHTML = `<div class="console-placeholder" id="console-placeholder">
@@ -4345,16 +4563,18 @@ ${title}`;
         bag.setConsoleStatus("", "Pr\xEAt \xE0 connecter");
       };
     };
-    bag.mountConsole = async function mountConsole(containerId, containerName) {
-      const wrap = document.getElementById("term");
-      if (!wrap) return;
-      if (typeof Terminal === "undefined") {
-        wrap.innerHTML = '<div class="error-box" style="margin:12px">\xC9chec du chargement de xterm</div>';
-        return;
+    bag.closeConsoleSession = function closeConsoleSession() {
+      if (bag.state.consoleWs) {
+        try {
+          bag.state.consoleWs.close();
+        } catch (_) {
+        }
+        bag.state.consoleWs = null;
       }
-      const placeholder = document.getElementById("console-placeholder");
-      if (placeholder) placeholder.remove();
-      wrap.innerHTML = "";
+      if (bag.state.consoleResizeTimer) {
+        clearTimeout(bag.state.consoleResizeTimer);
+        bag.state.consoleResizeTimer = null;
+      }
       if (bag.state.term) {
         try {
           bag.state.term.dispose();
@@ -4362,6 +4582,19 @@ ${title}`;
         }
         bag.state.term = null;
       }
+      bag.state.consoleExecId = null;
+    };
+    bag.mountConsole = async function mountConsole(containerId, containerName) {
+      const wrap = document.getElementById("term");
+      if (!wrap) return;
+      if (typeof Terminal === "undefined") {
+        wrap.innerHTML = '<div class="error-box" style="margin:12px">\xC9chec du chargement de xterm</div>';
+        return;
+      }
+      bag.closeConsoleSession();
+      const placeholder = document.getElementById("console-placeholder");
+      if (placeholder) placeholder.remove();
+      wrap.innerHTML = "";
       const shellSelect = document.getElementById("shell-bin");
       const shortName = (containerName || bag.shortId(containerId)).replace(/[^a-zA-Z0-9_.-]/g, "") || "container";
       const term = new Terminal({
@@ -4420,173 +4653,99 @@ ${title}`;
       }
       bag.state.term = term;
       term.focus();
-      let cwd = "/";
-      let user = "root";
-      let buffer = "";
-      let busy = false;
-      let history = [];
-      let historyIdx = -1;
-      const termSize = () => ({
-        cols: Math.max(40, term.cols || 120),
-        rows: Math.max(10, term.rows || 40)
-      });
-      const writeOut = (raw) => {
-        if (!raw) return;
-        let text = String(raw).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        if (text.endsWith("\n")) text = text.slice(0, -1);
-        if (!text) return;
-        term.write(text.replace(/\n/g, "\r\n") + "\r\n");
-      };
-      bag.setConsoleStatus("is-busy", "Connexion\u2026");
+      bag.setConsoleStatus("is-busy", "Cr\xE9ation de la session\u2026");
+      let session;
       try {
-        const who = await bag.Api.containerExec(containerId, "whoami; pwd", shellSelect.value, "", termSize());
-        const lines = ((who.Stdout || "") + (who.Stderr || "")).trim().split("\n").map((l) => l.trim()).filter(Boolean);
-        if (lines[0]) user = lines[0].replace(/\x1b\[[0-9;]*m/g, "");
-        if (lines[1]) cwd = lines[1].replace(/\x1b\[[0-9;]*m/g, "");
-      } catch (_) {
+        session = await bag.Api.createConsoleSession(containerId, {
+          shell: shellSelect?.value || "/bin/sh",
+          cols: Math.max(40, term.cols || 120),
+          rows: Math.max(10, term.rows || 40)
+        });
+      } catch (err) {
+        term.writeln(`\x1B[31m${err.message || err}\x1B[0m`);
+        bag.setConsoleStatus("", "Erreur");
+        throw err;
       }
-      const promptStr = () => {
-        const host = shortName.slice(0, 20);
-        return `\x1B[1;32m${user}@${host}\x1B[0m:\x1B[1;34m${cwd}\x1B[0m# `;
+      const execId = session.Id || session.id;
+      const ticket = session.Token || session.token;
+      const endpointId = session.EndpointId || bag.Api.getEndpointId();
+      bag.state.consoleExecId = execId;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${proto}//${location.host}/api/websocket/exec?id=${encodeURIComponent(execId)}&endpointId=${encodeURIComponent(endpointId)}&token=${encodeURIComponent(ticket)}`;
+      bag.setConsoleStatus("is-busy", "Connexion WebSocket\u2026");
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = "arraybuffer";
+      bag.state.consoleWs = ws;
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("D\xE9lai de connexion WebSocket d\xE9pass\xE9")), 15e3);
+        ws.onopen = () => {
+          clearTimeout(t);
+          resolve();
+        };
+        ws.onerror = () => {
+          clearTimeout(t);
+          reject(new Error("\xC9chec WebSocket (proxy Upgrade ?)"));
+        };
+      });
+      term.writeln(`\x1B[90mConnect\xE9 \xE0 ${shortName} via ${session.Shell || shellSelect?.value || "/bin/sh"} (TTY)\x1B[0m`);
+      bag.setConsoleStatus("is-connected", `Connect\xE9 \xB7 ${session.Shell || shellSelect?.value || "/bin/sh"}`);
+      const sendResize = () => {
+        const h = Math.max(10, term.rows || 40);
+        const w = Math.max(40, term.cols || 120);
+        bag.Api.resizeConsole(execId, h, w).catch(() => {
+        });
       };
-      const writePrompt = () => {
-        term.write(promptStr());
+      sendResize();
+      ws.onmessage = (ev) => {
+        if (!bag.state.term) return;
+        if (typeof ev.data === "string") {
+          term.write(ev.data);
+          return;
+        }
+        const bytes = new Uint8Array(ev.data);
+        let s = "";
+        for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+        term.write(s);
       };
-      term.writeln(`\x1B[90mConnect\xE9 \xE0 ${shortName} via ${shellSelect.value}\x1B[0m`);
-      writePrompt();
-      bag.setConsoleStatus("is-connected", `Connect\xE9 \xB7 ${shellSelect.value}`);
+      ws.onclose = () => {
+        bag.state.consoleWs = null;
+        if (bag.state.term) {
+          term.writeln("\r\n\x1B[33m[session termin\xE9e]\x1B[0m");
+          bag.setConsoleStatus("", "D\xE9connect\xE9");
+        }
+      };
+      ws.onerror = () => {
+        term.writeln("\r\n\x1B[31m[erreur WebSocket]\x1B[0m");
+      };
+      term.onData((data) => {
+        if (!bag.state.consoleWs || bag.state.consoleWs.readyState !== WebSocket.OPEN) return;
+        bag.state.consoleWs.send(data);
+      });
       const onResize = () => {
         try {
           fit && fit.fit();
         } catch (_) {
         }
+        if (bag.state.consoleResizeTimer) clearTimeout(bag.state.consoleResizeTimer);
+        bag.state.consoleResizeTimer = setTimeout(sendResize, 120);
       };
       window.addEventListener("resize", onResize);
       const modalEl = wrap.closest(".modal-workspace");
       if (modalEl) modalEl.addEventListener("wm-modal-resize", onResize);
-      const runLine = async (line) => {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          writePrompt();
-          return;
-        }
-        if (trimmed === "clear" || trimmed === "cls") {
-          term.clear();
-          writePrompt();
-          return;
-        }
-        if (trimmed === "pwd") {
-          term.writeln(cwd || "/");
-          writePrompt();
-          return;
-        }
-        if (trimmed === "exit") {
-          document.getElementById("console-disconnect")?.click();
-          return;
-        }
-        if (trimmed.startsWith("cd ") || trimmed === "cd") {
-          const target = trimmed === "cd" ? "/" : trimmed.slice(3).trim() || "/";
-          busy = true;
-          bag.setConsoleStatus("is-busy", "Ex\xE9cution\u2026");
-          try {
-            const res = await bag.Api.containerExec(
-              containerId,
-              `cd ${bag.shellQuote(cwd)} && cd ${bag.shellQuote(target)} && pwd`,
-              shellSelect.value,
-              "",
-              termSize()
-            );
-            const out = (res.Stdout || "").trim().replace(/\x1b\[[0-9;]*m/g, "");
-            if (res.ExitCode === 0 && out) cwd = out.split("\n").pop().trim();
-            else {
-              const err = (res.Stderr || res.Stdout || "cd: no such file or directory").trim();
-              term.writeln(`\x1B[31m${err}\x1B[0m`);
-            }
-          } catch (err) {
-            term.writeln(`\x1B[31m${err.message}\x1B[0m`);
-          }
-          busy = false;
-          bag.setConsoleStatus("is-connected", `Connect\xE9 \xB7 ${shellSelect.value}`);
-          writePrompt();
-          return;
-        }
-        busy = true;
-        bag.setConsoleStatus("is-busy", "Ex\xE9cution\u2026");
-        try {
-          const res = await bag.Api.containerExec(containerId, trimmed, shellSelect.value, cwd, termSize());
-          writeOut((res.Stdout || "") + (res.Stderr || ""));
-        } catch (err) {
-          term.writeln(`\x1B[31m${err.message}\x1B[0m`);
-        }
-        busy = false;
-        bag.setConsoleStatus("is-connected", `Connect\xE9 \xB7 ${shellSelect.value}`);
-        writePrompt();
-      };
-      term.onData(async (data) => {
-        if (busy) return;
-        if (data === "\x1B[A") {
-          if (!history.length) return;
-          if (historyIdx < 0) historyIdx = history.length - 1;
-          else historyIdx = Math.max(0, historyIdx - 1);
-          while (buffer.length) {
-            term.write("\b \b");
-            buffer = buffer.slice(0, -1);
-          }
-          buffer = history[historyIdx];
-          term.write(buffer);
-          return;
-        }
-        if (data === "\x1B[B") {
-          while (buffer.length) {
-            term.write("\b \b");
-            buffer = buffer.slice(0, -1);
-          }
-          if (historyIdx < 0) return;
-          historyIdx += 1;
-          if (historyIdx >= history.length) {
-            historyIdx = -1;
-            buffer = "";
-            return;
-          }
-          buffer = history[historyIdx];
-          term.write(buffer);
-          return;
-        }
-        if (data === "\r") {
-          const line = buffer;
-          buffer = "";
-          historyIdx = -1;
-          term.write("\r\n");
-          if (line.trim()) history.push(line);
-          if (history.length > 100) history.shift();
-          await runLine(line);
-          return;
-        }
-        if (data === "") {
-          buffer = "";
-          term.write("^C\r\n");
-          writePrompt();
-          return;
-        }
-        if (data === "\f") {
-          term.clear();
-          writePrompt();
-          term.write(buffer);
-          return;
-        }
-        const code = data.charCodeAt(0);
-        if (code === 127 || data === "\x7F") {
-          if (buffer.length) {
-            buffer = buffer.slice(0, -1);
-            term.write("\b \b");
-          }
-          return;
-        }
-        if (code < 32) return;
-        buffer += data;
-        term.write(data);
+      term.onResize?.(() => {
+        if (bag.state.consoleResizeTimer) clearTimeout(bag.state.consoleResizeTimer);
+        bag.state.consoleResizeTimer = setTimeout(sendResize, 120);
       });
-      term.onDispose?.(() => window.removeEventListener("resize", onResize));
+      term.onDispose?.(() => {
+        window.removeEventListener("resize", onResize);
+        if (bag.state.consoleWs) {
+          try {
+            bag.state.consoleWs.close();
+          } catch (_) {
+          }
+          bag.state.consoleWs = null;
+        }
+      });
     };
     bag.containerAction = async function containerAction(id, act) {
       if (act === "start") await bag.Api.docker(`/containers/${id}/start`, { method: "POST" });
@@ -5217,7 +5376,7 @@ ${title}`;
         const usageCell = users.length ? `<button type="button" class="badge badge-inuse img-usage-btn" data-img-key="${bag.esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? "s" : ""}</button>` : `<span class="badge badge-unused">Inutilis\xE9</span>`;
         const cveCell = !cveOn || all ? "" : bag.cveStatusTd(img._primaryTag, img._scan);
         const search = `${bag.shortId(img.Id)} ${tags} ${img._nodeName || ""} ${users.length ? "utilise used" : "inutilise unused"}`.toLowerCase();
-        return `<tr data-search="${bag.esc(search)}">
+        return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(img.Id)}" data-resource-name="${bag.esc(tags)}">
         ${all ? "" : bag.bulkSelectTd(img.Id)}
         ${all ? `<td class="muted">${bag.esc(img._nodeName || "\u2014")}</td>` : ""}
         <td class="mono">${bag.esc(bag.shortId(img.Id))}</td>
@@ -5298,6 +5457,7 @@ ${title}`;
           reload: () => bag.viewImages()
         });
       }
+      bag.restoreListFocus();
     };
     bag.imageTagsLabel = function imageTagsLabel(img) {
       const tags = (img?.RepoTags || []).filter((t) => t && t !== "<none>:<none>");
@@ -5485,7 +5645,7 @@ ${title}`;
           del: isBind ? String(v.Id || "") : ""
         }) : ""}
       </div>`;
-        return `<tr data-search="${bag.esc(search)}" data-bind="${isBind ? "1" : "0"}" data-bind-id="${bag.esc(isBind ? v.Id || "" : "")}">
+        return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(v.Name)}" data-resource-name="${bag.esc(v.Name)}" data-bind="${isBind ? "1" : "0"}" data-bind-id="${bag.esc(isBind ? v.Id || "" : "")}">
       ${all ? "" : bag.bulkSelectTd(v.Name, { disabled: isBind, title: isBind ? "Les binds se retirent unitairement" : "" })}
       ${all ? `<td class="muted">${bag.esc(v._nodeName || "\u2014")}</td>` : ""}
       <td>${all ? bag.esc(v.Name) : `<a href="#volumes/${encodeURIComponent(v.Name)}">${bag.esc(v.Name)}</a>`}${isBind && v.StackName ? ` <span class="muted" style="font-size:11px">(${bag.esc(v.StackName)})</span>` : ""}</td>
@@ -5558,6 +5718,7 @@ ${title}`;
           });
         });
       }
+      bag.restoreListFocus();
     };
     bag.volumeBreadcrumbs = function volumeBreadcrumbs(volumeName, path) {
       const parts = String(path || "/").split("/").filter(Boolean);
@@ -6315,7 +6476,7 @@ ${title}`;
         const usageCell = users.length ? `<button type="button" class="badge badge-inuse img-usage-btn" data-net-key="${bag.esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? "s" : ""}</button>` : `<span class="badge badge-unused">Inutilis\xE9</span>`;
         const search = `${n.Id} ${n.Name} ${n.Driver} ${n.Scope} ${n._nodeName || ""} ${users.length ? "utilise used" : "inutilise unused"}`.toLowerCase();
         const isBuiltin = ["bridge", "host", "none"].includes(n.Name);
-        return `<tr data-search="${bag.esc(search)}">
+        return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(n.Id)}" data-resource-name="${bag.esc(n.Name || "")}">
       ${all ? "" : bag.bulkSelectTd(n.Id, { disabled: isBuiltin, title: "R\xE9seau syst\xE8me" })}
       ${all ? `<td class="muted">${bag.esc(n._nodeName || "\u2014")}</td>` : ""}
       <td class="mono">${bag.esc(bag.shortId(n.Id))}</td>
@@ -6385,6 +6546,7 @@ ${title}`;
           reload: () => bag.viewNetworks()
         });
       }
+      bag.restoreListFocus();
     };
     bag.containerNetworkEntries = function containerNetworkEntries(container) {
       const nets = container?.NetworkSettings?.Networks;
@@ -6469,7 +6631,7 @@ ${title}`;
         return `<tr>
         <td><a class="res-user-link" href="#containers/${bag.esc(c.Id)}">${bag.esc(name)}</a></td>
         <td class="mono">${bag.esc(entry?.ip || "\u2014")}</td>
-        <td>${bag.formatPorts(c.Ports || [])}</td>
+        <td>${bag.formatPorts(c.Ports || [], c._nodeId || bag.state.endpointId)}</td>
         <td>${bag.badge(c.State)}</td>
       </tr>`;
       }).join("");
@@ -6550,14 +6712,16 @@ ${title}`;
         const stLabel = stackStatusLabel(s.Status);
         const search = `${s.Id} ${s.Name} ${node} ${s.CreatedBy || ""} ${stLabel}`.toLowerCase();
         const isRunning = stLabel === "running";
-        const actions = bag.moreActions(
-          `${bag.iconBtn({ act: "start", id: s.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
-         ${bag.iconBtn({ act: "stop", id: s.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
-         ${bag.iconBtn({ act: "restart", id: s.Id, title: "Red\xE9marrer", icon: "restart" })}
-         ${bag.iconBtn({ act: "remove", id: s.Id, title: "Supprimer", icon: "remove", danger: true })}`,
-          `${bag.iconBtn({ tag: "a", href: `#stacks/${s.Id}`, title: "Ouvrir", icon: "edit", label: "Ouvrir" })}
-         ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "stack", shareKey: String(s.Id), label: "Partager" })}`
-        );
+        const actions = `<div class="quick-actions">
+        ${bag.iconBtn({ act: "start", id: s.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
+        ${bag.iconBtn({ act: "stop", id: s.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
+        ${bag.iconBtn({ act: "restart", id: s.Id, title: "Red\xE9marrer", icon: "restart" })}
+        ${bag.iconBtn({ act: "edit", id: s.Id, name: s.Name, title: "\xC9diteur", icon: "edit", info: true })}
+        ${bag.iconBtn({ act: "redeploy", id: s.Id, title: "Pull images + red\xE9ployer", icon: "pull" })}
+        ${bag.iconBtn({ tag: "a", href: `#stacks/${s.Id}`, title: "D\xE9tail", icon: "inspect" })}
+        ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "stack", shareKey: String(s.Id) })}
+        ${bag.iconBtn({ act: "remove", id: s.Id, title: "Supprimer", icon: "remove", danger: true })}
+      </div>`;
         const rowCls = isRunning ? "" : "row-stopped";
         return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-stack-id="${bag.esc(s.Id)}">
       ${bag.bulkSelectTd(s.Id)}
@@ -6567,8 +6731,13 @@ ${title}`;
         <span class="id">#${bag.esc(s.Id)}</span>
       </td>
       <td>${bag.badge(stLabel)}</td>
-      <td class="img-upd-cell" data-upd="${bag.esc(s.Id)}">
-        <span class="img-upd is-loading" title="V\xE9rification des images\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>
+      <td class="mono cell-clip cell-image" title="Images Compose">
+        <span class="img-with-upd">
+          <span class="img-upd-slot" data-upd="${bag.esc(s.Id)}">
+            <span class="img-upd is-loading img-upd-dot-only" title="V\xE9rification des images\u2026"><span class="img-upd-dot"></span></span>
+          </span>
+          <span class="img-name" data-upd-imgs="${bag.esc(s.Id)}">\u2026</span>
+        </span>
       </td>
       <td>${bag.esc(s.CreatedBy || "")}</td>
       <td>${bag.formatCreated(s.CreationDate)}</td>
@@ -6596,7 +6765,7 @@ ${title}`;
           ${all ? bag.sortTh("N\u0153ud", "node", "stacks") : ""}
           ${bag.sortTh("Nom", "name", "stacks")}
           ${bag.sortTh("\xC9tat", "state", "stacks")}
-          <th title="Images du registre">Images</th>
+          <th title="Images du registre">Image</th>
           ${bag.sortTh("Cr\xE9\xE9 par", "owner", "stacks")}
           ${bag.sortTh("Cr\xE9\xE9", "created", "stacks")}
           <th>Actions</th>
@@ -6613,11 +6782,28 @@ ${title}`;
         const confirmMsg = act === "remove" ? "Supprimer la stack et ses conteneurs ?" : null;
         bag.onBusyClick(btn, async (el) => {
           const id = el.dataset.id;
+          if (act === "edit") {
+            const [stack, file] = await Promise.all([bag.Api.stack(id), bag.Api.stackFile(id)]);
+            bag.showStackEditor({
+              Id: stack.Id,
+              Name: stack.Name || el.dataset.name || "",
+              content: file.StackFileContent || "",
+              Env: stack.Env || []
+            });
+            return "navigated";
+          }
+          if (act === "redeploy") {
+            await bag.upgradeStackImages(id);
+            return;
+          }
           if (act === "start") await bag.Api.startStack(id);
           else if (act === "stop") await bag.Api.stopStack(id);
           else if (act === "restart") await bag.Api.restartStack(id);
           else if (act === "remove") await bag.Api.deleteStack(id);
-        }, { confirm: confirmMsg, reload: true });
+        }, {
+          confirm: confirmMsg || (act === "redeploy" ? "Pull des images et red\xE9ploiement de la stack ?" : null),
+          reload: act !== "edit"
+        });
       });
       bag.bindBulkDelete({
         enabled: true,
@@ -6627,12 +6813,24 @@ ${title}`;
         reload: () => bag.viewStacks()
       });
       document.getElementById("stack-upd-refresh")?.addEventListener("click", () => {
-        bag.root.querySelectorAll("[data-upd]").forEach((cell) => {
-          cell.innerHTML = `<span class="img-upd is-loading" title="V\xE9rification\u2026"><span class="img-upd-dot"></span><span class="img-upd-lbl">\u2026</span></span>`;
+        bag.root.querySelectorAll("[data-upd-imgs]").forEach((el) => {
+          el.textContent = "\u2026";
+          el.title = "";
+        });
+        bag.root.querySelectorAll("[data-upd]").forEach((slot) => {
+          slot.innerHTML = `<span class="img-upd is-loading img-upd-dot-only" title="V\xE9rification\u2026"><span class="img-upd-dot"></span></span>`;
         });
         bag.loadStackUpdateIndicators(true);
       });
       bag.loadStackUpdateIndicators(false);
+      bag.restoreListFocus();
+    };
+    bag.formatImageListLabel = function formatImageListLabel(images) {
+      const names = (images || []).map((i) => (typeof i === "string" ? i : i?.Image || "").trim()).filter(Boolean);
+      if (!names.length) return "\u2014";
+      if (names.length === 1) return names[0];
+      if (names.length === 2) return `${names[0]}, ${names[1]}`;
+      return `${names[0]} +${names.length - 1}`;
     };
     bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
       const st = status || "unknown";
@@ -6641,13 +6839,15 @@ ${title}`;
       const tip = st === "update" && opts.action ? `${title || label}
 
 Cliquer pour tirer les images et red\xE9ployer` : title || label;
-      const inner = `<span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span>`;
+      const dotOnly = !!opts.dotOnly;
+      const inner = dotOnly ? `<span class="img-upd-dot"></span>` : `<span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span>`;
+      const extraCls = dotOnly ? " img-upd-dot-only" : "";
       if (st === "update" && opts.action && opts.id != null) {
-        return `<button type="button" class="img-upd ${cls} img-upd-action"
+        return `<button type="button" class="img-upd ${cls} img-upd-action${extraCls}"
         data-upd-action="${bag.esc(opts.action)}" data-upd-id="${bag.esc(String(opts.id))}"
         title="${bag.esc(tip)}" aria-label="${bag.esc(label)}">${inner}</button>`;
       }
-      return `<span class="img-upd ${cls}" title="${bag.esc(tip)}">${inner}</span>`;
+      return `<span class="img-upd ${cls}${extraCls}" title="${bag.esc(tip)}">${inner}</span>`;
     };
     bag.upgradeStackImages = async function upgradeStackImages(stackId) {
       const id = String(stackId || "");
@@ -6694,23 +6894,31 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         bag.onBusyClick(btn, async (el) => {
           const kind = el.dataset.updAction;
           const targetId = el.dataset.updId;
+          const focus = bag.captureListFocus(el);
           await bag.upgradeImageUpdateTarget(kind, targetId);
           const route = String(bag.state.route || "");
           if (route.startsWith("stacks/") && route !== "stacks/new") {
             const sid = route.split("/")[1];
-            if (sid) await bag.viewStackDetail(sid);
+            if (sid) {
+              await bag.viewStackDetail(sid);
+              bag.restoreListFocus(focus);
+            }
             return;
           }
           if (route === "stacks") {
             await bag.loadStackUpdateIndicators(true);
+            bag.restoreListFocus(focus);
             return;
           }
           if (route.startsWith("containers/") && route !== "containers/new") {
+            bag.rememberListFocus(focus);
             await bag.route();
+            bag.restoreListFocus(focus);
             return;
           }
           if (route === "containers") {
             await bag.loadContainerUpdateIndicators(true);
+            bag.restoreListFocus(focus);
           }
         }, { confirm: confirmMsg, minMs: 400 });
       });
@@ -6720,32 +6928,44 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         const data = await bag.Api.stackUpdates(!!refresh);
         const map = data?.Updates || {};
         Object.keys(map).forEach((id) => {
-          const cell = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
-          if (!cell) return;
+          const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
+          const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);
+          if (!slot) return;
           const u = map[id] || {};
           const imgs = u.Images || [];
+          const imgLabel = bag.formatImageListLabel(imgs);
           const lines = imgs.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`);
           let title = lines.length ? lines.join("\n") : u.Error || "Aucun contr\xF4le";
           if (u.FromCache && u.CheckedAt) {
             title += `
 (cache \xB7 v\xE9rifi\xE9 ${new Date(u.CheckedAt * 1e3).toLocaleString()})`;
           }
-          cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+          if (nameEl) {
+            nameEl.textContent = imgLabel;
+            nameEl.title = lines.length ? imgs.map((i) => `${i.Service}: ${i.Image}`).join("\n") : imgLabel;
+            const cell = nameEl.closest("td");
+            if (cell) cell.title = nameEl.title || imgLabel;
+          }
+          slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
             action: "stack",
-            id
+            id,
+            dotOnly: true
           });
         });
         bag.root.querySelectorAll("[data-upd] .img-upd.is-loading").forEach((el) => {
-          el.className = "img-upd is-unknown";
+          el.className = "img-upd is-unknown img-upd-dot-only";
           el.title = "Contr\xF4le indisponible";
-          const lbl = el.querySelector(".img-upd-lbl");
-          if (lbl) lbl.textContent = "\u2014";
-          else el.insertAdjacentHTML("beforeend", '<span class="img-upd-lbl">\u2014</span>');
+        });
+        bag.root.querySelectorAll("[data-upd-imgs]").forEach((el) => {
+          if (el.textContent === "\u2026") el.textContent = "\u2014";
         });
         bag.bindImageUpdateActions(bag.root);
       } catch {
-        bag.root.querySelectorAll("[data-upd]").forEach((cell) => {
-          cell.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible");
+        bag.root.querySelectorAll("[data-upd-imgs]").forEach((el) => {
+          el.textContent = "\u2014";
+        });
+        bag.root.querySelectorAll("[data-upd]").forEach((slot) => {
+          slot.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible", { dotOnly: true });
         });
       }
     };
@@ -6969,7 +7189,7 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
 
       <div class="actions-bar">
         <button class="btn btn-primary" id="stack-save">${isEdit ? "Mettre \xE0 jour la stack" : "D\xE9ployer la stack"}</button>
-        <a class="btn" href="#stacks" style="margin-left:8px">Annuler</a>
+        <button type="button" class="btn" id="stack-cancel" style="margin-left:8px">Annuler</button>
       </div>
     `);
       const envList = document.getElementById("env-list");
@@ -7095,9 +7315,15 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
             }
             return;
           }
-          if (isEdit) await bag.Api.updateStack(existing.Id, content, Env, pullImages);
-          else await bag.Api.createStack(name, content, Env, pullImages);
-          location.hash = "#stacks";
+          if (isEdit) {
+            bag.rememberListFocus({ id: String(existing.Id), name: existing.Name || name || "", y: 0 });
+            await bag.Api.updateStack(existing.Id, content, Env, pullImages);
+          } else {
+            await bag.Api.createStack(name, content, Env, pullImages);
+          }
+          const cur = (location.hash || "").replace(/^#/, "") || "stacks";
+          if (cur === "stacks") await bag.viewStacks();
+          else location.hash = "#stacks";
         } catch (err) {
           if (errBox) {
             errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
@@ -7107,6 +7333,14 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
           }
         }
       }, { disableSiblings: false, minMs: 400 });
+      document.getElementById("stack-cancel")?.addEventListener("click", () => {
+        const cur = (location.hash || "").replace(/^#/, "") || "stacks";
+        if (cur === "stacks") {
+          bag.viewStacks();
+          return;
+        }
+        location.hash = "#stacks";
+      });
     };
     bag.schedActionLabel = function schedActionLabel(action) {
       const map = { start: "D\xE9marrer", stop: "Arr\xEAter", restart: "Red\xE9marrer" };
@@ -7367,13 +7601,15 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
       if (editBtn) {
         editBtn.onclick = () => bag.showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
       }
-      bag.onBusyClick(document.getElementById("stack-pull-redeploy"), async () => {
+      bag.onBusyClick(document.getElementById("stack-pull-redeploy"), async (el) => {
         const errBox = document.getElementById("stack-detail-err");
+        const focus = bag.captureListFocus(el);
         if (errBox) errBox.innerHTML = "";
         try {
           await bag.Api.updateStack(stack.Id, file.StackFileContent || "", stack.Env || [], true);
           if (errBox) errBox.innerHTML = `<div class="info-box">Images tir\xE9es et stack red\xE9ploy\xE9e.</div>`;
           await bag.viewStackDetail(id);
+          bag.restoreListFocus(focus);
         } catch (err) {
           if (errBox) errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
         }
@@ -7385,15 +7621,17 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         const confirmMsg = act === "remove" ? "Supprimer la stack et ses conteneurs ?" : null;
         bag.onBusyClick(btn, async (el) => {
           const sid = el.dataset.id;
+          const focus = bag.captureListFocus(el);
           if (act === "start") await bag.Api.startStack(sid);
           else if (act === "stop") await bag.Api.stopStack(sid);
           else if (act === "restart") await bag.Api.restartStack(sid);
           else if (act === "remove") {
             await bag.Api.deleteStack(sid);
             location.hash = "#stacks";
-            return;
+            return "navigated";
           }
           await bag.viewStackDetail(id);
+          bag.restoreListFocus(focus);
         }, { confirm: confirmMsg, minMs: 300 });
       });
       const renderSchedules = async () => {
@@ -7478,29 +7716,50 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
             </td>
             <td>${bag.badge(c.State)}</td>
             <td class="mono">${bag.esc(c.Image || "")}</td>
-            <td>${bag.formatPorts(c.Ports || [])}</td>
+            <td>${bag.formatPorts(c.Ports || [], ep)}</td>
             <td class="actions"><div class="quick-actions">
               ${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
               ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
               ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
+              ${bag.iconBtn({
+              modal: "stats",
+              id: c.Id,
+              name,
+              running: isRunning,
+              title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
+              icon: "stats",
+              statsId: c.Id,
+              extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
+            })}
+              ${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs", icon: "logs" })}
+              ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console" })}
+              ${bag.iconBtn({ modal: "inspect", id: c.Id, name, running: isRunning, title: "Inspecter", icon: "inspect" })}
+              ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || c.Id })}
+              ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}
             </div></td>
           </tr>`;
           }).join("");
+          const nid = Number(stack.EndpointId) || bag.Api.getEndpointId();
+          if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
           tb.querySelectorAll("[data-switch-node]").forEach((a) => {
             a.addEventListener("click", () => {
-              const nid = parseInt(a.getAttribute("data-switch-node"), 10);
-              if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+              const n = parseInt(a.getAttribute("data-switch-node"), 10);
+              if (Number.isFinite(n) && n > 0) bag.Api.setEndpointId(n);
             });
           });
           bag.bindModalActions(tb);
+          bag.bindShareButtons(tb);
           tb.querySelectorAll("[data-act]").forEach((btn) => {
             const act = btn.dataset.act;
             bag.onBusyClick(btn, async (el) => {
-              const nid = Number(stack.EndpointId) || bag.Api.getEndpointId();
-              if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+              const n = Number(stack.EndpointId) || bag.Api.getEndpointId();
+              if (Number.isFinite(n) && n > 0) bag.Api.setEndpointId(n);
               await bag.containerAction(el.dataset.id, act);
               await renderStackContainers();
-            }, { minMs: 300 });
+            }, {
+              confirm: act === "remove" ? "Supprimer ce conteneur ?" : null,
+              minMs: 300
+            });
           });
         } catch (err) {
           tb.innerHTML = `<tr><td colspan="6" class="error-box">${bag.esc(err.message || "Impossible de lister les conteneurs")}</td></tr>`;
@@ -7871,9 +8130,9 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
           <label class="check-row"><input type="checkbox" id="n-clear-pin"> Forcer le reset de l\u2019empreinte TLS</label>
           ` : ""}
           <div class="form-group">
-            <label class="field-label">URL publique (optionnel)</label>
+            <label class="field-label">URL h\xF4te des ports (optionnel)</label>
             <input id="n-public-url" value="${bag.esc(node.PublicURL || "")}" placeholder="https://nas.lan" autocomplete="off" spellcheck="false">
-            <p class="field-hint muted">Utilis\xE9e pour les liens de ports publi\xE9s sur ce n\u0153ud.</p>
+            <p class="field-hint muted">Surcharge l\u2019\xAB URL h\xF4te des ports \xBB globale pour les liens cliquables de ce n\u0153ud (pas l\u2019URL WharfMaster).</p>
           </div>
           <div class="actions-bar">
             <button type="button" class="btn btn-primary" id="n-save">Enregistrer</button>
@@ -8363,7 +8622,8 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
       } catch (_) {
         settings = {};
       }
-      bag.state.publicUrl = settings.PublicURL || settings.HostURL || bag.state.publicUrl || "";
+      bag.state.publicUrl = settings.PublicURL || bag.state.publicUrl || "";
+      bag.state.portsHostUrl = settings.PortsHostURL || settings.HostURL || bag.state.portsHostUrl || "";
       if (settings.TrivyEnabled != null) bag.state.trivyEnabled = !!settings.TrivyEnabled;
       const fallback = `${window.location.protocol}//${window.location.hostname}`;
       const chartHours = bag.metricChartHours();
@@ -8374,26 +8634,24 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
       ${bag.settingsSubnav("settings")}
       <div id="settings-err"></div>
       <div class="panel" style="max-width:720px; margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">Apparence</div>
-        <p class="muted" style="margin:0 0 14px">Basculer entre le th\xE8me clair et sombre. La pr\xE9f\xE9rence est enregistr\xE9e dans ce navigateur.</p>
-        <div class="toolbar" style="margin:0">
-          <button type="button" class="btn ${bag.state.theme === "dark" ? "btn-info" : ""}" id="theme-dark">Sombre</button>
-          <button type="button" class="btn ${bag.state.theme === "light" ? "btn-info" : ""}" id="theme-light">Clair</button>
-        </div>
-      </div>
-      <div class="panel" style="max-width:720px; margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">URL publique / h\xF4te</div>
+        <div class="section-title" style="margin-top:0">URLs (r\xF4les distincts)</div>
         <p class="muted" style="margin:0 0 14px">
-          URL de base utilis\xE9e pour ouvrir les ports publi\xE9s (liens dans Conteneurs).
-          Laisser vide pour utiliser l'h\xF4te du navigateur (<code>${bag.esc(fallback)}</code>).
+          Deux adresses diff\xE9rentes : celle de la console WharfMaster (script d\u2019ajout de n\u0153uds),
+          et celle de l\u2019h\xF4te Docker pour les liens de ports publi\xE9s.
         </p>
         <div class="form-group">
-          <label class="field-label">URL publique</label>
-          <input id="public-url" type="text" placeholder="https://docker.example.com" value="${bag.esc(bag.state.publicUrl)}">
+          <label class="field-label">URL WharfMaster</label>
+          <input id="public-url" type="text" placeholder="https://dockermanager.example.com" value="${bag.esc(bag.state.publicUrl)}">
+          <p class="field-hint muted">Utilis\xE9e dans la commande <code>install.sh</code> / <code>--url</code> pour enr\xF4ler un agent. Vide = origine du navigateur.</p>
+        </div>
+        <div class="form-group">
+          <label class="field-label">URL h\xF4te des ports</label>
+          <input id="ports-host-url" type="text" placeholder="https://nas.lan" value="${bag.esc(bag.state.portsHostUrl)}">
+          <p class="field-hint muted">Base des liens cliquables dans Conteneurs / Stacks. Un n\u0153ud peut surcharger via son \xAB URL publique \xBB. Vide = <code>${bag.esc(fallback)}</code>.</p>
         </div>
         <div class="info-box">
-          Exemple : avec l'URL publique <code>https://nas.lan</code>, un port publi\xE9 <code>8080</code> devient
-          <code>https://nas.lan:8080</code>.
+          Exemple ports : <code>https://nas.lan</code> + port <code>8080</code> \u2192 <code>https://nas.lan:8080</code>.
+          Exemple agent : <code>https://dockermanager.example.com</code> dans <code>curl \u2026/agent/install.sh</code>.
         </div>
       </div>
       <div class="panel" style="max-width:720px; margin-bottom:16px">
@@ -8448,16 +8706,9 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         <p class="muted" id="backup-status" style="margin:10px 0 0;font-size:12px"></p>
       </div>` : ""}
     `);
-      document.getElementById("theme-dark").onclick = () => {
-        bag.state.theme = bag.applyTheme("dark");
-        bag.route();
-      };
-      document.getElementById("theme-light").onclick = () => {
-        bag.state.theme = bag.applyTheme("light");
-        bag.route();
-      };
       bag.onBusyClick(document.getElementById("save-settings"), async () => {
-        const value = document.getElementById("public-url").value.trim();
+        const publicUrl = document.getElementById("public-url").value.trim();
+        const portsHostUrl = document.getElementById("ports-host-url").value.trim();
         const hours = parseInt(document.getElementById("metrics-chart-hours").value, 10);
         const days = parseInt(document.getElementById("metrics-retention-days").value, 10);
         const errBox = document.getElementById("settings-err");
@@ -8472,7 +8723,8 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         }
         const trivyEl = document.getElementById("trivy-enabled");
         const payload = {
-          PublicURL: value,
+          PublicURL: publicUrl,
+          PortsHostURL: portsHostUrl,
           MetricsChartHours: hours,
           MetricsRetentionDays: days
         };
@@ -8480,6 +8732,7 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         try {
           const saved = await bag.Api.updateSettings(payload);
           bag.state.publicUrl = saved.PublicURL || "";
+          bag.state.portsHostUrl = saved.PortsHostURL || saved.HostURL || "";
           bag.state.metricsChartHours = Number(saved.MetricsChartHours) || hours;
           bag.state.metricsRetentionDays = Number(saved.MetricsRetentionDays) || days;
           if (saved.TrivyEnabled != null) bag.state.trivyEnabled = !!saved.TrivyEnabled;
@@ -8612,12 +8865,14 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
     bag.loadPublicUrl = async function loadPublicUrl() {
       try {
         const s = await bag.Api.settings();
-        bag.state.publicUrl = s.PublicURL || s.HostURL || "";
+        bag.state.publicUrl = s.PublicURL || "";
+        bag.state.portsHostUrl = s.PortsHostURL || s.HostURL || "";
         if (s.MetricsChartHours != null) bag.state.metricsChartHours = Number(s.MetricsChartHours) || 72;
         if (s.MetricsRetentionDays != null) bag.state.metricsRetentionDays = Number(s.MetricsRetentionDays) || 90;
         if (s.TrivyEnabled != null) bag.state.trivyEnabled = !!s.TrivyEnabled;
       } catch (_) {
         bag.state.publicUrl = "";
+        bag.state.portsHostUrl = "";
       }
     };
   }
@@ -9275,7 +9530,7 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.0", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.1", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");

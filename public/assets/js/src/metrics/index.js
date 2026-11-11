@@ -70,18 +70,28 @@ export function install() {
     return bag.loadMetricHistory(scope);
   }
 
-  /** Multi-series resource chart (0–100 %). */
+  /** Multi-series resource chart. Default scale 0–100 %; pass maxY for absolute counts. */
 
   bag.resourceChart = function resourceChart(series, opts = {}) {
     const w = 320;
     const h = 88;
     const padY = 4;
-    const yAt = (pct) => padY + (1 - Math.max(0, Math.min(100, pct)) / 100) * (h - padY * 2);
     const keys = opts.keys || [
       { key: 'cpu', color: '#3b82f6', label: 'CPU' },
       { key: 'mem', color: '#22c55e', label: 'Mémoire' },
       { key: 'disk', color: '#fb923c', label: 'Disque' },
     ];
+    let maxY = Number(opts.maxY);
+    if (!Number.isFinite(maxY) || maxY <= 0) {
+      maxY = 100;
+      keys.forEach(({ key }) => {
+        const vals = bag.metricValues(series, key);
+        vals.forEach((v) => { if (v > maxY && opts.autoScale) maxY = v; });
+      });
+      if (!opts.autoScale) maxY = 100;
+    }
+    maxY = Math.max(1, maxY);
+    const yAt = (v) => padY + (1 - Math.max(0, Math.min(maxY, Number(v) || 0)) / maxY) * (h - padY * 2);
     const wrapId = opts.wrapId || 'host-wave-wrap';
     const n = Math.max(1, (series || []).length);
     const paths = keys.map(({ key, color }) => {
@@ -95,34 +105,38 @@ export function install() {
       });
       if (coords.length === 1) {
         const y = coords[0][1];
-        return `<path d="M0 ${y.toFixed(2)} L${w} ${y.toFixed(2)}" fill="none" stroke="${color}" stroke-width="2"/>`;
+        return `<path d="M0 ${y.toFixed(2)} L${w} ${y.toFixed(2)}" fill="none" stroke="${color}" stroke-width="2.4"/>`;
       }
       const d = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c[0].toFixed(2)} ${c[1].toFixed(2)}`).join(' ');
-      return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+      return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>`;
     }).join('');
     const labels = keys.map((k) => k.label).join(' / ');
+    const isPct = !opts.maxY && !opts.autoScale;
     const title = n < 2
-      ? 'Historique ressources en construction'
-      : `Évolution ${labels} — ${n} relevés (échelle 0–100 %)`;
+      ? 'Historique en construction'
+      : `Évolution ${labels} — ${n} relevés`;
     const legend = keys.map(({ color, label }) =>
       `<span class="wave-leg"><i style="background:${color}"></i>${bag.esc(label)}</span>`
     ).join('');
-    const y100 = yAt(100).toFixed(1);
-    const y50 = yAt(50).toFixed(1);
-    const y0 = yAt(0).toFixed(1);
+    const topLbl = isPct ? '100%' : String(Math.round(maxY));
+    const midLbl = isPct ? '50%' : String(Math.round(maxY / 2));
+    const botLbl = isPct ? '0%' : '0';
+    const yTop = yAt(maxY).toFixed(1);
+    const yMid = yAt(maxY / 2).toFixed(1);
+    const yBot = yAt(0).toFixed(1);
     return `<div class="wave-wrap" id="${bag.esc(wrapId)}">
       <div class="wave-head"><span class="stat-hint" title="Fenêtre configurable dans Paramètres">Courbes · ${bag.esc(bag.metricWindowLabel())} · rétention ${bag.esc(String(bag.metricRetentionDays()))} j</span></div>
       <div class="wave-plot">
         <div class="wave-y" aria-hidden="true">
-          <span>100%</span>
-          <span>50%</span>
-          <span>0%</span>
+          <span>${bag.esc(topLbl)}</span>
+          <span>${bag.esc(midLbl)}</span>
+          <span>${bag.esc(botLbl)}</span>
         </div>
         <svg class="wave-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${bag.esc(title)}">
           <title>${bag.esc(title)}</title>
-          <line x1="0" y1="${y100}" x2="${w}" y2="${y100}" class="wave-grid"/>
-          <line x1="0" y1="${y50}" x2="${w}" y2="${y50}" class="wave-grid"/>
-          <line x1="0" y1="${y0}" x2="${w}" y2="${y0}" class="wave-grid"/>
+          <line x1="0" y1="${yTop}" x2="${w}" y2="${yTop}" class="wave-grid"/>
+          <line x1="0" y1="${yMid}" x2="${w}" y2="${yMid}" class="wave-grid"/>
+          <line x1="0" y1="${yBot}" x2="${w}" y2="${yBot}" class="wave-grid"/>
           ${paths}
         </svg>
       </div>
@@ -424,6 +438,7 @@ export function install() {
   }
 
   bag.updateDashStatCards = function updateDashStatCards(series, counts) {
+    bag._dashMetricSeries = series;
     const map = [
       ['containers', 'blue'],
       ['images', 'purple'],
@@ -435,11 +450,79 @@ export function install() {
       if (!card) return;
       const val = card.querySelector('.stat-value');
       const delta = card.querySelector('.stat-delta');
-      const spark = card.querySelector('.sparkline');
+      const sparkBtn = card.querySelector('.sparkline-btn');
+      const spark = sparkBtn?.querySelector('.sparkline') || card.querySelector('.sparkline');
       if (val && counts && counts[key] != null) val.textContent = String(counts[key]);
       if (delta) delta.outerHTML = bag.metricDeltaHtml(series, key);
       if (spark) spark.outerHTML = bag.sparklineFromValues(bag.metricValues(series, key), tone);
     });
+  }
+
+  bag.bindDashMetricSparklines = function bindDashMetricSparklines(series) {
+    bag._dashMetricSeries = series || bag.getMetricSeries();
+    bag.root.querySelectorAll('[data-metric-detail]').forEach((btn) => {
+      if (btn.dataset.boundDetail === '1') return;
+      btn.dataset.boundDetail = '1';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const key = btn.dataset.metricDetail;
+        bag.openMetricDetailModal(key, bag._dashMetricSeries || bag.getMetricSeries());
+      });
+    });
+  }
+
+  bag.openMetricDetailModal = function openMetricDetailModal(key, series) {
+    const meta = bag.dashMetricMeta?.[key] || {
+      label: key,
+      tone: 'blue',
+      color: '#38bdf8',
+      href: `#${key}`,
+    };
+    const vals = bag.metricValues(series, key);
+    const n = vals.length;
+    const last = n ? vals[n - 1] : 0;
+    const max = n ? Math.max(...vals) : 0;
+    const min = n ? Math.min(...vals) : 0;
+    const avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
+    const delta = n >= 2 ? vals[n - 1] - vals[n - 2] : 0;
+    const chart = bag.resourceChart(series, {
+      wrapId: 'metric-detail-wave',
+      keys: [{ key, color: meta.color, label: meta.label }],
+      maxY: Math.max(max, 1) * 1.15,
+    });
+
+    bag.closeAppModal();
+    const host = bag.modalHost();
+    host.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal modal-form-wide" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div class="metric-detail-head">
+              <div class="stat-ico ${bag.esc(meta.tone)}">${bag.ico(key === 'networks' ? 'networks' : key)}</div>
+              <div>
+                <h3>${bag.esc(meta.label)}</h3>
+                <div class="modal-sub">Historique · ${bag.esc(bag.metricWindowLabel())} · rétention ${bag.esc(String(bag.metricRetentionDays()))} j</div>
+              </div>
+            </div>
+            <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
+          </div>
+          <div class="metric-detail-kpis">
+            <div class="metric-kpi"><span class="muted">Actuel</span><strong>${last}</strong></div>
+            <div class="metric-kpi"><span class="muted">Min</span><strong>${min}</strong></div>
+            <div class="metric-kpi"><span class="muted">Max</span><strong>${max}</strong></div>
+            <div class="metric-kpi"><span class="muted">Moyenne</span><strong>${avg.toFixed(1)}</strong></div>
+            <div class="metric-kpi"><span class="muted">Δ dernier</span><strong class="${delta > 0 ? 'ok' : delta < 0 ? 'bad' : ''}">${delta > 0 ? '+' : ''}${delta}</strong></div>
+            <div class="metric-kpi"><span class="muted">Relevés</span><strong>${n}</strong></div>
+          </div>
+          <div class="metric-detail-chart">${chart}</div>
+          <div class="actions-bar">
+            <a class="btn btn-primary" href="${bag.esc(meta.href)}">Ouvrir ${bag.esc(meta.label)}</a>
+            <button type="button" class="btn" data-close-modal>Fermer</button>
+          </div>
+        </div>
+      </div>`;
+    bag.bindAppModalChrome();
   }
 
   bag.updateHostResourceChart = function updateHostResourceChart(series, counts) {

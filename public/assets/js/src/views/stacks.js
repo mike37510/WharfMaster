@@ -31,14 +31,16 @@ export function install() {
       const search = `${s.Id} ${s.Name} ${node} ${s.CreatedBy || ''} ${stLabel}`.toLowerCase();
       // Actions toujours disponibles (API liée à l’id stack / son nœud)
       const isRunning = stLabel === 'running';
-      const actions = bag.moreActions(
-        `${bag.iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
-         ${bag.iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
-         ${bag.iconBtn({ act: 'restart', id: s.Id, title: 'Redémarrer', icon: 'restart' })}
-         ${bag.iconBtn({ act: 'remove', id: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}`,
-        `${bag.iconBtn({ tag: 'a', href: `#stacks/${s.Id}`, title: 'Ouvrir', icon: 'edit', label: 'Ouvrir' })}
-         ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'stack', shareKey: String(s.Id), label: 'Partager' })}`,
-      );
+      const actions = `<div class="quick-actions">
+        ${bag.iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
+        ${bag.iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
+        ${bag.iconBtn({ act: 'restart', id: s.Id, title: 'Redémarrer', icon: 'restart' })}
+        ${bag.iconBtn({ act: 'edit', id: s.Id, name: s.Name, title: 'Éditeur', icon: 'edit', info: true })}
+        ${bag.iconBtn({ act: 'redeploy', id: s.Id, title: 'Pull images + redéployer', icon: 'pull' })}
+        ${bag.iconBtn({ tag: 'a', href: `#stacks/${s.Id}`, title: 'Détail', icon: 'inspect' })}
+        ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'stack', shareKey: String(s.Id) })}
+        ${bag.iconBtn({ act: 'remove', id: s.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+      </div>`;
       const rowCls = isRunning ? '' : 'row-stopped';
       return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-stack-id="${bag.esc(s.Id)}">
       ${bag.bulkSelectTd(s.Id)}
@@ -48,8 +50,13 @@ export function install() {
         <span class="id">#${bag.esc(s.Id)}</span>
       </td>
       <td>${bag.badge(stLabel)}</td>
-      <td class="img-upd-cell" data-upd="${bag.esc(s.Id)}">
-        <span class="img-upd is-loading" title="Vérification des images…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>
+      <td class="mono cell-clip cell-image" title="Images Compose">
+        <span class="img-with-upd">
+          <span class="img-upd-slot" data-upd="${bag.esc(s.Id)}">
+            <span class="img-upd is-loading img-upd-dot-only" title="Vérification des images…"><span class="img-upd-dot"></span></span>
+          </span>
+          <span class="img-name" data-upd-imgs="${bag.esc(s.Id)}">…</span>
+        </span>
       </td>
       <td>${bag.esc(s.CreatedBy || '')}</td>
       <td>${bag.formatCreated(s.CreationDate)}</td>
@@ -77,7 +84,7 @@ export function install() {
           ${all ? bag.sortTh('Nœud', 'node', 'stacks') : ''}
           ${bag.sortTh('Nom', 'name', 'stacks')}
           ${bag.sortTh('État', 'state', 'stacks')}
-          <th title="Images du registre">Images</th>
+          <th title="Images du registre">Image</th>
           ${bag.sortTh('Créé par', 'owner', 'stacks')}
           ${bag.sortTh('Créé', 'created', 'stacks')}
           <th>Actions</th>
@@ -94,11 +101,29 @@ export function install() {
       const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;
       bag.onBusyClick(btn, async (el) => {
         const id = el.dataset.id;
+        if (act === 'edit') {
+          const [stack, file] = await Promise.all([bag.Api.stack(id), bag.Api.stackFile(id)]);
+          bag.showStackEditor({
+            Id: stack.Id,
+            Name: stack.Name || el.dataset.name || '',
+            content: file.StackFileContent || '',
+            Env: stack.Env || [],
+          });
+          return 'navigated';
+        }
+        if (act === 'redeploy') {
+          await bag.upgradeStackImages(id);
+          return;
+        }
         if (act === 'start') await bag.Api.startStack(id);
         else if (act === 'stop') await bag.Api.stopStack(id);
         else if (act === 'restart') await bag.Api.restartStack(id);
         else if (act === 'remove') await bag.Api.deleteStack(id);
-      }, { confirm: confirmMsg, reload: true });
+      }, {
+        confirm: confirmMsg
+          || (act === 'redeploy' ? 'Pull des images et redéploiement de la stack ?' : null),
+        reload: act !== 'edit',
+      });
     });
     bag.bindBulkDelete({
       enabled: true,
@@ -108,12 +133,25 @@ export function install() {
       reload: () => bag.viewStacks(),
     });
     document.getElementById('stack-upd-refresh')?.addEventListener('click', () => {
-      bag.root.querySelectorAll('[data-upd]').forEach((cell) => {
-        cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>`;
+      bag.root.querySelectorAll('[data-upd-imgs]').forEach((el) => { el.textContent = '…'; el.title = ''; });
+      bag.root.querySelectorAll('[data-upd]').forEach((slot) => {
+        slot.innerHTML = `<span class="img-upd is-loading img-upd-dot-only" title="Vérification…"><span class="img-upd-dot"></span></span>`;
       });
       bag.loadStackUpdateIndicators(true);
     });
     bag.loadStackUpdateIndicators(false);
+    bag.restoreListFocus();
+  }
+
+  /** Compact image label for list cells (same idea for stacks & containers). */
+  bag.formatImageListLabel = function formatImageListLabel(images) {
+    const names = (images || [])
+      .map((i) => (typeof i === 'string' ? i : (i?.Image || '')).trim())
+      .filter(Boolean);
+    if (!names.length) return '—';
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return `${names[0]}, ${names[1]}`;
+    return `${names[0]} +${names.length - 1}`;
   }
 
   bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
@@ -125,13 +163,17 @@ export function install() {
     const tip = st === 'update' && opts.action
       ? `${title || label}\n\nCliquer pour tirer les images et redéployer`
       : (title || label);
-    const inner = `<span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span>`;
+    const dotOnly = !!opts.dotOnly;
+    const inner = dotOnly
+      ? `<span class="img-upd-dot"></span>`
+      : `<span class="img-upd-dot"></span><span class="img-upd-lbl">${bag.esc(label)}</span>`;
+    const extraCls = dotOnly ? ' img-upd-dot-only' : '';
     if (st === 'update' && opts.action && opts.id != null) {
-      return `<button type="button" class="img-upd ${cls} img-upd-action"
+      return `<button type="button" class="img-upd ${cls} img-upd-action${extraCls}"
         data-upd-action="${bag.esc(opts.action)}" data-upd-id="${bag.esc(String(opts.id))}"
         title="${bag.esc(tip)}" aria-label="${bag.esc(label)}">${inner}</button>`;
     }
-    return `<span class="img-upd ${cls}" title="${bag.esc(tip)}">${inner}</span>`;
+    return `<span class="img-upd ${cls}${extraCls}" title="${bag.esc(tip)}">${inner}</span>`;
   }
 
   /** Pull images + redeploy a stack (Compose up --pull). */
@@ -191,23 +233,31 @@ export function install() {
       bag.onBusyClick(btn, async (el) => {
         const kind = el.dataset.updAction;
         const targetId = el.dataset.updId;
+        const focus = bag.captureListFocus(el);
         await bag.upgradeImageUpdateTarget(kind, targetId);
         const route = String(bag.state.route || '');
         if (route.startsWith('stacks/') && route !== 'stacks/new') {
           const sid = route.split('/')[1];
-          if (sid) await bag.viewStackDetail(sid);
+          if (sid) {
+            await bag.viewStackDetail(sid);
+            bag.restoreListFocus(focus);
+          }
           return;
         }
         if (route === 'stacks') {
           await bag.loadStackUpdateIndicators(true);
+          bag.restoreListFocus(focus);
           return;
         }
         if (route.startsWith('containers/') && route !== 'containers/new') {
+          bag.rememberListFocus(focus);
           await bag.route();
+          bag.restoreListFocus(focus);
           return;
         }
         if (route === 'containers') {
           await bag.loadContainerUpdateIndicators(true);
+          bag.restoreListFocus(focus);
         }
       }, { confirm: confirmMsg, minMs: 400 });
     });
@@ -218,31 +268,43 @@ export function install() {
       const data = await bag.Api.stackUpdates(!!refresh);
       const map = data?.Updates || {};
       Object.keys(map).forEach((id) => {
-        const cell = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
-        if (!cell) return;
+        const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
+        const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);
+        if (!slot) return;
         const u = map[id] || {};
         const imgs = u.Images || [];
+        const imgLabel = bag.formatImageListLabel(imgs);
         const lines = imgs.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`);
         let title = lines.length ? lines.join('\n') : (u.Error || 'Aucun contrôle');
         if (u.FromCache && u.CheckedAt) {
           title += `\n(cache · vérifié ${new Date(u.CheckedAt * 1000).toLocaleString()})`;
         }
-        cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+        if (nameEl) {
+          nameEl.textContent = imgLabel;
+          nameEl.title = lines.length
+            ? imgs.map((i) => `${i.Service}: ${i.Image}`).join('\n')
+            : imgLabel;
+          const cell = nameEl.closest('td');
+          if (cell) cell.title = nameEl.title || imgLabel;
+        }
+        slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
           action: 'stack',
           id,
+          dotOnly: true,
         });
       });
       bag.root.querySelectorAll('[data-upd] .img-upd.is-loading').forEach((el) => {
-        el.className = 'img-upd is-unknown';
+        el.className = 'img-upd is-unknown img-upd-dot-only';
         el.title = 'Contrôle indisponible';
-        const lbl = el.querySelector('.img-upd-lbl');
-        if (lbl) lbl.textContent = '—';
-        else el.insertAdjacentHTML('beforeend', '<span class="img-upd-lbl">—</span>');
+      });
+      bag.root.querySelectorAll('[data-upd-imgs]').forEach((el) => {
+        if (el.textContent === '…') el.textContent = '—';
       });
       bag.bindImageUpdateActions(bag.root);
     } catch {
-      bag.root.querySelectorAll('[data-upd]').forEach((cell) => {
-        cell.innerHTML = bag.stackUpdatePill('unknown', 0, 'Contrôle indisponible');
+      bag.root.querySelectorAll('[data-upd-imgs]').forEach((el) => { el.textContent = '—'; });
+      bag.root.querySelectorAll('[data-upd]').forEach((slot) => {
+        slot.innerHTML = bag.stackUpdatePill('unknown', 0, 'Contrôle indisponible', { dotOnly: true });
       });
     }
   }
@@ -488,7 +550,7 @@ export function install() {
 
       <div class="actions-bar">
         <button class="btn btn-primary" id="stack-save">${isEdit ? 'Mettre à jour la stack' : 'Déployer la stack'}</button>
-        <a class="btn" href="#stacks" style="margin-left:8px">Annuler</a>
+        <button type="button" class="btn" id="stack-cancel" style="margin-left:8px">Annuler</button>
       </div>
     `);
 
@@ -620,9 +682,15 @@ export function install() {
           }
           return;
         }
-        if (isEdit) await bag.Api.updateStack(existing.Id, content, Env, pullImages);
-        else await bag.Api.createStack(name, content, Env, pullImages);
-        location.hash = '#stacks';
+        if (isEdit) {
+          bag.rememberListFocus({ id: String(existing.Id), name: existing.Name || name || '', y: 0 });
+          await bag.Api.updateStack(existing.Id, content, Env, pullImages);
+        } else {
+          await bag.Api.createStack(name, content, Env, pullImages);
+        }
+        const cur = (location.hash || '').replace(/^#/, '') || 'stacks';
+        if (cur === 'stacks') await bag.viewStacks();
+        else location.hash = '#stacks';
       } catch (err) {
         if (errBox) {
           errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
@@ -632,6 +700,17 @@ export function install() {
         }
       }
     }, { disableSiblings: false, minMs: 400 });
+
+    document.getElementById('stack-cancel')?.addEventListener('click', () => {
+      // Toujours revenir à la liste. Si le hash est déjà #stacks (édition via crayon),
+      // forcer le re-render car hashchange ne partira pas.
+      const cur = (location.hash || '').replace(/^#/, '') || 'stacks';
+      if (cur === 'stacks') {
+        bag.viewStacks();
+        return;
+      }
+      location.hash = '#stacks';
+    });
   }
 
   bag.schedActionLabel = function schedActionLabel(action) {
@@ -907,13 +986,15 @@ export function install() {
       editBtn.onclick = () =>
         bag.showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
     }
-    bag.onBusyClick(document.getElementById('stack-pull-redeploy'), async () => {
+    bag.onBusyClick(document.getElementById('stack-pull-redeploy'), async (el) => {
       const errBox = document.getElementById('stack-detail-err');
+      const focus = bag.captureListFocus(el);
       if (errBox) errBox.innerHTML = '';
       try {
         await bag.Api.updateStack(stack.Id, file.StackFileContent || '', stack.Env || [], true);
         if (errBox) errBox.innerHTML = `<div class="info-box">Images tirées et stack redéployée.</div>`;
         await bag.viewStackDetail(id);
+        bag.restoreListFocus(focus);
       } catch (err) {
         if (errBox) errBox.innerHTML = `<div class="error-box">${bag.esc(err.message)}</div>`;
       }
@@ -925,15 +1006,17 @@ export function install() {
       const confirmMsg = act === 'remove' ? 'Supprimer la stack et ses conteneurs ?' : null;
       bag.onBusyClick(btn, async (el) => {
         const sid = el.dataset.id;
+        const focus = bag.captureListFocus(el);
         if (act === 'start') await bag.Api.startStack(sid);
         else if (act === 'stop') await bag.Api.stopStack(sid);
         else if (act === 'restart') await bag.Api.restartStack(sid);
         else if (act === 'remove') {
           await bag.Api.deleteStack(sid);
           location.hash = '#stacks';
-          return;
+          return 'navigated';
         }
         await bag.viewStackDetail(id);
+        bag.restoreListFocus(focus);
       }, { confirm: confirmMsg, minMs: 300 });
     });
     const renderSchedules = async () => {
@@ -1020,29 +1103,46 @@ export function install() {
             </td>
             <td>${bag.badge(c.State)}</td>
             <td class="mono">${bag.esc(c.Image || '')}</td>
-            <td>${bag.formatPorts(c.Ports || [])}</td>
+            <td>${bag.formatPorts(c.Ports || [], ep)}</td>
             <td class="actions"><div class="quick-actions">
               ${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
               ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
               ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
+              ${bag.iconBtn({
+                modal: 'stats', id: c.Id, name, running: isRunning,
+                title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
+                icon: 'stats', statsId: c.Id,
+                extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
+              })}
+              ${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs', icon: 'logs' })}
+              ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
+              ${bag.iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
+              ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || c.Id })}
+              ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
             </div></td>
           </tr>`;
         }).join('');
+        const nid = Number(stack.EndpointId) || bag.Api.getEndpointId();
+        if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
         tb.querySelectorAll('[data-switch-node]').forEach((a) => {
           a.addEventListener('click', () => {
-            const nid = parseInt(a.getAttribute('data-switch-node'), 10);
-            if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+            const n = parseInt(a.getAttribute('data-switch-node'), 10);
+            if (Number.isFinite(n) && n > 0) bag.Api.setEndpointId(n);
           });
         });
         bag.bindModalActions(tb);
+        bag.bindShareButtons(tb);
         tb.querySelectorAll('[data-act]').forEach((btn) => {
           const act = btn.dataset.act;
           bag.onBusyClick(btn, async (el) => {
-            const nid = Number(stack.EndpointId) || bag.Api.getEndpointId();
-            if (Number.isFinite(nid) && nid > 0) bag.Api.setEndpointId(nid);
+            const n = Number(stack.EndpointId) || bag.Api.getEndpointId();
+            if (Number.isFinite(n) && n > 0) bag.Api.setEndpointId(n);
             await bag.containerAction(el.dataset.id, act);
             await renderStackContainers();
-          }, { minMs: 300 });
+          }, {
+            confirm: act === 'remove' ? 'Supprimer ce conteneur ?' : null,
+            minMs: 300,
+          });
         });
       } catch (err) {
         tb.innerHTML = `<tr><td colspan="6" class="error-box">${bag.esc(err.message || 'Impossible de lister les conteneurs')}</td></tr>`;

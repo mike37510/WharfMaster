@@ -155,7 +155,7 @@ export function install() {
           del: isBind ? String(v.Id || '') : '',
         }) : ''}
       </div>`;
-      return `<tr data-search="${bag.esc(search)}" data-bind="${isBind ? '1' : '0'}" data-bind-id="${bag.esc(isBind ? (v.Id || '') : '')}">
+      return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(v.Name)}" data-resource-name="${bag.esc(v.Name)}" data-bind="${isBind ? '1' : '0'}" data-bind-id="${bag.esc(isBind ? (v.Id || '') : '')}">
       ${all ? '' : bag.bulkSelectTd(v.Name, { disabled: isBind, title: isBind ? 'Les binds se retirent unitairement' : '' })}
       ${all ? `<td class="muted">${bag.esc(v._nodeName || '—')}</td>` : ''}
       <td>${all
@@ -234,6 +234,7 @@ export function install() {
         });
       });
     }
+    bag.restoreListFocus();
   }
 
   bag.volumeBreadcrumbs = function volumeBreadcrumbs(volumeName, path) {

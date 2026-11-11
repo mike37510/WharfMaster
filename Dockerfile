@@ -1,5 +1,11 @@
-# WharfMaster — console web Docker (Apache + PHP)
+# WharfMaster — console web Docker (Apache + PHP) + console-ws (Go)
 # DocumentRoot = /var/www/html/public (code & var/ hors webroot)
+
+FROM golang:1.22-bookworm AS console-ws-build
+WORKDIR /src
+COPY console-ws/go.mod console-ws/go.sum console-ws/main.go ./
+RUN CGO_ENABLED=0 go build -buildvcs=false -o /out/console-ws -ldflags='-s -w' .
+
 FROM php:8.3-apache-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsqlite3-dev \
       libldap2-dev \
   && docker-php-ext-install pdo_sqlite zip ldap \
-  && a2enmod rewrite headers \
+  && a2enmod rewrite headers proxy proxy_http proxy_wstunnel \
   && rm -rf /var/lib/apt/lists/*
 
 # Trivy (image CVE scanner)
@@ -53,8 +59,10 @@ RUN a2enconf wharfmaster-uploads \
 WORKDIR /var/www/html
 
 COPY . /var/www/html
-
-RUN mkdir -p /var/www/html/var/compose /var/www/html/var/dockerfiles \
+COPY --from=console-ws-build /out/console-ws /usr/local/bin/console-ws
+COPY --from=console-ws-build /out/console-ws /var/www/html/agent/console-ws
+RUN chmod 0755 /usr/local/bin/console-ws /var/www/html/agent/console-ws \
+  && mkdir -p /var/www/html/var/compose /var/www/html/var/dockerfiles \
   && chown -R www-data:www-data /var/www/html/var \
   && chmod 700 /var/www/html/var \
   && chmod +x /var/www/html/docker/docker-entrypoint.sh /var/www/html/bin/init.php \
@@ -66,7 +74,10 @@ ENV APACHE_DOCUMENT_ROOT=/var/www/html/public \
     COMPOSE_BIN=/usr/bin/docker \
     DOCKER_API_VERSION=v1.45 \
     TRIVY_BIN=/usr/local/bin/trivy \
-    WHARFMASTER_VAR=/var/www/html/var
+    WHARFMASTER_VAR=/var/www/html/var \
+    CONSOLE_WS_LISTEN=127.0.0.1:9100 \
+    JWT_SECRET_FILE=/var/www/html/var/jwt.secret \
+    SQLITE_PATH=/var/www/html/var/dockermanager.sqlite
 
 EXPOSE 80
 VOLUME ["/var/www/html/var"]

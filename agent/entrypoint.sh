@@ -3,6 +3,7 @@ set -eu
 
 PORT="${AGENT_PORT:-9001}"
 INTERNAL_PORT="${AGENT_INTERNAL_PORT:-9002}"
+WS_PORT="${AGENT_WS_PORT:-9003}"
 CERT_DIR="${AGENT_CERT_DIR:-/data/certs}"
 DAYS="${AGENT_TLS_DAYS:-365}"
 CN="${AGENT_TLS_CN:-wharfmaster-agent}"
@@ -33,14 +34,29 @@ fi
 
 EXP_TEXT=$(openssl x509 -enddate -noout -in "$CERT" 2>/dev/null | sed 's/^notAfter=//')
 echo "$EXP_TEXT" > "$CERT_DIR/expires.txt"
-# GNU date may be missing on Alpine — parse with openssl -checkend only; epoch via python/php
 php -r '$c=@file_get_contents($argv[1]); $x=@openssl_x509_parse($c); echo (int)($x["validTo_time_t"]??0);' "$CERT" > "$CERT_DIR/expires.epoch" || echo 0 > "$CERT_DIR/expires.epoch"
 echo "==> TLS cert valid until: ${EXP_TEXT:-unknown}"
 
 php -S "127.0.0.1:${INTERNAL_PORT}" /app/router.php >/tmp/agent-php.log 2>&1 &
-sleep 0.5
+sleep 0.3
 
-echo "==> Agent HTTPS on 0.0.0.0:${PORT} (self-signed TLS)"
+if [ -x /usr/local/bin/console-ws ]; then
+  echo "==> console-ws agent on 127.0.0.1:${WS_PORT} (proxy → PHP :${INTERNAL_PORT})"
+  CONSOLE_WS_MODE=agent \
+  CONSOLE_WS_LISTEN="127.0.0.1:${WS_PORT}" \
+  CONSOLE_WS_PROXY="http://127.0.0.1:${INTERNAL_PORT}" \
+  DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}" \
+  DOCKER_API_VERSION="${DOCKER_API_VERSION:-v1.45}" \
+  NODE_SECRET="${NODE_SECRET:-}" \
+  /usr/local/bin/console-ws >>/tmp/console-ws.log 2>&1 &
+  sleep 0.2
+  FORWARD_TO="127.0.0.1:${WS_PORT}"
+else
+  echo "==> WARN: console-ws missing — interactive console unavailable"
+  FORWARD_TO="127.0.0.1:${INTERNAL_PORT}"
+fi
+
+echo "==> Agent HTTPS on 0.0.0.0:${PORT} (self-signed TLS) → ${FORWARD_TO}"
 exec socat \
   "OPENSSL-LISTEN:${PORT},cert=${CERT},key=${KEY},verify=0,reuseaddr,fork" \
-  "TCP:127.0.0.1:${INTERNAL_PORT}"
+  "TCP:${FORWARD_TO}"

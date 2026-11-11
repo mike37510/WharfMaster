@@ -238,8 +238,27 @@ export const Api = (() => {
           cols: opts.cols || 120,
           rows: opts.rows || 40,
           tty: opts.tty !== false,
+          timeout: opts.timeout || 45,
+        }),
+        signal: opts.signal,
+      }),
+    createConsoleSession: (id, opts = {}) =>
+      request(`/api/endpoints/${getEndpointId()}/containers/${encodeURIComponent(id)}/console`, {
+        method: 'POST',
+        body: JSON.stringify({
+          shell: opts.shell || '/bin/sh',
+          cols: opts.cols || 120,
+          rows: opts.rows || 40,
+          user: opts.user || undefined,
         }),
       }),
+    resizeConsole: (execId, h, w, endpointId = null) => {
+      const ep = endpointId != null ? endpointId : getEndpointId();
+      return request(
+        `/api/endpoints/${ep}/console/${encodeURIComponent(execId)}/resize?h=${encodeURIComponent(h)}&w=${encodeURIComponent(w)}`,
+        { method: 'POST' },
+      );
+    },
     containerUpdates: (refresh = false) =>
       request(
         `/api/endpoints/${getEndpointId()}/containers/updates${refresh ? '?refresh=1' : ''}`,

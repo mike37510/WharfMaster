@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 2.3.0 |
+| **Version** | 2.3.1 |
 | **Console** | `/app` |
 | **API** | `/api` |
 | **DocumentRoot** | `public/` uniquement |
@@ -130,7 +130,7 @@ Les **stacks Compose** peuvent être déployées sur un nœud agent : le princip
 ### Enrôler un nœud
 
 1. Console → **Paramètres → Nœuds** (admin) → **Ajouter un nœud** → IP + nom → **Générer la commande**
-2. Copier-coller la commande sur la machine distante (Docker + curl). L’URL `--url` reprend l’**URL publique** configurée dans Paramètres. **`--advertise` doit être en `https://`**.
+2. Copier-coller la commande sur la machine distante (Docker + curl). L’URL `--url` reprend l’**URL WharfMaster** (Paramètres), distincte de l’**URL hôte des ports** utilisée pour les liens cliquables. **`--advertise` doit être en `https://`**.
 
 Exemple (valeurs déjà remplies par l’UI) :
 
@@ -331,7 +331,7 @@ export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
 export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.0
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.1
 ```
 
 ### Backup / restauration

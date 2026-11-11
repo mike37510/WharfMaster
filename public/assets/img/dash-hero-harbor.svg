@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 420" preserveAspectRatio="xMaxYMid slice" role="img" aria-hidden="true">
+  <defs>
+    <linearGradient id="void" x1="0" y1="0" x2="1" y2="0.2">
+      <stop offset="0%" stop-color="#050814"/>
+      <stop offset="48%" stop-color="#07101f"/>
+      <stop offset="100%" stop-color="#0a1a2e"/>
+    </linearGradient>
+    <linearGradient id="cyanEdge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#67e8f9"/>
+      <stop offset="55%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="faceTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e3a5f"/>
+      <stop offset="100%" stop-color="#0c4a6e"/>
+    </linearGradient>
+    <linearGradient id="faceLeft" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1e33"/>
+      <stop offset="100%" stop-color="#082f49"/>
+    </linearGradient>
+    <linearGradient id="faceRight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#155e75"/>
+      <stop offset="100%" stop-color="#0e7490"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="bloom" cx="0.82" cy="0.45" r="0.45">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1600" height="420" fill="url(#void)"/>
+  <rect width="1600" height="420" fill="url(#bloom)"/>
+
+  <!-- faint isometric grid -->
+  <g stroke="#22d3ee" stroke-opacity="0.06" stroke-width="1" fill="none">
+    <path d="M900 420 L1200 0 M980 420 L1280 0 M1060 420 L1360 0 M1140 420 L1440 0 M1220 420 L1520 0 M1300 420 L1600 0"/>
+    <path d="M1600 80 L1280 420 M1600 160 L1360 420 M1600 240 L1440 420 M1600 320 L1520 420"/>
+  </g>
+
+  <!-- isometric WM-style cube helper: cx,cy,size -->
+  <!-- large cube -->
+  <g transform="translate(1120,70)" filter="url(#glow)">
+    <path d="M120 20 L220 70 L120 120 L20 70 Z" fill="url(#faceTop)" stroke="url(#cyanEdge)" stroke-width="2.5"/>
+    <!-- W motif -->
+    <path d="M55 78 L78 52 L100 72 L122 52 L145 78" fill="none" stroke="#67e8f9" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+    <path d="M120 120 L220 70 L220 190 L120 240 Z" fill="url(#faceRight)" stroke="url(#cyanEdge)" stroke-width="2.5"/>
+    <!-- M motif -->
+    <path d="M145 145 L145 205 L165 175 L185 205 L185 145" fill="none" stroke="#a5f3fc" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+    <path d="M120 120 L20 70 L20 190 L120 240 Z" fill="url(#faceLeft)" stroke="url(#cyanEdge)" stroke-width="2.5"/>
+    <!-- container ridges -->
+    <path d="M45 105 L45 175 M65 112 L65 182 M85 120 L85 190 M105 128 L105 198" stroke="#67e8f9" stroke-opacity="0.35" stroke-width="2"/>
+  </g>
+
+  <!-- mid cube -->
+  <g transform="translate(1320,150)" opacity="0.92" filter="url(#glow)">
+    <path d="M80 12 L150 48 L80 84 L10 48 Z" fill="url(#faceTop)" stroke="#22d3ee" stroke-width="2"/>
+    <path d="M55 55 L68 38 L80 50 L92 38 L105 55" fill="none" stroke="#67e8f9" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M80 84 L150 48 L150 132 L80 168 Z" fill="url(#faceRight)" stroke="#22d3ee" stroke-width="2"/>
+    <path d="M100 100 L100 145 L112 125 L124 145 L124 100" fill="none" stroke="#a5f3fc" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M80 84 L10 48 L10 132 L80 168 Z" fill="url(#faceLeft)" stroke="#22d3ee" stroke-width="2"/>
+    <path d="M28 72 L28 120 M42 78 L42 126 M56 84 L56 132" stroke="#67e8f9" stroke-opacity="0.3" stroke-width="1.8"/>
+  </g>
+
+  <!-- small cube back -->
+  <g transform="translate(1040,190)" opacity="0.55">
+    <path d="M60 10 L110 36 L60 62 L10 36 Z" fill="#0c4a6e" stroke="#22d3ee" stroke-width="1.6" stroke-opacity="0.7"/>
+    <path d="M60 62 L110 36 L110 96 L60 122 Z" fill="#155e75" stroke="#22d3ee" stroke-width="1.6" stroke-opacity="0.7"/>
+    <path d="M60 62 L10 36 L10 96 L60 122 Z" fill="#082f49" stroke="#22d3ee" stroke-width="1.6" stroke-opacity="0.7"/>
+  </g>
+
+  <!-- tiny accent cubes -->
+  <g transform="translate(1480,80)" opacity="0.4">
+    <path d="M40 8 L70 24 L40 40 L10 24 Z" fill="#0e7490" stroke="#67e8f9" stroke-width="1.2"/>
+    <path d="M40 40 L70 24 L70 64 L40 80 Z" fill="#155e75" stroke="#67e8f9" stroke-width="1.2"/>
+    <path d="M40 40 L10 24 L10 64 L40 80 Z" fill="#0b1e33" stroke="#67e8f9" stroke-width="1.2"/>
+  </g>
+
+  <!-- soft floor reflection -->
+  <ellipse cx="1280" cy="390" rx="280" ry="18" fill="#22d3ee" opacity="0.08"/>
+</svg>

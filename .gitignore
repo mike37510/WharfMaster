@@ -33,6 +33,9 @@ Thumbs.db
 /node_modules/
 /vendor/
 composer.lock
+/console-ws/console-ws
+/agent/console-ws
+
 
 # Captured source assets
 image_*.jpg

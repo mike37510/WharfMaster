@@ -4,6 +4,23 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.1] — 2026-11-11
+
+### Ajouté
+- **Harbor Glass** : thème glass/teal (aurora), défaut à la première visite ; bascule header ☀ / ✦ / ☾ (Sombre → Harbor Glass → Clair)
+- Hero dashboard (visuel harbor) ; sparklines cliquables → modal métriques
+- Console interactive **WebSocket** (`console-ws` Go) : TTY conteneur via Apache proxy + agent
+- Badges de statut plus lisibles ; icônes mockup dashboard
+
+### Amélioré
+- Stacks / conteneurs : actions liste (redeploy, détail), puce image, focus conservé après action ; Annuler éditeur → `#stacks`
+- URLs : distinction **PublicURL** (WharfMaster) vs **PortsHostURL** (liens ports)
+- Boutons d’action Harbor Glass plus contrastés ; pastilles CPU/RAM gardent le code couleur vert / ambre / rouge
+- Thème retiré des Paramètres (préférence navigateur uniquement)
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.1`**
+
 ## [2.3.0] — 2026-11-09
 
 ### Ajouté

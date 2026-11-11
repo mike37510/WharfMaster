@@ -466,7 +466,7 @@ final class AppContext
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/2.3.0',
+                'User-Agent: WharfMaster/2.3.1',
             ],
         ]);
         $body = curl_exec($ch);
@@ -521,11 +521,9 @@ final class AppContext
 
     public function formatSettings(): array
     {
+        // PublicURL = WharfMaster (script d’enrôlement agent). PortsHostURL = liens ports publiés.
         $publicUrl = (string) ($this->repo->getSetting('public_url', '') ?? '');
-        $ep = $this->repo->getEndpoint(1);
-        if ($publicUrl === '' && $ep && !empty($ep['public_url'])) {
-            $publicUrl = (string) $ep['public_url'];
-        }
+        $portsHostUrl = (string) ($this->repo->getSetting('ports_host_url', '') ?? '');
         $ldap = $this->ldapConfig();
         return [
             'LogoURL' => '',
@@ -537,8 +535,10 @@ final class AppContext
             'EnableTelemetry' => false,
             'SnapshotInterval' => '5m',
             'PublicURL' => $publicUrl,
-            // Alias used by our UI
-            'HostURL' => $publicUrl,
+            'PortsHostURL' => $portsHostUrl,
+            // Alias historique → hôte des ports (plus l’URL WharfMaster)
+            'HostURL' => $portsHostUrl,
+            'UiTheme' => $this->uiTheme(),
             'MetricsChartHours' => $this->metricsChartHours(),
             'MetricsRetentionDays' => $this->metricsRetentionDays(),
             'Ldap' => [
@@ -559,6 +559,13 @@ final class AppContext
             'TrivyInstalled' => $this->imageScanner->available(),
             'TrivyAvailable' => $this->trivyEnabled() && $this->imageScanner->available(),
         ];
+    }
+
+    /** UI theme: dark | aurora | light */
+    public function uiTheme(): string
+    {
+        $v = strtolower(trim((string) ($this->repo->getSetting('ui_theme', 'aurora') ?? 'aurora')));
+        return in_array($v, ['dark', 'aurora', 'light'], true) ? $v : 'aurora';
     }
 
     public function trivyEnabled(): bool
@@ -635,9 +642,8 @@ final class AppContext
             'Type' => (int) $ep['type'],
             'URL' => $kind === 'agent' ? (string) ($ep['agent_url'] ?? $ep['url']) : $ep['url'],
             'GroupId' => (int) $ep['group_id'],
-            'PublicURL' => $ep['public_url'] !== ''
-                ? $ep['public_url']
-                : (string) ($this->repo->getSetting('public_url', '') ?? ''),
+            // URL hôte des ports pour CE nœud uniquement (pas l’URL WharfMaster).
+            'PublicURL' => (string) ($ep['public_url'] ?? ''),
             'Status' => $status,
             'Snapshots' => json_decode($ep['snapshots'] ?: '[]', true) ?: [],
             'IsEdgeDevice' => false,
@@ -1002,16 +1008,10 @@ YAML;
         return "WHARFMASTER_URL=https://VOTRE-SERVEUR\nJOIN_TOKEN=wmj_\nADVERTISE_URL=https://IP:9001\nNODE_NAME=mon-serveur\nAGENT_HOST_PORT=9001\n";
     }
 
-    /** URL publique configurée, sinon origine de la requête courante. */
+    /** URL WharfMaster (enrôlement agent), sinon origine de la requête courante. */
     public function resolvePublicBaseUrl(?Request $request = null): string
     {
         $public = trim((string) ($this->repo->getSetting('public_url', '') ?? ''));
-        if ($public === '') {
-            $ep = $this->repo->getEndpoint(1);
-            if ($ep && !empty($ep['public_url'])) {
-                $public = trim((string) $ep['public_url']);
-            }
-        }
         if ($public === '' && $request !== null) {
             $host = trim((string) ($request->header('X-Forwarded-Host')
                 ?? $request->header('Host')
@@ -1060,7 +1060,7 @@ YAML;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.0');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.1');
         return 'curl -fsSL ' . escapeshellarg($base . '/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)

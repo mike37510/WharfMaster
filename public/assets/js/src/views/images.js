@@ -551,7 +551,7 @@ export function install() {
         ? ''
         : bag.cveStatusTd(img._primaryTag, img._scan);
       const search = `${bag.shortId(img.Id)} ${tags} ${img._nodeName || ''} ${users.length ? 'utilise used' : 'inutilise unused'}`.toLowerCase();
-      return `<tr data-search="${bag.esc(search)}">
+      return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(img.Id)}" data-resource-name="${bag.esc(tags)}">
         ${all ? '' : bag.bulkSelectTd(img.Id)}
         ${all ? `<td class="muted">${bag.esc(img._nodeName || '—')}</td>` : ''}
         <td class="mono">${bag.esc(bag.shortId(img.Id))}</td>
@@ -631,6 +631,7 @@ export function install() {
         reload: () => bag.viewImages(),
       });
     }
+    bag.restoreListFocus();
   }
 
   bag.imageTagsLabel = function imageTagsLabel(img) {

@@ -5,7 +5,8 @@ export function install() {
     await bag.loadPublicUrl();
     let settings = {};
     try { settings = await bag.Api.settings(); } catch (_) { settings = {}; }
-    bag.state.publicUrl = settings.PublicURL || settings.HostURL || bag.state.publicUrl || '';
+    bag.state.publicUrl = settings.PublicURL || bag.state.publicUrl || '';
+    bag.state.portsHostUrl = settings.PortsHostURL || settings.HostURL || bag.state.portsHostUrl || '';
     if (settings.TrivyEnabled != null) bag.state.trivyEnabled = !!settings.TrivyEnabled;
     const fallback = `${window.location.protocol}//${window.location.hostname}`;
     const chartHours = bag.metricChartHours();
@@ -16,26 +17,24 @@ export function install() {
       ${bag.settingsSubnav('settings')}
       <div id="settings-err"></div>
       <div class="panel" style="max-width:720px; margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">Apparence</div>
-        <p class="muted" style="margin:0 0 14px">Basculer entre le thème clair et sombre. La préférence est enregistrée dans ce navigateur.</p>
-        <div class="toolbar" style="margin:0">
-          <button type="button" class="btn ${bag.state.theme === 'dark' ? 'btn-info' : ''}" id="theme-dark">Sombre</button>
-          <button type="button" class="btn ${bag.state.theme === 'light' ? 'btn-info' : ''}" id="theme-light">Clair</button>
-        </div>
-      </div>
-      <div class="panel" style="max-width:720px; margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">URL publique / hôte</div>
+        <div class="section-title" style="margin-top:0">URLs (rôles distincts)</div>
         <p class="muted" style="margin:0 0 14px">
-          URL de base utilisée pour ouvrir les ports publiés (liens dans Conteneurs).
-          Laisser vide pour utiliser l'hôte du navigateur (<code>${bag.esc(fallback)}</code>).
+          Deux adresses différentes : celle de la console WharfMaster (script d’ajout de nœuds),
+          et celle de l’hôte Docker pour les liens de ports publiés.
         </p>
         <div class="form-group">
-          <label class="field-label">URL publique</label>
-          <input id="public-url" type="text" placeholder="https://docker.example.com" value="${bag.esc(bag.state.publicUrl)}">
+          <label class="field-label">URL WharfMaster</label>
+          <input id="public-url" type="text" placeholder="https://dockermanager.example.com" value="${bag.esc(bag.state.publicUrl)}">
+          <p class="field-hint muted">Utilisée dans la commande <code>install.sh</code> / <code>--url</code> pour enrôler un agent. Vide = origine du navigateur.</p>
+        </div>
+        <div class="form-group">
+          <label class="field-label">URL hôte des ports</label>
+          <input id="ports-host-url" type="text" placeholder="https://nas.lan" value="${bag.esc(bag.state.portsHostUrl)}">
+          <p class="field-hint muted">Base des liens cliquables dans Conteneurs / Stacks. Un nœud peut surcharger via son « URL publique ». Vide = <code>${bag.esc(fallback)}</code>.</p>
         </div>
         <div class="info-box">
-          Exemple : avec l'URL publique <code>https://nas.lan</code>, un port publié <code>8080</code> devient
-          <code>https://nas.lan:8080</code>.
+          Exemple ports : <code>https://nas.lan</code> + port <code>8080</code> → <code>https://nas.lan:8080</code>.
+          Exemple agent : <code>https://dockermanager.example.com</code> dans <code>curl …/agent/install.sh</code>.
         </div>
       </div>
       <div class="panel" style="max-width:720px; margin-bottom:16px">
@@ -92,16 +91,9 @@ export function install() {
         <p class="muted" id="backup-status" style="margin:10px 0 0;font-size:12px"></p>
       </div>` : ''}
     `);
-    document.getElementById('theme-dark').onclick = () => {
-      bag.state.theme = bag.applyTheme('dark');
-      bag.route();
-    };
-    document.getElementById('theme-light').onclick = () => {
-      bag.state.theme = bag.applyTheme('light');
-      bag.route();
-    };
     bag.onBusyClick(document.getElementById('save-settings'), async () => {
-      const value = document.getElementById('public-url').value.trim();
+      const publicUrl = document.getElementById('public-url').value.trim();
+      const portsHostUrl = document.getElementById('ports-host-url').value.trim();
       const hours = parseInt(document.getElementById('metrics-chart-hours').value, 10);
       const days = parseInt(document.getElementById('metrics-retention-days').value, 10);
       const errBox = document.getElementById('settings-err');
@@ -116,7 +108,8 @@ export function install() {
       }
       const trivyEl = document.getElementById('trivy-enabled');
       const payload = {
-        PublicURL: value,
+        PublicURL: publicUrl,
+        PortsHostURL: portsHostUrl,
         MetricsChartHours: hours,
         MetricsRetentionDays: days,
       };
@@ -124,6 +117,7 @@ export function install() {
       try {
         const saved = await bag.Api.updateSettings(payload);
         bag.state.publicUrl = saved.PublicURL || '';
+        bag.state.portsHostUrl = saved.PortsHostURL || saved.HostURL || '';
         bag.state.metricsChartHours = Number(saved.MetricsChartHours) || hours;
         bag.state.metricsRetentionDays = Number(saved.MetricsRetentionDays) || days;
         if (saved.TrivyEnabled != null) bag.state.trivyEnabled = !!saved.TrivyEnabled;
@@ -256,12 +250,14 @@ export function install() {
   bag.loadPublicUrl = async function loadPublicUrl() {
     try {
       const s = await bag.Api.settings();
-      bag.state.publicUrl = s.PublicURL || s.HostURL || '';
+      bag.state.publicUrl = s.PublicURL || '';
+      bag.state.portsHostUrl = s.PortsHostURL || s.HostURL || '';
       if (s.MetricsChartHours != null) bag.state.metricsChartHours = Number(s.MetricsChartHours) || 72;
       if (s.MetricsRetentionDays != null) bag.state.metricsRetentionDays = Number(s.MetricsRetentionDays) || 90;
       if (s.TrivyEnabled != null) bag.state.trivyEnabled = !!s.TrivyEnabled;
     } catch (_) {
       bag.state.publicUrl = '';
+      bag.state.portsHostUrl = '';
     }
   }
 

@@ -165,7 +165,7 @@ final class NodesController extends BaseController
                 $zip->addFile($path, $rootName . '/' . $file);
             }
 
-            $optional = ['install.sh', 'docker-compose.yml', 'deploy.sh', 'README.md', '.env.example'];
+            $optional = ['install.sh', 'docker-compose.yml', 'deploy.sh', 'README.md', '.env.example', 'console-ws'];
             foreach ($optional as $file) {
                 $path = $agentDir . '/' . $file;
                 if (is_file($path)) {

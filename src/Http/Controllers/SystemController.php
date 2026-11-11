@@ -66,13 +66,38 @@ final class SystemController extends BaseController
         }
         $body = $request->json();
         $publicUrl = (string) ($this->repo->getSetting('public_url', '') ?? '');
-        if (array_key_exists('PublicURL', $body) || array_key_exists('HostURL', $body) || array_key_exists('publicURL', $body)) {
-            $publicUrl = rtrim(trim((string) ($body['PublicURL'] ?? $body['HostURL'] ?? $body['publicURL'] ?? '')), '/');
+        $portsHostUrl = (string) ($this->repo->getSetting('ports_host_url', '') ?? '');
+        if (array_key_exists('PublicURL', $body) || array_key_exists('publicURL', $body)) {
+            $publicUrl = rtrim(trim((string) ($body['PublicURL'] ?? $body['publicURL'] ?? '')), '/');
             if ($publicUrl !== '' && !preg_match('#^https?://#i', $publicUrl)) {
-                return Response::error('L\'URL publique doit commencer par http:// ou https://', 400);
+                return Response::error('L\'URL WharfMaster doit commencer par http:// ou https://', 400);
             }
             $this->repo->setSetting('public_url', $publicUrl);
-            $this->repo->updateEndpointPublicUrl(1, $publicUrl);
+        }
+        // HostURL historique = hôte des ports (pas l’URL console / agent)
+        if (array_key_exists('PortsHostURL', $body) || array_key_exists('portsHostUrl', $body)
+            || array_key_exists('HostURL', $body) || array_key_exists('hostURL', $body)) {
+            $portsHostUrl = rtrim(trim((string) (
+                $body['PortsHostURL'] ?? $body['portsHostUrl'] ?? $body['HostURL'] ?? $body['hostURL'] ?? ''
+            )), '/');
+            if ($portsHostUrl !== '' && !preg_match('#^https?://#i', $portsHostUrl)) {
+                return Response::error('L\'URL hôte des ports doit commencer par http:// ou https://', 400);
+            }
+            $this->repo->setSetting('ports_host_url', $portsHostUrl);
+            // Ancien sync PublicURL → endpoints : nettoyer les copies de l’URL WharfMaster
+            // pour que PortsHostURL s’applique vraiment aux liens de ports.
+            $manager = rtrim(trim((string) ($this->repo->getSetting('public_url', '') ?? '')), '/');
+            if ($manager !== '') {
+                $this->repo->clearEndpointPublicUrlsMatching($manager);
+            }
+        }
+
+        if (array_key_exists('UiTheme', $body) || array_key_exists('uiTheme', $body) || array_key_exists('Theme', $body)) {
+            $theme = strtolower(trim((string) ($body['UiTheme'] ?? $body['uiTheme'] ?? $body['Theme'] ?? 'dark')));
+            if (!in_array($theme, ['dark', 'aurora', 'light'], true)) {
+                return Response::error('Thème invalide (dark, aurora, light)', 400);
+            }
+            $this->repo->setSetting('ui_theme', $theme);
         }
 
         if (array_key_exists('MetricsChartHours', $body) || array_key_exists('metricsChartHours', $body)) {
@@ -103,6 +128,7 @@ final class SystemController extends BaseController
 
         $this->audit($user, 'settings.update', 'Mise à jour des paramètres', $request, [
             'publicUrl' => $publicUrl,
+            'portsHostUrl' => $portsHostUrl,
             'metricsChartHours' => $this->metricsChartHours(),
             'metricsRetentionDays' => $this->metricsRetentionDays(),
             'ldapEnabled' => !empty($this->ldapConfig()['enabled']),

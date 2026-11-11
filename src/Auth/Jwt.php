@@ -14,11 +14,18 @@ final class Jwt
     /** @param array<string, mixed> $claims */
     public function encode(array $claims): string
     {
+        return $this->encodeWithTtl($claims, $this->ttl);
+    }
+
+    /** @param array<string, mixed> $claims */
+    public function encodeWithTtl(array $claims, int $ttlSeconds): string
+    {
         $header = ['alg' => 'HS256', 'typ' => 'JWT'];
         $now = time();
+        $ttl = max(30, $ttlSeconds);
         $payload = array_merge($claims, [
             'iat' => $now,
-            'exp' => $now + $this->ttl,
+            'exp' => $now + $ttl,
         ]);
 
         $segments = [

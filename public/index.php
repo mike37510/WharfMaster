@@ -40,6 +40,7 @@ if (preg_match('#^/agent/([A-Za-z0-9._-]+)$#', $path, $m)) {
         'docker-compose.yml' => 'text/yaml; charset=utf-8',
         'README.md' => 'text/markdown; charset=utf-8',
         '.env.example' => 'text/plain; charset=utf-8',
+        'console-ws' => 'application/octet-stream',
     ];
     $name = $m[1];
     if (!isset($allowed[$name])) {

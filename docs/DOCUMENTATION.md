@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.0**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.1**.
 
 | | |
 |---|---|
@@ -85,7 +85,7 @@ La version affichée dans la barre latérale est lue dynamiquement via `/api/sta
 
 | Sous-menu | Contenu |
 |-----------|---------|
-| Général | Thème, URL publique, fenêtre / rétention métriques, Trivy, backup ZIP |
+| Général | URL WharfMaster + hôte des ports, métriques, Trivy, backup ZIP (thème via le bouton header) |
 | Authentification | Active Directory / LDAP |
 | Registres | Hub / Registry V2 |
 | Nœuds | Agents : commande / pack ZIP, ping, ACL, pin TLS |
@@ -175,7 +175,7 @@ Variables utiles :
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.0
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.1
 ```
 
 Backup admin :
@@ -221,6 +221,14 @@ curl -fsS https://SERVEUR/api/users/me -H "Authorization: Bearer $TOKEN"
 curl -fsS https://SERVEUR/api/health
 ```
 
+### Console interactive (WebSocket)
+
+1. `POST /api/endpoints/{id}/containers/{cid}/console` avec `{ "shell": "/bin/sh" }` → `{ Id, Token }`
+2. Ouvrir `wss://SERVEUR/api/websocket/exec?id=<Id>&endpointId=<id>&token=<Token>`
+3. Flux TTY bidirectionnel (stdin/stdout) ; resize via `POST …/console/{Id}/resize?h=&w=`
+
+Le reverse-proxy (npmplus, nginx, Traefik…) doit transmettre `Upgrade` et `Connection` sur `/api/websocket/`.
+
 ---
 
 ## 6. API — publics / système
@@ -254,7 +262,7 @@ curl -fsS https://SERVEUR/api/health
 | GET | `/api/users/{id}/tokens` | self/admin | Lister les clés API |
 | POST | `/api/users/{id}/tokens` | self/admin | Créer une clé (`password` + `description`) → `rawAPIKey` une fois |
 | DELETE | `/api/users/{id}/tokens/{tid}` | self/admin | Révoquer une clé |
-| GET/PUT | `/api/settings` | user / admin | PublicURL, métriques, LDAP, Trivy… |
+| GET/PUT | `/api/settings` | user / admin | PublicURL (WharfMaster), PortsHostURL (ports), métriques, LDAP, Trivy… |
 | GET | `/api/backup` | admin | ZIP (`?format=sqlite` = base seule) |
 | GET | `/api/audit` | user | Journaux |
 | GET | `/api/system/host` | user | Ressources hôte |
@@ -301,7 +309,10 @@ Exemples : `/containers/json?all=true`, `/containers/{id}/start|stop`, `/images/
 | Méthode | Chemin | Description |
 |---------|--------|-------------|
 | GET | `/api/endpoints/{id}/containers/{cid}/logs` | Logs |
-| POST | `/api/endpoints/{id}/containers/{cid}/exec` | Exec (pas d’attach TTY) |
+| POST | `/api/endpoints/{id}/containers/{cid}/exec` | Exec one-shot (JSON) |
+| POST | `/api/endpoints/{id}/containers/{cid}/console` | Session TTY → `{ Id, Token }` |
+| POST | `/api/endpoints/{id}/console/{eid}/resize` | Resize TTY (`h`, `w`) |
+| WS | `/api/websocket/exec?id=&endpointId=&token=` | Attach interactif (hijack Docker) |
 | GET | `/api/endpoints/{id}/containers/updates` | Statuts MàJ images (liste) |
 | GET | `/api/endpoints/{id}/containers/{cid}/updates` | Statut MàJ d’un conteneur |
 | POST | `/api/endpoints/{id}/containers/{cid}/update` | Pull + recreate |
@@ -378,7 +389,7 @@ Si `TrivyEnabled=false` : advise → `Worst=disabled` ; scan manuel → 403.
 
 ## 13. Agent distant
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.0` (ou `WHARFMASTER_AGENT_IMAGE`).
+Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.1` (ou `WHARFMASTER_AGENT_IMAGE`).
 
 | Chemin agent | Description |
 |--------------|-------------|
@@ -394,7 +405,7 @@ curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:2.3.0
+  --image ghcr.io/mike37510/wharfmaster-agent:2.3.1
 ```
 
 Pack ZIP : Paramètres → Nœuds → bundle (Dockerfile, sources, `deploy.sh`, `.env`).
@@ -417,7 +428,7 @@ Pack ZIP : Paramètres → Nœuds → bundle (Dockerfile, sources, `deploy.sh`, 
 - **Tous les nœuds** : agrégation surtout en lecture pour Docker.
 - Pas de placement multi-nœud d’une même stack.
 - Pas de sync si édition manuelle des fichiers sur l’agent.
-- Console = exec de commandes (pas d’attach TTY interactif).
+- Console interactive via WebSocket (`/api/websocket/exec`) — le reverse-proxy frontal doit laisser passer `Upgrade` / `Connection`.
 - Swarm / secrets Engine / plugins : bloqués au proxy.
 - Pas de Kubernetes / Edge / NAT-tunnel ; l’agent doit être joignable depuis le principal.
 - Pas de SSO OIDC/SAML (LDAP/AD uniquement).

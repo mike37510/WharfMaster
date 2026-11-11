@@ -10,14 +10,69 @@ final class Exec
     }
 
     /**
+     * Create an interactive exec (AttachStdin + TTY) without starting it.
+     * The WebSocket bridge starts/hijacks the session later.
+     *
+     * @param list<string> $cmd
+     * @param list<string> $env
+     */
+    public function createInteractive(
+        string $containerId,
+        array $cmd,
+        array $env = [],
+        string $user = '',
+    ): string {
+        $payload = [
+            'AttachStdin' => true,
+            'AttachStdout' => true,
+            'AttachStderr' => true,
+            'Tty' => true,
+            'Cmd' => $cmd,
+        ];
+        if ($user !== '') {
+            $payload['User'] = $user;
+        }
+        if ($env !== []) {
+            $payload['Env'] = array_values($env);
+        }
+        $create = $this->docker->json('POST', '/containers/' . rawurlencode($containerId) . '/exec', $payload);
+        $execId = (string) ($create['Id'] ?? '');
+        if ($execId === '') {
+            throw new \RuntimeException('Échec de la création de la session console');
+        }
+        return $execId;
+    }
+
+    /** Resize an active exec TTY. */
+    public function resize(string $execId, int $height, int $width): void
+    {
+        $h = max(1, min(200, $height));
+        $w = max(1, min(500, $width));
+        $this->docker->request(
+            'POST',
+            '/exec/' . rawurlencode($execId) . '/resize',
+            null,
+            [],
+            ['h' => (string) $h, 'w' => (string) $w],
+            15,
+        );
+    }
+
+    /**
      * Run a one-shot command inside a container (console helper).
      *
      * @param list<string> $cmd
      * @param list<string> $env  e.g. TERM=xterm-256color, COLUMNS=120
      * @return array{Stdout:string,Stderr:string,ExitCode:int}
      */
-    public function run(string $containerId, array $cmd, bool $tty = false, int $timeout = 60, array $env = []): array
-    {
+    public function run(
+        string $containerId,
+        array $cmd,
+        bool $tty = false,
+        int $timeout = 60,
+        array $env = [],
+        string $workingDir = '',
+    ): array {
         $payload = [
             'AttachStdin' => false,
             'AttachStdout' => true,
@@ -25,6 +80,9 @@ final class Exec
             'Tty' => $tty,
             'Cmd' => $cmd,
         ];
+        if ($workingDir !== '') {
+            $payload['WorkingDir'] = $workingDir;
+        }
         if ($env !== []) {
             $payload['Env'] = array_values($env);
         }
@@ -35,18 +93,37 @@ final class Exec
             throw new \RuntimeException('Échec de la création de la session exec');
         }
 
-        $started = $this->docker->request(
-            'POST',
-            '/exec/' . rawurlencode($execId) . '/start',
-            json_encode(['Detach' => false, 'Tty' => $tty], JSON_UNESCAPED_SLASHES) ?: '{}',
-            ['Content-Type' => 'application/json'],
-        );
+        $timeout = max(5, min(300, $timeout));
+        try {
+            $started = $this->docker->request(
+                'POST',
+                '/exec/' . rawurlencode($execId) . '/start',
+                json_encode(['Detach' => false, 'Tty' => $tty], JSON_UNESCAPED_SLASHES) ?: '{}',
+                ['Content-Type' => 'application/json'],
+                [],
+                $timeout,
+            );
+        } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            if (stripos($msg, 'timed out') !== false || stripos($msg, 'timeout') !== false) {
+                throw new \RuntimeException(
+                    'Commande interrompue (délai ' . $timeout . 's). Les programmes interactifs (vi, top, less…) ne sont pas supportés dans cette console ligne-à-ligne.',
+                    408
+                );
+            }
+            throw $e;
+        }
 
         if ($started['status'] >= 400) {
             throw new \RuntimeException($started['body'] !== '' ? $started['body'] : 'Échec du démarrage de la session exec', $started['status']);
         }
 
         $raw = $started['body'];
+        // Docker sometimes returns OCI errors in a 200 body when the binary is missing.
+        if ($raw !== '' && preg_match('/OCI runtime exec failed|executable file not found/i', $raw)) {
+            throw new \RuntimeException(trim(preg_replace('/\s+/', ' ', $raw) ?? $raw), 404);
+        }
+
         if ($tty) {
             $stdout = $raw;
             $stderr = '';

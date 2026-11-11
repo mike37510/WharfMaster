@@ -108,7 +108,8 @@ export function install() {
     });
 
     bag.root.innerHTML = bag.shell('Tableau de bord', `
-      <div class="stat-grid">
+      ${bag.dashHeroHtml()}
+      <div class="stat-grid dash-hero-stats">
         ${bag.dashStatCard('containers', 'blue', 'Conteneurs', list.length, metricSeries)}
         ${bag.dashStatCard('images', 'purple', 'Images', imgs.length, metricSeries)}
         ${bag.dashStatCard('volumes', 'green', 'Volumes', volList.length, metricSeries)}
@@ -182,6 +183,7 @@ export function install() {
 
     bag.bindSearch('dashboard');
     bag.startDashMetricSampler();
+    bag.bindDashMetricSparklines(metricSeries);
     document.getElementById('dash-filters')?.querySelectorAll('button').forEach((btn) => {
       btn.onclick = () => {
         bag.state.dashFilter = btn.dataset.f;
@@ -287,9 +289,12 @@ export function install() {
     });
 
     bag.root.innerHTML = bag.shell('Tableau de bord', `
+      ${bag.dashHeroHtml({
+        subtitle: 'Vue agrégée de tous vos nœuds Docker — une interface moderne.',
+      })}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${failMsg}</div>` : ''}
       ${perNodeHint ? `<div class="muted" style="margin-bottom:10px">Répartition conteneurs — ${bag.esc(perNodeHint)}</div>` : ''}
-      <div class="stat-grid">
+      <div class="stat-grid dash-hero-stats">
         ${bag.dashStatCard('containers', 'blue', 'Conteneurs', list.length, metricSeriesAll)}
         ${bag.dashStatCard('images', 'purple', 'Images', imgs.length, metricSeriesAll)}
         ${bag.dashStatCard('volumes', 'green', 'Volumes', volList.length, metricSeriesAll)}
@@ -346,6 +351,7 @@ export function install() {
 
     bag.bindSearch('dashboard');
     bag.startDashMetricSampler();
+    bag.bindDashMetricSparklines(metricSeriesAll);
     document.getElementById('dash-filters')?.querySelectorAll('button').forEach((btn) => {
       btn.onclick = () => {
         bag.state.dashFilter = btn.dataset.f;

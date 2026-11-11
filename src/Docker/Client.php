@@ -44,6 +44,7 @@ final class Client
         ?string $body = null,
         array $headers = [],
         array $query = [],
+        int $timeoutSec = 900,
     ): array {
         $path = $this->normalizePath($path);
         if ($query !== []) {
@@ -61,17 +62,18 @@ final class Client
             $headerLines[] = 'Content-Type: application/json';
         }
 
+        $timeoutSec = max(1, min(900, $timeoutSec));
         if ($this->baseUrl !== '') {
-            return $this->requestHttp($method, $path, $body, $headerLines);
+            return $this->requestHttp($method, $path, $body, $headerLines, $timeoutSec);
         }
-        return $this->requestUnix($method, $path, $body, $headerLines);
+        return $this->requestUnix($method, $path, $body, $headerLines, $timeoutSec);
     }
 
     /**
      * @param list<string> $headerLines
      * @return array{status:int, headers:array<string,string>, body:string}
      */
-    private function requestUnix(string $method, string $path, ?string $body, array $headerLines): array
+    private function requestUnix(string $method, string $path, ?string $body, array $headerLines, int $timeoutSec = 900): array
     {
         $url = 'http://localhost' . $path;
         $ch = curl_init($url);
@@ -84,7 +86,7 @@ final class Client
             CURLOPT_UNIX_SOCKET_PATH => $this->socketPath,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER => true,
-            CURLOPT_TIMEOUT => 900,
+            CURLOPT_TIMEOUT => $timeoutSec,
             CURLOPT_HTTPHEADER => $headerLines,
         ]);
 
@@ -99,7 +101,7 @@ final class Client
      * @param list<string> $headerLines
      * @return array{status:int, headers:array<string,string>, body:string}
      */
-    private function requestHttp(string $method, string $path, ?string $body, array $headerLines): array
+    private function requestHttp(string $method, string $path, ?string $body, array $headerLines, int $timeoutSec = 900): array
     {
         if ($this->tlsFingerprint !== '') {
             AgentTls::assertPinned($this->baseUrl, $this->tlsFingerprint);
@@ -120,7 +122,7 @@ final class Client
             CURLOPT_CUSTOMREQUEST => strtoupper($method),
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER => true,
-            CURLOPT_TIMEOUT => 900,
+            CURLOPT_TIMEOUT => $timeoutSec,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_HTTPHEADER => $headerLines,
             // Pinning is enforced via AgentTls::assertPinned above (self-signed agents)

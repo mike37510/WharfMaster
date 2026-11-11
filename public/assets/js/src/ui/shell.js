@@ -122,7 +122,7 @@ export function install() {
               <span class="status-online ${bag.state.dockerOnline ? '' : 'is-offline'}" id="status-online">
                 <span class="dot"></span>${bag.state.dockerOnline ? 'En ligne' : 'Hors ligne'}
               </span>
-              <button type="button" class="theme-toggle" id="theme-toggle" title="Basculer clair / sombre">${bag.state.theme === 'dark' ? '☀' : '☾'}</button>
+              <button type="button" class="theme-toggle" id="theme-toggle" title="${bag.esc(bag.themeToggleTitle(bag.state.theme))}">${bag.themeToggleLabel(bag.state.theme)}</button>
               <div class="notif-wrap">
                 <button type="button" class="icon-btn notif-btn" id="notif-bell" title="Notifications" aria-label="Notifications" aria-expanded="false">
                   ${bag.ico('bell')}
@@ -253,6 +253,7 @@ export function install() {
         ? (opts.confirmOne ? opts.confirmOne(ids[0]) : 'Supprimer cet élément ?')
         : (opts.confirmMany ? opts.confirmMany(ids.length) : `Supprimer ${ids.length} éléments ?`);
       if (!window.confirm(msg)) return;
+      const focus = { y: window.scrollY || window.pageYOffset || 0, id: '', name: '' };
       const errors = [];
       for (const id of ids) {
         try {
@@ -266,7 +267,9 @@ export function install() {
           `Certaines suppressions ont échoué :\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? '\n…' : ''}`,
         );
       }
+      bag.rememberListFocus(focus);
       await opts.reload();
+      bag.restoreListFocus(focus);
     }, { disableSiblings: false, minMs: 300 });
 
     sync();
@@ -587,10 +590,11 @@ export function install() {
     const icons = {
       dashboard: '<svg viewBox="0 0 16 16"><path d="M1 1h6v6H1V1zm8 0h6v6H9V1zM1 9h6v6H1V9zm8 0h6v6H9V9z"/></svg>',
       stacks: '<svg viewBox="0 0 16 16"><path d="M0 4l8-3 8 3-8 3L0 4zm0 4l8 3 8-3v2l-8 3-8-3V8zm0 4l8 3 8-3v2l-8 3-8-3v-2z"/></svg>',
-      containers: '<svg viewBox="0 0 16 16"><path d="M1 3h14v2H1V3zm0 4h14v2H1V7zm0 4h14v2H1v-2z"/></svg>',
-      images: '<svg viewBox="0 0 16 16"><path d="M1 2h14v12H1V2zm2 2v8h10V4H3zm2 2h2v2H5V6zm4 0h3v1H9V6zm0 2h3v1H9V8z"/></svg>',
-      networks: '<svg viewBox="0 0 16 16"><path d="M8 1a3 3 0 110 6 3 3 0 010-6zM2 9a2 2 0 110 4 2 2 0 010-4zm12 0a2 2 0 110 4 2 2 0 010-4zM8 8v2.5M3.5 10.5L6.5 8.5m6 2L9.5 8.5"/></svg>',
-      volumes: '<svg viewBox="0 0 16 16"><path d="M3 2h10v12H3V2zm2 2v8h6V4H5z"/></svg>',
+      /* Mockup-style resource icons (cube / picture / cylinder / nodes) */
+      containers: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3.2L20 7.4v9.2L12 20.8 4 16.6V7.4L12 3.2z" fill="currentColor" opacity=".22"/><path d="M12 3.2L20 7.4v9.2L12 20.8 4 16.6V7.4L12 3.2z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 12.2L20 7.4M12 12.2L4 7.4M12 12.2V20.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+      images: '<svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="currentColor" opacity=".2" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="10" r="2" fill="currentColor"/><path d="M4.5 16.5l4.2-4.2a1.4 1.4 0 012 0L14 16l2.2-2.2a1.4 1.4 0 012 0l1.3 1.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+      volumes: '<svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6.5" rx="6.5" ry="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 6.5v11c0 1.4 2.9 2.6 6.5 2.6s6.5-1.2 6.5-2.6v-11" stroke="currentColor" stroke-width="1.6"/><ellipse cx="12" cy="12" rx="6.5" ry="2.6" stroke="currentColor" stroke-width="1.4" opacity=".7"/><ellipse cx="12" cy="17.5" rx="6.5" ry="2.6" stroke="currentColor" stroke-width="1.4" opacity=".55"/></svg>',
+      networks: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="6.5" r="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><circle cx="6.2" cy="16.8" r="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><circle cx="17.8" cy="16.8" r="2.6" fill="currentColor" opacity=".25" stroke="currentColor" stroke-width="1.6"/><path d="M10.2 8.4L7.6 14.4M13.8 8.4l2.6 6M8.8 16.8h6.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
       settings: '<svg viewBox="0 0 16 16"><path d="M6.5 1h3l.4 2.1a5 5 0 011.4.8L13.5 3l1.5 2.6-1.7 1.2a5 5 0 010 1.6l1.7 1.2L13.5 13l-2.2-.9a5 5 0 01-1.4.8L9.5 15h-3l-.4-2.1a5 5 0 01-1.4-.8L2.5 13 1 10.4l1.7-1.2a5 5 0 010-1.6L1 6.4 2.5 3.8l2.2.9a5 5 0 011.4-.8L6.5 1zM8 6a2 2 0 100 4 2 2 0 000-4z"/></svg>',
       users: '<svg viewBox="0 0 16 16"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6v-1a4 4 0 014-4h2a4 4 0 014 4v1H3zm10-7a2 2 0 100-4 2 2 0 000 4zm1 7v-1a4.9 4.9 0 00-1.5-3.5A4 4 0 0115 13v1h-1z"/></svg>',
       teams: '<svg viewBox="0 0 16 16"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6v-1a4 4 0 014-4h2a4 4 0 014 4v1H3zm10-7a2 2 0 100-4 2 2 0 000 4zm1 7v-1a4.9 4.9 0 00-1.5-3.5A4 4 0 0115 13v1h-1z"/><path d="M1 5.5A1.5 1.5 0 012.5 4h1a.5.5 0 010 1h-1a.5.5 0 00-.5.5v1a.5.5 0 01-1 0v-1z"/></svg>',
@@ -630,14 +634,27 @@ export function install() {
 
   bag.badge = function badge(stateName) {
     const s = String(stateName || '').toLowerCase();
-    let cls = 'badge';
+    let cls = 'badge badge-status';
     let label = stateName || 'inconnu';
-    if (s.includes('running')) { cls += ' badge-running'; label = 'En cours'; }
-    else if (s.includes('exit') || s.includes('dead')) { cls += ' badge-exited'; label = 'Arrêté'; }
-    else if (s.includes('pause')) { cls += ' badge-paused'; label = 'En pause'; }
-    else if (s.includes('creat')) { cls += ' badge-created'; label = 'Créé'; }
-    else cls += ' badge-created';
-    return `<span class="${cls}">${bag.esc(label)}</span>`;
+    if (s.includes('running') || s === 'restarting') {
+      cls += ' badge-running';
+      label = s === 'restarting' || s.includes('restart') ? 'Restarting' : 'Running';
+    } else if (s.includes('exit') || s.includes('dead') || s === 'stopped' || s.includes('stop')) {
+      cls += ' badge-stopped';
+      label = 'Stopped';
+    } else if (s.includes('pause')) {
+      cls += ' badge-paused';
+      label = 'Paused';
+    } else if (s.includes('creat')) {
+      cls += ' badge-created';
+      label = 'Created';
+    } else if (s.includes('remov') || s.includes('delet')) {
+      cls += ' badge-exited';
+      label = 'Removed';
+    } else {
+      cls += ' badge-created';
+    }
+    return `<span class="${cls}" title="${bag.esc(String(stateName || label))}"><span class="badge-dot" aria-hidden="true"></span>${bag.esc(label)}</span>`;
   }
 
   bag.brandMarkImg = function brandMarkImg(cls = 'brand-mark-img') {
@@ -693,17 +710,47 @@ export function install() {
     return bag.sparklineFromValues([], tone);
   }
 
+  bag.dashMetricMeta = {
+    containers: { label: 'Conteneurs', tone: 'blue', color: '#38bdf8', href: '#containers' },
+    images: { label: 'Images', tone: 'purple', color: '#c084fc', href: '#images' },
+    volumes: { label: 'Volumes', tone: 'green', color: '#4ade80', href: '#volumes' },
+    networks: { label: 'Réseaux', tone: 'orange', color: '#fb923c', href: '#networks' },
+  };
+
   bag.dashStatCard = function dashStatCard(key, tone, label, value, series) {
-    return `<div class="stat-card" data-metric="${bag.esc(key)}">
-      <div class="stat-top">
-        <div class="stat-ico ${tone}">${bag.ico(key === 'networks' ? 'networks' : key)}</div>
-        ${bag.metricDeltaHtml(series, key)}
+    const icoKey = key === 'networks' ? 'networks' : key;
+    return `<div class="stat-card stat-card-row" data-metric="${bag.esc(key)}" data-tone="${bag.esc(tone)}">
+      <div class="stat-ico ${tone}" aria-hidden="true">${bag.ico(icoKey)}</div>
+      <div class="stat-mid">
+        <div class="stat-value">${Number(value) || 0}</div>
+        <div class="stat-label">${bag.esc(label)}</div>
       </div>
-      <div class="stat-value">${Number(value) || 0}</div>
-      <div class="stat-label">${bag.esc(label)}</div>
-      ${bag.sparklineFromValues(bag.metricValues(series, key), tone)}
-      <div class="stat-hint" title="Fenêtre configurable dans Paramètres">Courbe · ${bag.esc(bag.metricWindowLabel())}</div>
+      <div class="stat-right">
+        ${bag.metricDeltaHtml(series, key)}
+        <button type="button" class="sparkline-btn" data-metric-detail="${bag.esc(key)}" title="Voir l’historique détaillé" aria-label="Ouvrir l’historique ${bag.esc(label)}">
+          ${bag.sparklineFromValues(bag.metricValues(series, key), tone)}
+        </button>
+      </div>
     </div>`;
+  }
+
+  /** Hero port banner (Harbor Glass / dashboard welcome). */
+  bag.dashHeroHtml = function dashHeroHtml(opts = {}) {
+    const title = opts.title || 'Bienvenue sur WharfMaster !';
+    const parts = String(title).split(/WharfMaster/);
+    const heading = parts.length > 1
+      ? `${bag.esc(parts[0])}<span class="dash-hero-brand">WharfMaster</span>${bag.esc(parts.slice(1).join('WharfMaster'))}`
+      : bag.esc(title);
+    const sub = opts.subtitle
+      || 'Une interface moderne pour gérer votre environnement Docker.';
+    return `<section class="dash-hero" aria-label="Bienvenue">
+      <div class="dash-hero-bg" role="presentation"></div>
+      <div class="dash-hero-veil" aria-hidden="true"></div>
+      <div class="dash-hero-body">
+        <h2 class="dash-hero-title">${heading}</h2>
+        <p class="dash-hero-sub">${bag.esc(sub)}</p>
+      </div>
+    </section>`;
   }
 
   bag.gaugeRing = function gaugeRing(pct, color = '#3b82f6') {
@@ -793,7 +840,71 @@ export function install() {
     }
   }
 
-  /** Bind click → confirm? → bag.withBusy(fn) → optional reload */
+  /** Capture list-row focus so a reload can scroll back to the same item. */
+  bag.captureListFocus = function captureListFocus(fromEl) {
+    const tr = fromEl?.closest?.('tr') || null;
+    const id = String(
+      fromEl?.dataset?.id
+      || fromEl?.dataset?.name
+      || fromEl?.dataset?.updId
+      || tr?.dataset?.stackId
+      || tr?.dataset?.containerId
+      || tr?.dataset?.resourceId
+      || '',
+    );
+    const name = String(
+      fromEl?.dataset?.name
+      || tr?.dataset?.resourceName
+      || '',
+    );
+    return {
+      y: window.scrollY || window.pageYOffset || 0,
+      id,
+      name,
+    };
+  };
+
+  bag.rememberListFocus = function rememberListFocus(focusOrEl) {
+    const focus = focusOrEl && focusOrEl.nodeType
+      ? bag.captureListFocus(focusOrEl)
+      : (focusOrEl || null);
+    bag.pendingListFocus = focus;
+    return focus;
+  };
+
+  /** Restore scroll to a previously acted-on row (or raw scrollY fallback). */
+  bag.restoreListFocus = function restoreListFocus(focus) {
+    const f = focus || bag.pendingListFocus;
+    bag.pendingListFocus = null;
+    if (!f) return;
+    const run = () => {
+      const root = bag.root;
+      let row = null;
+      if (root && f.id) {
+        const id = String(f.id);
+        row = root.querySelector(`tr[data-stack-id="${CSS.escape(id)}"]`)
+          || root.querySelector(`tr[data-container-id="${CSS.escape(id)}"]`)
+          || root.querySelector(`tr[data-resource-id="${CSS.escape(id)}"]`)
+          || root.querySelector(`[data-id="${CSS.escape(id)}"]`)?.closest('tr')
+          || root.querySelector(`[data-upd-id="${CSS.escape(id)}"]`)?.closest('tr');
+      }
+      if (!row && root && f.name) {
+        const name = String(f.name);
+        row = root.querySelector(`tr[data-resource-name="${CSS.escape(name)}"]`)
+          || root.querySelector(`[data-name="${CSS.escape(name)}"]`)?.closest('tr');
+      }
+      if (row) {
+        row.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        row.classList.add('row-flash');
+        window.setTimeout(() => { if (row.isConnected) row.classList.remove('row-flash'); }, 1400);
+        return;
+      }
+      window.scrollTo(0, f.y || 0);
+    };
+    requestAnimationFrame(() => requestAnimationFrame(run));
+  };
+
+  /** Bind click → confirm? → bag.withBusy(fn) → optional reload (keeps row focus) */
 
   bag.onBusyClick = function onBusyClick(el, handler, opts = {}) {
     if (!el) return;
@@ -801,9 +912,16 @@ export function install() {
       e.preventDefault();
       if (opts.confirm && !window.confirm(opts.confirm)) return;
       const target = e.currentTarget;
+      const focus = bag.captureListFocus(target);
       try {
-        await bag.withBusy(target, () => handler(target, e), opts);
-        if (opts.reload) await bag.route();
+        const result = await bag.withBusy(target, () => handler(target, e), opts);
+        if (result === 'navigated') return;
+        if (opts.reload) {
+          bag.rememberListFocus(focus);
+          if (typeof opts.reload === 'function') await opts.reload();
+          else await bag.route();
+          bag.restoreListFocus(focus);
+        }
       } catch (err) {
         alert(err.message || String(err));
       }
@@ -835,7 +953,9 @@ export function install() {
       clearInterval(bag.state.statsTimer);
       bag.state.statsTimer = null;
     }
-    if (bag.state.term) {
+    if (typeof bag.closeConsoleSession === 'function') {
+      bag.closeConsoleSession();
+    } else if (bag.state.term) {
       try { bag.state.term.dispose(); } catch (_) {}
       bag.state.term = null;
     }

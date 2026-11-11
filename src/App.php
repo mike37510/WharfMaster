@@ -249,6 +249,8 @@ final class App
         $R->post('/api/endpoints/{id}/containers/{cid}/update', fn ($r, $p) => $containers->updateContainerImage((int) $p['id'], (string) $p['cid'], $r, $u($p)));
         $R->get('/api/endpoints/{id}/containers/{cid}/logs', fn ($r, $p) => $containers->containerLogs((int) $p['id'], (string) $p['cid'], $r, $u($p)));
         $R->post('/api/endpoints/{id}/containers/{cid}/exec', fn ($r, $p) => $containers->containerExec((int) $p['id'], (string) $p['cid'], $r, $u($p)));
+        $R->post('/api/endpoints/{id}/containers/{cid}/console', fn ($r, $p) => $containers->containerConsole((int) $p['id'], (string) $p['cid'], $r, $u($p)));
+        $R->post('/api/endpoints/{id}/console/{eid}/resize', fn ($r, $p) => $containers->containerConsoleResize((int) $p['id'], (string) $p['eid'], $r, $u($p)));
 
         $R->get('/api/endpoints/{id}/bind-volumes', fn ($r, $p) => $volumes->listBindVolumes((int) $p['id'], $r, $u($p)));
         $R->post('/api/endpoints/{id}/bind-volumes', fn ($r, $p) => $volumes->createBindVolume((int) $p['id'], $r, $u($p)));

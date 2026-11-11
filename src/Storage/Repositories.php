@@ -184,6 +184,20 @@ final class Repositories
         $stmt->execute([$publicUrl, $id]);
     }
 
+    /** Clear endpoint public_url values that still hold a legacy WharfMaster URL. */
+    public function clearEndpointPublicUrlsMatching(string $url): int
+    {
+        $url = rtrim(trim($url), '/');
+        if ($url === '') {
+            return 0;
+        }
+        $stmt = $this->pdo->prepare(
+            'UPDATE endpoints SET public_url = \'\' WHERE public_url = ? OR rtrim(public_url, \'/\') = ?'
+        );
+        $stmt->execute([$url, $url]);
+        return $stmt->rowCount();
+    }
+
     public function createApiKey(int $userId, string $description, string $rawKey): array
     {
         $prefix = substr($rawKey, 0, 8);

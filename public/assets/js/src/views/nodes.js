@@ -41,9 +41,9 @@ export function install() {
           <label class="check-row"><input type="checkbox" id="n-clear-pin"> Forcer le reset de l’empreinte TLS</label>
           ` : ''}
           <div class="form-group">
-            <label class="field-label">URL publique (optionnel)</label>
+            <label class="field-label">URL hôte des ports (optionnel)</label>
             <input id="n-public-url" value="${bag.esc(node.PublicURL || '')}" placeholder="https://nas.lan" autocomplete="off" spellcheck="false">
-            <p class="field-hint muted">Utilisée pour les liens de ports publiés sur ce nœud.</p>
+            <p class="field-hint muted">Surcharge l’« URL hôte des ports » globale pour les liens cliquables de ce nœud (pas l’URL WharfMaster).</p>
           </div>
           <div class="actions-bar">
             <button type="button" class="btn btn-primary" id="n-save">Enregistrer</button>

@@ -633,11 +633,11 @@ export function install() {
               <div class="console-placeholder" id="console-placeholder">
                 <div style="font-size:28px;opacity:.5">⬛</div>
                 <p>${running
-                  ? 'Choisissez un bag.shell puis cliquez sur <strong>Connecter</strong> pour ouvrir une console dans ce conteneur.'
+                  ? 'Choisissez un shell puis cliquez sur <strong>Connecter</strong> pour ouvrir une console dans ce conteneur.'
                   : "Démarrez le conteneur avant d'ouvrir la console."}</p>
               </div>
             </div>
-            <div class="console-hint">Console exec · Entrée exécute chaque commande · Builtins : clear, cd, pwd</div>
+            <div class="console-hint">TTY interactif (WebSocket) · comme un vrai shell · Ctrl+C / vi / top supportés</div>
           </div>
         </div>
       </div>`;
@@ -669,7 +669,7 @@ export function install() {
       image: (c) => c.Image || '',
       state: (c) => String(c.State || ''),
       node: (c) => c._nodeName || '',
-      ports: (c) => bag.formatPorts(c.Ports || []),
+      ports: (c) => bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId),
       created: (c) => bag.createdSortKey(c.Created),
     });
 
@@ -681,22 +681,22 @@ export function install() {
       const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ''}`.toLowerCase();
       const actions = all
         ? `<span class="muted">—</span>`
-        : bag.moreActions(
-          `${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
-           ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
-           ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
-           ${bag.iconBtn({
-             modal: 'stats', id: c.Id, name, running: isRunning,
-             title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
-             icon: 'stats', statsId: c.Id,
-             extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
-           })}
-           ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}`,
-          `${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs conteneur', icon: 'logs', label: 'Logs' })}
-           ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console', label: 'Console' })}
-           ${bag.iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect', label: 'Inspecter' })}
-           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || c.Id, label: 'Partager' })}`,
-        );
+        : `<div class="quick-actions">
+          ${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
+          ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
+          ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
+          ${bag.iconBtn({
+            modal: 'stats', id: c.Id, name, running: isRunning,
+            title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
+            icon: 'stats', statsId: c.Id,
+            extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
+          })}
+          ${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs', icon: 'logs' })}
+          ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
+          ${bag.iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
+          ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || c.Id })}
+          ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
+        </div>`;
       return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}">
         ${all ? '' : bag.bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${bag.esc(c._nodeName || '—')}</td>` : ''}
@@ -704,18 +704,22 @@ export function install() {
           <strong><a href="#containers/${bag.esc(c.Id)}" ${all ? `data-switch-node="${bag.esc(c._nodeId)}"` : ''}>${bag.esc(name)}</a></strong>
           <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
         </td>
-        <td class="mono">${bag.esc(c.Image)}</td>
-        ${all ? '' : `<td class="img-upd-cell" data-cupd="${bag.esc(c.Id)}">
-          <span class="img-upd is-loading" title="Vérification de l’image…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>
-        </td>`}
+        <td class="mono cell-clip cell-image" title="${bag.esc(c.Image || '')}">
+          <span class="img-with-upd">
+            ${all ? '' : `<span class="img-upd-slot" data-cupd="${bag.esc(c.Id)}">
+              <span class="img-upd is-loading img-upd-dot-only" title="Vérification de l’image…"><span class="img-upd-dot"></span></span>
+            </span>`}
+            <span class="img-name">${bag.esc(c.Image || '')}</span>
+          </span>
+        </td>
         <td>${bag.badge(c.State)}</td>
-        <td>${bag.formatPorts(c.Ports || [])}</td>
+        <td>${bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId)}</td>
         <td>${bag.formatCreated(c.Created)}</td>
         <td class="actions">${actions}</td>
       </tr>`;
     }).join('');
 
-    const colSpan = all ? 7 : 9;
+    const colSpan = all ? 7 : 8;
     bag.root.innerHTML = bag.shell('Conteneurs', `
       ${bag.pageHeader(all ? 'Conteneurs — tous les nœuds' : 'Liste des conteneurs')}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${bag.esc(failMsg)}</div>` : ''}
@@ -736,7 +740,6 @@ export function install() {
             ${all ? bag.sortTh('Nœud', 'node', 'containers') : ''}
             ${bag.sortTh('Nom', 'name', 'containers')}
             ${bag.sortTh('Image', 'image', 'containers')}
-            ${all ? '' : '<th title="Image du registre">Màj</th>'}
             ${bag.sortTh('État', 'state', 'containers')}
             ${bag.sortTh('Ports publiés', 'ports', 'containers')}
             ${bag.sortTh('Créé', 'created', 'containers')}
@@ -771,8 +774,8 @@ export function install() {
         reload: () => bag.viewContainers(),
       });
       document.getElementById('container-upd-refresh')?.addEventListener('click', () => {
-        bag.root.querySelectorAll('[data-cupd]').forEach((cell) => {
-          cell.innerHTML = `<span class="img-upd is-loading" title="Vérification…"><span class="img-upd-dot"></span><span class="img-upd-lbl">…</span></span>`;
+        bag.root.querySelectorAll('[data-cupd]').forEach((slot) => {
+          slot.innerHTML = `<span class="img-upd is-loading img-upd-dot-only" title="Vérification…"><span class="img-upd-dot"></span></span>`;
         });
         bag.loadContainerUpdateIndicators(true);
       });
@@ -789,6 +792,7 @@ export function install() {
         });
       });
     }
+    bag.restoreListFocus();
   }
 
   bag.loadContainerUpdateIndicators = async function loadContainerUpdateIndicators(refresh = false) {
@@ -796,27 +800,25 @@ export function install() {
       const data = await bag.Api.containerUpdates(!!refresh);
       const map = data?.Updates || {};
       Object.keys(map).forEach((id) => {
-        const cell = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
-        if (!cell) return;
+        const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
+        if (!slot) return;
         const u = map[id] || {};
         let title = u.Detail || u.Error || 'Aucun contrôle';
         if (u.Image) title = `${u.Image}\n${title}`;
-        cell.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+        slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
           action: 'container',
           id,
+          dotOnly: true,
         });
       });
       bag.root.querySelectorAll('[data-cupd] .img-upd.is-loading').forEach((el) => {
-        el.className = 'img-upd is-unknown';
+        el.className = 'img-upd is-unknown img-upd-dot-only';
         el.title = 'Contrôle indisponible';
-        const lbl = el.querySelector('.img-upd-lbl');
-        if (lbl) lbl.textContent = '—';
-        else el.insertAdjacentHTML('beforeend', '<span class="img-upd-lbl">—</span>');
       });
       bag.bindImageUpdateActions(bag.root);
     } catch {
-      bag.root.querySelectorAll('[data-cupd]').forEach((cell) => {
-        cell.innerHTML = bag.stackUpdatePill('unknown', 0, 'Contrôle indisponible');
+      bag.root.querySelectorAll('[data-cupd]').forEach((slot) => {
+        slot.innerHTML = bag.stackUpdatePill('unknown', 0, 'Contrôle indisponible', { dotOnly: true });
       });
     }
   }
@@ -848,7 +850,7 @@ export function install() {
             <dt>Statut</dt><dd>${bag.badge(info.State?.Status || '')}</dd>
             <dt>Créé le</dt><dd>${bag.esc(info.Created || '')}</dd>
             <dt>Adresse IP</dt><dd class="mono">${bag.esc(info.NetworkSettings?.IPAddress || Object.values(info.NetworkSettings?.Networks || {})[0]?.IPAddress || '—')}</dd>
-            <dt>Ports publiés</dt><dd>${bag.formatPorts(ports)}</dd>
+            <dt>Ports publiés</dt><dd>${bag.formatPorts(ports, bag.state.endpointId)}</dd>
             <dt>Commande</dt><dd class="mono">${bag.esc((info.Config?.Cmd || []).join(' '))}</dd>
           </dl>
         </div>`;
@@ -874,7 +876,7 @@ export function install() {
           ${bag.iconBtn({ act: 'remove', title: 'Supprimer', icon: 'remove', danger: true })}
         </div>
         <div class="spacer"></div>
-        ${bag.formatPorts(ports)}
+        ${bag.formatPorts(ports, bag.state.endpointId)}
       </div>
       <div class="tabs">${tabs}</div>
       ${body}
@@ -904,11 +906,14 @@ export function install() {
     });
     bag.root.querySelectorAll('[data-act]').forEach((btn) => {
       bag.onBusyClick(btn, async (el) => {
+        const focus = bag.captureListFocus(el);
         await bag.containerAction(id, el.dataset.act);
         if (el.dataset.act === 'remove') {
           location.hash = '#containers';
           return 'navigated';
         }
+        bag.rememberListFocus(focus);
+        return;
       }, {
         confirm: btn.dataset.act === 'remove' ? 'Supprimer ce conteneur ?' : null,
         reload: btn.dataset.act !== 'remove',
@@ -956,14 +961,10 @@ export function install() {
       connectBtn.disabled = true;
       shellSelect.disabled = true;
       disconnectBtn.disabled = false;
-      bag.setConsoleStatus('is-connected', 'Connecté');
     }, { disableSiblings: false });
 
     disconnectBtn.onclick = () => {
-      if (bag.state.term) {
-        try { bag.state.term.dispose(); } catch (_) {}
-        bag.state.term = null;
-      }
+      bag.closeConsoleSession();
       const wrap = document.getElementById('term');
       if (wrap) {
         wrap.innerHTML = `<div class="console-placeholder" id="console-placeholder">
@@ -978,6 +979,22 @@ export function install() {
     };
   }
 
+  bag.closeConsoleSession = function closeConsoleSession() {
+    if (bag.state.consoleWs) {
+      try { bag.state.consoleWs.close(); } catch (_) {}
+      bag.state.consoleWs = null;
+    }
+    if (bag.state.consoleResizeTimer) {
+      clearTimeout(bag.state.consoleResizeTimer);
+      bag.state.consoleResizeTimer = null;
+    }
+    if (bag.state.term) {
+      try { bag.state.term.dispose(); } catch (_) {}
+      bag.state.term = null;
+    }
+    bag.state.consoleExecId = null;
+  }
+
   bag.mountConsole = async function mountConsole(containerId, containerName) {
     const wrap = document.getElementById('term');
     if (!wrap) return;
@@ -986,14 +1003,10 @@ export function install() {
       return;
     }
 
+    bag.closeConsoleSession();
     const placeholder = document.getElementById('console-placeholder');
     if (placeholder) placeholder.remove();
     wrap.innerHTML = '';
-
-    if (bag.state.term) {
-      try { bag.state.term.dispose(); } catch (_) {}
-      bag.state.term = null;
-    }
 
     const shellSelect = document.getElementById('shell-bin');
     const shortName = (containerName || bag.shortId(containerId)).replace(/[^a-zA-Z0-9_.-]/g, '') || 'container';
@@ -1052,167 +1065,96 @@ export function install() {
     bag.state.term = term;
     term.focus();
 
-    let cwd = '/';
-    let user = 'root';
-    let buffer = '';
-    let busy = false;
-    let history = [];
-    let historyIdx = -1;
+    bag.setConsoleStatus('is-busy', 'Création de la session…');
+    let session;
+    try {
+      session = await bag.Api.createConsoleSession(containerId, {
+        shell: shellSelect?.value || '/bin/sh',
+        cols: Math.max(40, term.cols || 120),
+        rows: Math.max(10, term.rows || 40),
+      });
+    } catch (err) {
+      term.writeln(`\x1b[31m${err.message || err}\x1b[0m`);
+      bag.setConsoleStatus('', 'Erreur');
+      throw err;
+    }
 
-    const termSize = () => ({
-      cols: Math.max(40, term.cols || 120),
-      rows: Math.max(10, term.rows || 40),
+    const execId = session.Id || session.id;
+    const ticket = session.Token || session.token;
+    const endpointId = session.EndpointId || bag.Api.getEndpointId();
+    bag.state.consoleExecId = execId;
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/api/websocket/exec?id=${encodeURIComponent(execId)}&endpointId=${encodeURIComponent(endpointId)}&token=${encodeURIComponent(ticket)}`;
+
+    bag.setConsoleStatus('is-busy', 'Connexion WebSocket…');
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    bag.state.consoleWs = ws;
+
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('Délai de connexion WebSocket dépassé')), 15000);
+      ws.onopen = () => { clearTimeout(t); resolve(); };
+      ws.onerror = () => { clearTimeout(t); reject(new Error('Échec WebSocket (proxy Upgrade ?)')); };
     });
 
-    /** Write command output preserving ANSI colors / column layout from TTY. */
-    const writeOut = (raw) => {
-      if (!raw) return;
-      let text = String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-      // Strip trailing single newline — writeln adds one; keep internal layout intact
-      if (text.endsWith('\n')) text = text.slice(0, -1);
-      if (!text) return;
-      term.write(text.replace(/\n/g, '\r\n') + '\r\n');
+    term.writeln(`\x1b[90mConnecté à ${shortName} via ${session.Shell || shellSelect?.value || '/bin/sh'} (TTY)\x1b[0m`);
+    bag.setConsoleStatus('is-connected', `Connecté · ${session.Shell || shellSelect?.value || '/bin/sh'}`);
+
+    const sendResize = () => {
+      const h = Math.max(10, term.rows || 40);
+      const w = Math.max(40, term.cols || 120);
+      bag.Api.resizeConsole(execId, h, w).catch(() => {});
+    };
+    sendResize();
+
+    ws.onmessage = (ev) => {
+      if (!bag.state.term) return;
+      if (typeof ev.data === 'string') {
+        term.write(ev.data);
+        return;
+      }
+      const bytes = new Uint8Array(ev.data);
+      let s = '';
+      for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      term.write(s);
+    };
+    ws.onclose = () => {
+      bag.state.consoleWs = null;
+      if (bag.state.term) {
+        term.writeln('\r\n\x1b[33m[session terminée]\x1b[0m');
+        bag.setConsoleStatus('', 'Déconnecté');
+      }
+    };
+    ws.onerror = () => {
+      term.writeln('\r\n\x1b[31m[erreur WebSocket]\x1b[0m');
     };
 
-    // Probe identity / cwd
-    bag.setConsoleStatus('is-busy', 'Connexion…');
-    try {
-      const who = await bag.Api.containerExec(containerId, 'whoami; pwd', shellSelect.value, '', termSize());
-      const lines = ((who.Stdout || '') + (who.Stderr || '')).trim().split('\n').map((l) => l.trim()).filter(Boolean);
-      if (lines[0]) user = lines[0].replace(/\x1b\[[0-9;]*m/g, '');
-      if (lines[1]) cwd = lines[1].replace(/\x1b\[[0-9;]*m/g, '');
-    } catch (_) {}
+    term.onData((data) => {
+      if (!bag.state.consoleWs || bag.state.consoleWs.readyState !== WebSocket.OPEN) return;
+      bag.state.consoleWs.send(data);
+    });
 
-    const promptStr = () => {
-      const host = shortName.slice(0, 20);
-      return `\x1b[1;32m${user}@${host}\x1b[0m:\x1b[1;34m${cwd}\x1b[0m# `;
+    const onResize = () => {
+      try { fit && fit.fit(); } catch (_) {}
+      if (bag.state.consoleResizeTimer) clearTimeout(bag.state.consoleResizeTimer);
+      bag.state.consoleResizeTimer = setTimeout(sendResize, 120);
     };
-    const writePrompt = () => { term.write(promptStr()); };
-
-    term.writeln(`\x1b[90mConnecté à ${shortName} via ${shellSelect.value}\x1b[0m`);
-    writePrompt();
-    bag.setConsoleStatus('is-connected', `Connecté · ${shellSelect.value}`);
-
-    const onResize = () => { try { fit && fit.fit(); } catch (_) {} };
     window.addEventListener('resize', onResize);
     const modalEl = wrap.closest('.modal-workspace');
     if (modalEl) modalEl.addEventListener('wm-modal-resize', onResize);
-
-    const runLine = async (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) { writePrompt(); return; }
-      if (trimmed === 'clear' || trimmed === 'cls') {
-        term.clear();
-        writePrompt();
-        return;
-      }
-      if (trimmed === 'pwd') {
-        term.writeln(cwd || '/');
-        writePrompt();
-        return;
-      }
-      if (trimmed === 'exit') {
-        document.getElementById('console-disconnect')?.click();
-        return;
-      }
-      if (trimmed.startsWith('cd ') || trimmed === 'cd') {
-        const target = trimmed === 'cd' ? '/' : trimmed.slice(3).trim() || '/';
-        busy = true;
-        bag.setConsoleStatus('is-busy', 'Exécution…');
-        try {
-          const res = await bag.Api.containerExec(
-            containerId,
-            `cd ${bag.shellQuote(cwd)} && cd ${bag.shellQuote(target)} && pwd`,
-            shellSelect.value,
-            '',
-            termSize(),
-          );
-          const out = (res.Stdout || '').trim().replace(/\x1b\[[0-9;]*m/g, '');
-          if (res.ExitCode === 0 && out) cwd = out.split('\n').pop().trim();
-          else {
-            const err = (res.Stderr || res.Stdout || 'cd: no such file or directory').trim();
-            term.writeln(`\x1b[31m${err}\x1b[0m`);
-          }
-        } catch (err) {
-          term.writeln(`\x1b[31m${err.message}\x1b[0m`);
-        }
-        busy = false;
-        bag.setConsoleStatus('is-connected', `Connecté · ${shellSelect.value}`);
-        writePrompt();
-        return;
-      }
-
-      busy = true;
-      bag.setConsoleStatus('is-busy', 'Exécution…');
-      try {
-        const res = await bag.Api.containerExec(containerId, trimmed, shellSelect.value, cwd, termSize());
-        writeOut((res.Stdout || '') + (res.Stderr || ''));
-      } catch (err) {
-        term.writeln(`\x1b[31m${err.message}\x1b[0m`);
-      }
-      busy = false;
-      bag.setConsoleStatus('is-connected', `Connecté · ${shellSelect.value}`);
-      writePrompt();
-    };
-
-    term.onData(async (data) => {
-      if (busy) return;
-      // Arrow up / down (history)
-      if (data === '\x1b[A') {
-        if (!history.length) return;
-        if (historyIdx < 0) historyIdx = history.length - 1;
-        else historyIdx = Math.max(0, historyIdx - 1);
-        while (buffer.length) { term.write('\b \b'); buffer = buffer.slice(0, -1); }
-        buffer = history[historyIdx];
-        term.write(buffer);
-        return;
-      }
-      if (data === '\x1b[B') {
-        while (buffer.length) { term.write('\b \b'); buffer = buffer.slice(0, -1); }
-        if (historyIdx < 0) return;
-        historyIdx += 1;
-        if (historyIdx >= history.length) { historyIdx = -1; buffer = ''; return; }
-        buffer = history[historyIdx];
-        term.write(buffer);
-        return;
-      }
-      if (data === '\r') {
-        const line = buffer;
-        buffer = '';
-        historyIdx = -1;
-        term.write('\r\n');
-        if (line.trim()) history.push(line);
-        if (history.length > 100) history.shift();
-        await runLine(line);
-        return;
-      }
-      if (data === '\u0003') { // Ctrl+C
-        buffer = '';
-        term.write('^C\r\n');
-        writePrompt();
-        return;
-      }
-      if (data === '\u000c') { // Ctrl+L
-        term.clear();
-        writePrompt();
-        term.write(buffer);
-        return;
-      }
-      const code = data.charCodeAt(0);
-      if (code === 127 || data === '\x7f') {
-        if (buffer.length) {
-          buffer = buffer.slice(0, -1);
-          term.write('\b \b');
-        }
-        return;
-      }
-      if (code < 32) return;
-      buffer += data;
-      term.write(data);
+    term.onResize?.(() => {
+      if (bag.state.consoleResizeTimer) clearTimeout(bag.state.consoleResizeTimer);
+      bag.state.consoleResizeTimer = setTimeout(sendResize, 120);
     });
 
-    // Keep fit handler; cleaned when term disposed / bag.route changes via bag.stopTimers
-    term.onDispose?.(() => window.removeEventListener('resize', onResize));
+    term.onDispose?.(() => {
+      window.removeEventListener('resize', onResize);
+      if (bag.state.consoleWs) {
+        try { bag.state.consoleWs.close(); } catch (_) {}
+        bag.state.consoleWs = null;
+      }
+    });
   }
 
   bag.containerAction = async function containerAction(id, act) {

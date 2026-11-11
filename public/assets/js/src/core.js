@@ -8,17 +8,31 @@ export function installCore() {
   bag.THEME_KEY = 'dm_theme';
   bag.SIDEBAR_KEY = 'wm_sidebar_collapsed';
 
+  bag.THEMES = ['dark', 'aurora', 'light'];
+
   bag.readTheme = function readTheme() {
     const saved = localStorage.getItem(bag.THEME_KEY);
-    if (saved === 'light' || saved === 'dark') return saved;
-    return 'dark';
+    if (bag.THEMES.includes(saved)) return saved;
+    return 'aurora';
   }
 
   bag.applyTheme = function applyTheme(theme) {
-    const t = theme === 'light' ? 'light' : 'dark';
+    const t = bag.THEMES.includes(theme) ? theme : 'aurora';
     document.documentElement.setAttribute('data-theme', t);
     localStorage.setItem(bag.THEME_KEY, t);
     return t;
+  }
+
+  bag.themeToggleLabel = function themeToggleLabel(theme) {
+    if (theme === 'light') return '☾';
+    if (theme === 'aurora') return '✦';
+    return '☀';
+  }
+
+  bag.themeToggleTitle = function themeToggleTitle(theme) {
+    if (theme === 'light') return 'Thème clair — cliquer pour basculer';
+    if (theme === 'aurora') return 'Thème Aurora — cliquer pour basculer';
+    return 'Thème sombre — cliquer pour basculer';
   }
 
   bag.readSidebarCollapsed = function readSidebarCollapsed() {
@@ -73,6 +87,7 @@ export function installCore() {
     containerStatsTimer: null,
     term: null,
     publicUrl: '',
+    portsHostUrl: '',
     metricsChartHours: 72,
     metricsRetentionDays: 90,
     trivyEnabled: true,
@@ -92,9 +107,14 @@ export function installCore() {
   bag.metricCache = { scope: '', series: [] };
 
   bag.toggleTheme = function toggleTheme() {
-    bag.state.theme = bag.applyTheme(bag.state.theme === 'dark' ? 'light' : 'dark');
+    const cur = bag.THEMES.indexOf(bag.state.theme);
+    const next = bag.THEMES[(cur >= 0 ? cur + 1 : 0) % bag.THEMES.length];
+    bag.state.theme = bag.applyTheme(next);
     const btn = document.getElementById('theme-toggle');
-    if (btn) btn.textContent = bag.state.theme === 'dark' ? '☀' : '☾';
+    if (btn) {
+      btn.textContent = bag.themeToggleLabel(bag.state.theme);
+      btn.title = bag.themeToggleTitle(bag.state.theme);
+    }
   }
 
   bag.toggleSidebar = function toggleSidebar() {
@@ -382,18 +402,28 @@ export function installCore() {
     return `${(v / 1024 ** 3).toFixed(2)} GB/s`;
   }
 
-  bag.hostBase = function hostBase() {
-    const configured = (bag.state.publicUrl || '').trim().replace(/\/$/, '');
+  /** Base URL for clickable published ports (not the WharfMaster / agent-join URL). */
+  bag.hostBase = function hostBase(endpointId) {
+    const normalize = (u) => String(u || '').trim().replace(/\/$/, '');
+    const configured = normalize(bag.state.portsHostUrl);
+    const manager = normalize(bag.state.publicUrl);
+    const eid = endpointId != null ? Number(endpointId) : Number(bag.state.endpointId);
+    if (Number.isFinite(eid) && eid > 0) {
+      const ep = (bag.state.endpoints || []).find((e) => Number(e.Id) === eid);
+      const nodeUrl = normalize(ep?.PublicURL);
+      // Surcharge nœud seulement si elle n’est pas l’ancienne URL WharfMaster (sync legacy).
+      if (nodeUrl && (!manager || nodeUrl !== manager)) return nodeUrl;
+    }
     if (configured) return configured;
     const { protocol, hostname } = window.location;
     return `${protocol}//${hostname}`;
   }
 
-  bag.portHref = function portHref(pub) {
-    const base = bag.hostBase();
+  bag.portHref = function portHref(pub, endpointId) {
+    const base = bag.hostBase(endpointId);
     try {
       const u = new URL(base.includes('://') ? base : `https://${base}`);
-      // If PublicURL already includes a non-default port, keep host and swap/add published port
+      // Keep host from ports URL, swap/add the published container port
       u.port = String(pub);
       return u.toString().replace(/\/$/, '');
     } catch {
@@ -401,7 +431,7 @@ export function installCore() {
     }
   }
 
-  bag.formatPorts = function formatPorts(ports) {
+  bag.formatPorts = function formatPorts(ports, endpointId) {
     if (!ports || !ports.length) return '<span class="muted">—</span>';
     const seen = new Set();
     const chips = [];
@@ -416,7 +446,7 @@ export function installCore() {
         const key = `${pub}:${priv}/${type}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        const href = bag.portHref(pub);
+        const href = bag.portHref(pub, endpointId);
         chips.push(
           `<a class="port-link" href="${bag.esc(href)}" target="_blank" rel="noopener" title="${bag.esc(href)}">${bag.esc(pub)}:${bag.esc(priv)}/${bag.esc(type)} ↗</a>`
         );
@@ -541,6 +571,7 @@ export function installCore() {
       bag.Api.setToken('');
       bag.state.user = null;
       bag.state.publicUrl = '';
+      bag.state.portsHostUrl = '';
       if (bag.state.alertTimer) {
         clearInterval(bag.state.alertTimer);
         bag.state.alertTimer = null;
