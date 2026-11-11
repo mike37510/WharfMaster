@@ -8,7 +8,7 @@ export function installCore() {
   bag.THEME_KEY = 'dm_theme';
   bag.SIDEBAR_KEY = 'wm_sidebar_collapsed';
 
-  bag.THEMES = ['dark', 'aurora', 'light'];
+  bag.THEMES = ['dark', 'aurora', 'beacon', 'light'];
 
   bag.readTheme = function readTheme() {
     const saved = localStorage.getItem(bag.THEME_KEY);
@@ -26,12 +26,14 @@ export function installCore() {
   bag.themeToggleLabel = function themeToggleLabel(theme) {
     if (theme === 'light') return '☾';
     if (theme === 'aurora') return '✦';
+    if (theme === 'beacon') return '⚑';
     return '☀';
   }
 
   bag.themeToggleTitle = function themeToggleTitle(theme) {
     if (theme === 'light') return 'Thème clair — cliquer pour basculer';
-    if (theme === 'aurora') return 'Thème Aurora — cliquer pour basculer';
+    if (theme === 'aurora') return 'Thème Harbor Glass — cliquer pour basculer';
+    if (theme === 'beacon') return 'Thème Beacon — cliquer pour basculer';
     return 'Thème sombre — cliquer pour basculer';
   }
 

@@ -94,8 +94,8 @@ final class SystemController extends BaseController
 
         if (array_key_exists('UiTheme', $body) || array_key_exists('uiTheme', $body) || array_key_exists('Theme', $body)) {
             $theme = strtolower(trim((string) ($body['UiTheme'] ?? $body['uiTheme'] ?? $body['Theme'] ?? 'dark')));
-            if (!in_array($theme, ['dark', 'aurora', 'light'], true)) {
-                return Response::error('Thème invalide (dark, aurora, light)', 400);
+            if (!in_array($theme, ['dark', 'aurora', 'beacon', 'light'], true)) {
+                return Response::error('Thème invalide (dark, aurora, beacon, light)', 400);
             }
             $this->repo->setSetting('ui_theme', $theme);
         }

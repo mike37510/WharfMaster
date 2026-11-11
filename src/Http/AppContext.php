@@ -561,11 +561,11 @@ final class AppContext
         ];
     }
 
-    /** UI theme: dark | aurora | light */
+    /** UI theme: dark | aurora | beacon | light */
     public function uiTheme(): string
     {
         $v = strtolower(trim((string) ($this->repo->getSetting('ui_theme', 'aurora') ?? 'aurora')));
-        return in_array($v, ['dark', 'aurora', 'light'], true) ? $v : 'aurora';
+        return in_array($v, ['dark', 'aurora', 'beacon', 'light'], true) ? $v : 'aurora';
     }
 
     public function trivyEnabled(): bool

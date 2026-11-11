@@ -293,13 +293,13 @@ export function install() {
         subtitle: 'Vue agrégée de tous vos nœuds Docker — une interface moderne.',
       })}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agrégat partiel.${failMsg}</div>` : ''}
-      ${perNodeHint ? `<div class="muted" style="margin-bottom:10px">Répartition conteneurs — ${bag.esc(perNodeHint)}</div>` : ''}
       <div class="stat-grid dash-hero-stats">
         ${bag.dashStatCard('containers', 'blue', 'Conteneurs', list.length, metricSeriesAll)}
         ${bag.dashStatCard('images', 'purple', 'Images', imgs.length, metricSeriesAll)}
         ${bag.dashStatCard('volumes', 'green', 'Volumes', volList.length, metricSeriesAll)}
         ${bag.dashStatCard('networks', 'orange', 'Réseaux', nets.length, metricSeriesAll)}
       </div>
+      ${perNodeHint ? `<div class="muted" style="margin:12px 0 10px">Répartition conteneurs — ${bag.esc(perNodeHint)}</div>` : ''}
 
       <div class="dash-layout">
         <div class="dash-col">

@@ -5,7 +5,7 @@
     (function () {
       try {
         var t = localStorage.getItem('dm_theme');
-        if (t === 'light' || t === 'dark' || t === 'aurora') document.documentElement.setAttribute('data-theme', t);
+        if (t === 'light' || t === 'dark' || t === 'aurora' || t === 'beacon') document.documentElement.setAttribute('data-theme', t);
         else document.documentElement.setAttribute('data-theme', 'aurora');
       } catch (e) {}
     })();
@@ -20,7 +20,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/lint/lint.min.css">
-  <link rel="stylesheet" href="/assets/css/app.css?v=2.3.1.25">
+  <link rel="stylesheet" href="/assets/css/app.css?v=2.3.1.28">
 </head>
 <body>
   <div id="app">
@@ -35,6 +35,6 @@
   <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/lint/lint.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/edit/matchbrackets.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/selection/active-line.min.js"></script>
-  <script src="/assets/js/app.js?v=2.3.1.25"></script>
+  <script src="/assets/js/app.js?v=2.3.1.28"></script>
 </body>
 </html>

@@ -402,7 +402,7 @@
     bag.root = document.getElementById("app");
     bag.THEME_KEY = "dm_theme";
     bag.SIDEBAR_KEY = "wm_sidebar_collapsed";
-    bag.THEMES = ["dark", "aurora", "light"];
+    bag.THEMES = ["dark", "aurora", "beacon", "light"];
     bag.readTheme = function readTheme() {
       const saved = localStorage.getItem(bag.THEME_KEY);
       if (bag.THEMES.includes(saved)) return saved;
@@ -417,11 +417,13 @@
     bag.themeToggleLabel = function themeToggleLabel(theme) {
       if (theme === "light") return "\u263E";
       if (theme === "aurora") return "\u2726";
+      if (theme === "beacon") return "\u2691";
       return "\u2600";
     };
     bag.themeToggleTitle = function themeToggleTitle(theme) {
       if (theme === "light") return "Th\xE8me clair \u2014 cliquer pour basculer";
-      if (theme === "aurora") return "Th\xE8me Aurora \u2014 cliquer pour basculer";
+      if (theme === "aurora") return "Th\xE8me Harbor Glass \u2014 cliquer pour basculer";
+      if (theme === "beacon") return "Th\xE8me Beacon \u2014 cliquer pour basculer";
       return "Th\xE8me sombre \u2014 cliquer pour basculer";
     };
     bag.readSidebarCollapsed = function readSidebarCollapsed() {
@@ -3484,13 +3486,13 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         subtitle: "Vue agr\xE9g\xE9e de tous vos n\u0153uds Docker \u2014 une interface moderne."
       })}
       ${partial ? `<div class="info-box" style="margin-bottom:12px">Agr\xE9gat partiel.${failMsg}</div>` : ""}
-      ${perNodeHint ? `<div class="muted" style="margin-bottom:10px">R\xE9partition conteneurs \u2014 ${bag.esc(perNodeHint)}</div>` : ""}
       <div class="stat-grid dash-hero-stats">
         ${bag.dashStatCard("containers", "blue", "Conteneurs", list.length, metricSeriesAll)}
         ${bag.dashStatCard("images", "purple", "Images", imgs.length, metricSeriesAll)}
         ${bag.dashStatCard("volumes", "green", "Volumes", volList.length, metricSeriesAll)}
         ${bag.dashStatCard("networks", "orange", "R\xE9seaux", nets.length, metricSeriesAll)}
       </div>
+      ${perNodeHint ? `<div class="muted" style="margin:12px 0 10px">R\xE9partition conteneurs \u2014 ${bag.esc(perNodeHint)}</div>` : ""}
 
       <div class="dash-layout">
         <div class="dash-col">
