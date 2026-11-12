@@ -158,9 +158,14 @@ export function install() {
       return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(v.Name)}" data-resource-name="${bag.esc(v.Name)}" data-bind="${isBind ? '1' : '0'}" data-bind-id="${bag.esc(isBind ? (v.Id || '') : '')}">
       ${all ? '' : bag.bulkSelectTd(v.Name, { disabled: isBind, title: isBind ? 'Les binds se retirent unitairement' : '' })}
       ${all ? `<td class="muted">${bag.esc(v._nodeName || '—')}</td>` : ''}
-      <td>${all
-        ? bag.esc(v.Name)
-        : `<a href="#volumes/${encodeURIComponent(v.Name)}">${bag.esc(v.Name)}</a>`}${isBind && v.StackName ? ` <span class="muted" style="font-size:11px">(${bag.esc(v.StackName)})</span>` : ''}</td>
+      <td class="name-cell">
+        <strong>${all
+          ? bag.esc(v.Name)
+          : `<a href="#volumes/${encodeURIComponent(v.Name)}">${bag.esc(v.Name)}</a>`}</strong>
+        ${isBind
+          ? `<span class="id">${v.StackName ? bag.esc(v.StackName) : 'bind'}</span>`
+          : ''}
+      </td>
       <td>${bag.esc(driverLabel)}</td>
       <td>${usageCell}</td>
       <td class="mono cell-clip" title="${bag.esc(mount)}">${bag.esc(mount)}</td>

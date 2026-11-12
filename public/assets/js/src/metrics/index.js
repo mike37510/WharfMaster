@@ -472,6 +472,22 @@ export function install() {
     });
   }
 
+  bag.formatMetricRange = function formatMetricRange(fromSec, untilSec) {
+    const fmt = (sec) => {
+      try {
+        return new Date(sec * 1000).toLocaleString('fr-FR', {
+          day: '2-digit',
+          month: 'short',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      } catch {
+        return String(sec);
+      }
+    };
+    return `${fmt(fromSec)} → ${fmt(untilSec)}`;
+  }
+
   bag.openMetricDetailModal = function openMetricDetailModal(key, series) {
     const meta = bag.dashMetricMeta?.[key] || {
       label: key,
@@ -479,18 +495,71 @@ export function install() {
       color: '#38bdf8',
       href: `#${key}`,
     };
-    const vals = bag.metricValues(series, key);
-    const n = vals.length;
-    const last = n ? vals[n - 1] : 0;
-    const max = n ? Math.max(...vals) : 0;
-    const min = n ? Math.min(...vals) : 0;
-    const avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
-    const delta = n >= 2 ? vals[n - 1] - vals[n - 2] : 0;
-    const chart = bag.resourceChart(series, {
-      wrapId: 'metric-detail-wave',
-      keys: [{ key, color: meta.color, label: meta.label }],
-      maxY: Math.max(max, 1) * 1.15,
-    });
+    const retentionDays = bag.metricRetentionDays();
+    const defaultHours = bag.metricChartHours();
+    const windowChoices = Array.from(new Set([
+      defaultHours,
+      24,
+      48,
+      72,
+      168,
+      Math.min(retentionDays * 24, 720),
+    ].filter((h) => h >= 1 && h <= retentionDays * 24))).sort((a, b) => a - b);
+
+    let hours = defaultHours;
+    let until = Math.floor(Date.now() / 1000);
+    let loading = false;
+
+    const windowLabel = (h) => {
+      if (h === 24) return '24 h';
+      if (h % 24 === 0) {
+        const d = h / 24;
+        return `${d} j`;
+      }
+      return `${h} h`;
+    };
+
+    const renderBody = (pts, fromSec, untilSec) => {
+      const vals = bag.metricValues(pts, key);
+      const n = vals.length;
+      const last = n ? vals[n - 1] : 0;
+      const max = n ? Math.max(...vals) : 0;
+      const min = n ? Math.min(...vals) : 0;
+      const avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
+      const delta = n >= 2 ? vals[n - 1] - vals[n - 2] : 0;
+      const chart = bag.resourceChart(pts, {
+        wrapId: 'metric-detail-wave',
+        keys: [{ key, color: meta.color, label: meta.label }],
+        maxY: Math.max(max, 1) * 1.15,
+      });
+      const now = Math.floor(Date.now() / 1000);
+      const floor = now - retentionDays * 86400;
+      const canPrev = until - hours > floor + 60;
+      const canNext = until < now - 90;
+      const chips = windowChoices.map((h) =>
+        `<button type="button" class="btn btn-sm metric-win-chip${h === hours ? ' is-active' : ''}" data-metric-hours="${h}">${bag.esc(windowLabel(h))}</button>`
+      ).join('');
+
+      return `
+          <div class="metric-detail-nav">
+            <div class="metric-detail-nav-row">
+              <button type="button" class="btn btn-sm" data-metric-prev ${canPrev ? '' : 'disabled'} title="Fenêtre précédente">← Préc.</button>
+              <button type="button" class="btn btn-sm" data-metric-live ${canNext ? '' : 'disabled'} title="Revenir à maintenant">Maintenant</button>
+              <button type="button" class="btn btn-sm" data-metric-next ${canNext ? '' : 'disabled'} title="Fenêtre suivante">Suiv. →</button>
+            </div>
+            <div class="metric-detail-nav-row metric-win-chips">${chips}</div>
+            <p class="muted metric-detail-range">${bag.esc(bag.formatMetricRange(fromSec, untilSec))} · rétention ${retentionDays} j</p>
+          </div>
+          <div class="metric-detail-kpis">
+            <div class="metric-kpi"><span class="muted">${canNext ? 'Fin fenêtre' : 'Actuel'}</span><strong>${last}</strong></div>
+            <div class="metric-kpi"><span class="muted">Min</span><strong>${min}</strong></div>
+            <div class="metric-kpi"><span class="muted">Max</span><strong>${max}</strong></div>
+            <div class="metric-kpi"><span class="muted">Moyenne</span><strong>${avg.toFixed(1)}</strong></div>
+            <div class="metric-kpi"><span class="muted">Δ dernier</span><strong class="${delta > 0 ? 'ok' : delta < 0 ? 'bad' : ''}">${delta > 0 ? '+' : ''}${delta}</strong></div>
+            <div class="metric-kpi"><span class="muted">Relevés</span><strong>${n}</strong></div>
+          </div>
+          <div class="metric-detail-chart">${chart}</div>`;
+    };
 
     bag.closeAppModal();
     const host = bag.modalHost();
@@ -502,20 +571,14 @@ export function install() {
               <div class="stat-ico ${bag.esc(meta.tone)}">${bag.ico(key === 'networks' ? 'networks' : key)}</div>
               <div>
                 <h3>${bag.esc(meta.label)}</h3>
-                <div class="modal-sub">Historique · ${bag.esc(bag.metricWindowLabel())} · rétention ${bag.esc(String(bag.metricRetentionDays()))} j</div>
+                <div class="modal-sub" id="metric-detail-sub">Historique · navigation sur ${retentionDays} j de rétention</div>
               </div>
             </div>
             <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
           </div>
-          <div class="metric-detail-kpis">
-            <div class="metric-kpi"><span class="muted">Actuel</span><strong>${last}</strong></div>
-            <div class="metric-kpi"><span class="muted">Min</span><strong>${min}</strong></div>
-            <div class="metric-kpi"><span class="muted">Max</span><strong>${max}</strong></div>
-            <div class="metric-kpi"><span class="muted">Moyenne</span><strong>${avg.toFixed(1)}</strong></div>
-            <div class="metric-kpi"><span class="muted">Δ dernier</span><strong class="${delta > 0 ? 'ok' : delta < 0 ? 'bad' : ''}">${delta > 0 ? '+' : ''}${delta}</strong></div>
-            <div class="metric-kpi"><span class="muted">Relevés</span><strong>${n}</strong></div>
+          <div id="metric-detail-body">
+            <div class="muted" style="padding:12px 0">Chargement…</div>
           </div>
-          <div class="metric-detail-chart">${chart}</div>
           <div class="actions-bar">
             <a class="btn btn-primary" href="${bag.esc(meta.href)}">Ouvrir ${bag.esc(meta.label)}</a>
             <button type="button" class="btn" data-close-modal>Fermer</button>
@@ -523,6 +586,79 @@ export function install() {
         </div>
       </div>`;
     bag.bindAppModalChrome();
+
+    const bodyEl = () => document.getElementById('metric-detail-body');
+    const subEl = () => document.getElementById('metric-detail-sub');
+
+    const bindNav = () => {
+      const root = bodyEl();
+      if (!root) return;
+      root.querySelector('[data-metric-prev]')?.addEventListener('click', () => {
+        until = Math.max(
+          Math.floor(Date.now() / 1000) - retentionDays * 86400 + hours,
+          until - hours,
+        );
+        void load();
+      });
+      root.querySelector('[data-metric-next]')?.addEventListener('click', () => {
+        until = Math.min(Math.floor(Date.now() / 1000), until + hours);
+        void load();
+      });
+      root.querySelector('[data-metric-live]')?.addEventListener('click', () => {
+        until = Math.floor(Date.now() / 1000);
+        void load();
+      });
+      root.querySelectorAll('[data-metric-hours]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const h = parseInt(btn.getAttribute('data-metric-hours') || '', 10);
+          if (!Number.isFinite(h) || h < 1) return;
+          hours = h;
+          void load();
+        });
+      });
+    };
+
+    const paint = (pts, fromSec, untilSec) => {
+      const el = bodyEl();
+      if (!el) return;
+      el.innerHTML = renderBody(pts, fromSec, untilSec);
+      if (subEl()) {
+        subEl().textContent = `Fenêtre ${windowLabel(hours)} · rétention ${retentionDays} j`;
+      }
+      bindNav();
+    };
+
+    const load = async () => {
+      if (loading) return;
+      loading = true;
+      const el = bodyEl();
+      if (el) el.innerHTML = `<div class="muted" style="padding:12px 0">Chargement…</div>`;
+      try {
+        const scope = bag.metricScopeKey();
+        const points = Math.min(720, Math.max(48, Math.ceil((hours * 60) / 5)));
+        const now = Math.floor(Date.now() / 1000);
+        if (until > now) until = now;
+        const data = await bag.Api.metricsHistory(scope, { hours, until, points });
+        const pts = Array.isArray(data?.Series) ? data.Series : [];
+        const fromSec = Number(data?.From) || (until - hours * 3600);
+        const untilSec = Number(data?.Until) || until;
+        until = untilSec;
+        paint(pts, fromSec, untilSec);
+      } catch (err) {
+        if (el) {
+          el.innerHTML = `<div class="error-box">${bag.esc(err.message || String(err))}</div>`;
+        }
+      } finally {
+        loading = false;
+      }
+    };
+
+    // First paint from cached series if viewing "now" window, then refresh
+    if (Array.isArray(series) && series.length) {
+      const fromSec = until - hours * 3600;
+      paint(series, fromSec, until);
+    }
+    void load();
   }
 
   bag.updateHostResourceChart = function updateHostResourceChart(series, counts) {

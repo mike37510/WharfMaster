@@ -943,23 +943,34 @@ final class Repositories
      * Downsamples evenly when denser than $maxPoints.
      * @return list<array{t:int,containers:int,images:int,volumes:int,networks:int,cpu:float,mem:float,disk:float}>
      */
-    public function listMetricSamples(string $scope, int $days = 90, int $maxPoints = 180, ?int $hours = null): array
+    /**
+     * @param ?int $hours Window length in hours (preferred over $days when set)
+     * @param ?int $until Unix end of window (default: now) — allows paging through retention
+     */
+    public function listMetricSamples(string $scope, int $days = 90, int $maxPoints = 180, ?int $hours = null, ?int $until = null): array
     {
         $keys = $this->metricScopeLookupKeys($scope);
         $maxPoints = max(10, min(2000, $maxPoints));
+        $now = time();
+        $days = max(1, min(365, $days));
+        $retentionFloor = $now - $days * 86400;
+        $untilTs = $until !== null ? min($now, max(0, $until)) : $now;
         if ($hours !== null) {
             $hours = max(1, min(365 * 24, $hours));
-            $since = time() - $hours * 3600;
+            $since = $untilTs - $hours * 3600;
         } else {
-            $days = max(1, min(365, $days));
-            $since = time() - $days * 86400;
+            $since = $untilTs - $days * 86400;
+        }
+        $since = max($since, $retentionFloor);
+        if ($since > $untilTs) {
+            $since = $untilTs;
         }
         $placeholders = implode(',', array_fill(0, count($keys), '?'));
         $stmt = $this->pdo->prepare(
             "SELECT sampled_at, containers, images, volumes, networks, cpu, mem, disk
-             FROM metric_samples WHERE scope IN ($placeholders) AND sampled_at >= ? ORDER BY sampled_at ASC"
+             FROM metric_samples WHERE scope IN ($placeholders) AND sampled_at >= ? AND sampled_at <= ? ORDER BY sampled_at ASC"
         );
-        $stmt->execute([...$keys, $since]);
+        $stmt->execute([...$keys, $since, $untilTs]);
         $rows = $stmt->fetchAll() ?: [];
         $mapped = array_map(static function (array $r): array {
             return [

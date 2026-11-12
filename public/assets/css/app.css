@@ -2487,6 +2487,28 @@ button.img-usage-btn:active {
 .metric-detail-chart .wave-chart {
   min-height: 160px;
 }
+.metric-detail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.metric-detail-nav-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.metric-detail-range {
+  margin: 0;
+  font-size: 12.5px;
+}
+.metric-win-chip.is-active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-weight: 700;
+}
 .stat-ico.blue { background: var(--accent-soft); color: var(--accent-hover); }
 .stat-ico.purple { background: var(--purple-soft); color: var(--purple); }
 .stat-ico.green { background: var(--success-soft); color: var(--success); }

@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.1**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.2**.
 
 | | |
 |---|---|
@@ -175,7 +175,7 @@ Variables utiles :
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.1
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.2
 ```
 
 Backup admin :
@@ -389,7 +389,7 @@ Si `TrivyEnabled=false` : advise → `Worst=disabled` ; scan manuel → 403.
 
 ## 13. Agent distant
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.1` (ou `WHARFMASTER_AGENT_IMAGE`).
+Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.2` (ou `WHARFMASTER_AGENT_IMAGE`).
 
 | Chemin agent | Description |
 |--------------|-------------|
@@ -405,7 +405,7 @@ curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:2.3.1
+  --image ghcr.io/mike37510/wharfmaster-agent:2.3.2
 ```
 
 Pack ZIP : Paramètres → Nœuds → bundle (Dockerfile, sources, `deploy.sh`, `.env`).

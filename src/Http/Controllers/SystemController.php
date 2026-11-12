@@ -20,10 +20,19 @@ final class SystemController extends BaseController
             ? max(1, min($retention * 24, (int) $hoursRaw))
             : $defaultHours;
         $points = (int) ($request->query('points') ?? 288);
-        $series = $this->repo->listMetricSamples($scope, $retention, $points, $useHours);
+        $untilRaw = $request->query('until');
+        $until = ($untilRaw !== null && $untilRaw !== '') ? (int) $untilRaw : null;
+        if ($until !== null && $until <= 0) {
+            $until = null;
+        }
+        $series = $this->repo->listMetricSamples($scope, $retention, $points, $useHours, $until);
+        $untilOut = $until !== null ? min(time(), $until) : time();
+        $fromOut = max(time() - $retention * 86400, $untilOut - $useHours * 3600);
         return Response::json([
             'Scope' => $scope,
             'Hours' => $useHours,
+            'Until' => $untilOut,
+            'From' => $fromOut,
             'ChartHours' => $defaultHours,
             'RetentionDays' => $retention,
             'Storage' => 'sqlite',

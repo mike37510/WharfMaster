@@ -350,6 +350,7 @@ final class App
             return Response::error('Méthode de création de stack non prise en charge', 400);
         });
         $R->get('/api/stacks/{id}/file', fn ($r, $p) => $stacks->getStackFile((int) $p['id'], $u($p)));
+        $R->get('/api/stacks/{id}/export', fn ($r, $p) => $stacks->exportStack((int) $p['id'], $r, $u($p)));
         $R->post('/api/stacks/{id}/{action:start|stop|restart}', fn ($r, $p) => $ctx->controlStack((int) $p['id'], (string) $p['action'], $r, $u($p)));
         $R->get('/api/stacks/{id}', fn ($r, $p) => $stacks->getStack((int) $p['id'], $u($p)));
         $R->put('/api/stacks/{id}', fn ($r, $p) => $stacks->updateStack((int) $p['id'], $r, $u($p)));

@@ -85,6 +85,7 @@
         if (opts.hours != null) q.set("hours", String(opts.hours));
         else q.set("days", String(opts.days != null ? opts.days : 90));
         q.set("points", String(opts.points != null ? opts.points : 180));
+        if (opts.until != null && Number(opts.until) > 0) q.set("until", String(Math.floor(Number(opts.until))));
         return request(`/api/metrics/history?${q.toString()}`);
       },
       metricsSample: (payload) => request("/api/metrics/sample", { method: "POST", body: JSON.stringify(payload) }),
@@ -275,6 +276,69 @@
       stackUpdate: (id, refresh = false) => request(`/api/stacks/${id}/updates${refresh ? "?refresh=1" : ""}`),
       stack: (id) => request(`/api/stacks/${id}`),
       stackFile: (id) => request(`/api/stacks/${id}/file`),
+      /** Download stack ZIP (compose + .env + volume/bind data). */
+      downloadStackExport: async (id) => {
+        const token = getToken();
+        if (!token) throw new Error("Session expir\xE9e \u2014 reconnectez-vous");
+        const q = new URLSearchParams({ access_token: token });
+        const url = `/api/stacks/${encodeURIComponent(id)}/export?${q.toString()}`;
+        const probe = await fetch(url, {
+          method: "GET",
+          headers: {
+            Accept: "application/zip",
+            Authorization: "Bearer " + token
+          }
+        });
+        if (!probe.ok) {
+          let msg = probe.statusText;
+          try {
+            const data = await probe.json();
+            if (data && data.message) msg = data.message;
+          } catch (_) {
+            try {
+              msg = await probe.text() || msg;
+            } catch (__) {
+            }
+          }
+          const err = new Error(msg || "Export impossible");
+          err.status = probe.status;
+          throw err;
+        }
+        const cd = probe.headers.get("Content-Disposition") || "";
+        const m = cd.match(/filename="?([^";]+)"?/i);
+        const filename = m && m[1] || `stack-${id}-export.zip`;
+        const ct = (probe.headers.get("Content-Type") || "").toLowerCase();
+        if (!ct.includes("zip") && !ct.includes("octet-stream")) {
+          let msg = "R\xE9ponse d\u2019export invalide";
+          try {
+            const data = await probe.json();
+            if (data && data.message) msg = data.message;
+          } catch (_) {
+          }
+          throw new Error(msg);
+        }
+        const blob = await probe.blob();
+        if (!blob || blob.size < 22) {
+          throw new Error("Archive vide ou invalide");
+        }
+        if (window.navigator && typeof window.navigator.msSaveOrOpenBlob === "function") {
+          window.navigator.msSaveOrOpenBlob(blob, filename);
+          return { filename, size: blob.size };
+        }
+        const obj = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = obj;
+        a.download = filename;
+        a.rel = "noopener";
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          a.remove();
+          URL.revokeObjectURL(obj);
+        }, 1500);
+        return { filename, size: blob.size };
+      },
       createStack: (Name, StackFileContent, Env = [], PullImages = false) => request(`/api/stacks/create/standalone/string?endpointId=${getEndpointId()}`, {
         method: "POST",
         body: JSON.stringify({ Name, StackFileContent, Env, PullImages: !!PullImages })
@@ -1495,6 +1559,21 @@
         });
       });
     };
+    bag.formatMetricRange = function formatMetricRange(fromSec, untilSec) {
+      const fmt = (sec) => {
+        try {
+          return new Date(sec * 1e3).toLocaleString("fr-FR", {
+            day: "2-digit",
+            month: "short",
+            hour: "2-digit",
+            minute: "2-digit"
+          });
+        } catch {
+          return String(sec);
+        }
+      };
+      return `${fmt(fromSec)} \u2192 ${fmt(untilSec)}`;
+    };
     bag.openMetricDetailModal = function openMetricDetailModal(key, series) {
       const meta = bag.dashMetricMeta?.[key] || {
         label: key,
@@ -1502,18 +1581,67 @@
         color: "#38bdf8",
         href: `#${key}`
       };
-      const vals = bag.metricValues(series, key);
-      const n = vals.length;
-      const last = n ? vals[n - 1] : 0;
-      const max = n ? Math.max(...vals) : 0;
-      const min = n ? Math.min(...vals) : 0;
-      const avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
-      const delta = n >= 2 ? vals[n - 1] - vals[n - 2] : 0;
-      const chart = bag.resourceChart(series, {
-        wrapId: "metric-detail-wave",
-        keys: [{ key, color: meta.color, label: meta.label }],
-        maxY: Math.max(max, 1) * 1.15
-      });
+      const retentionDays = bag.metricRetentionDays();
+      const defaultHours = bag.metricChartHours();
+      const windowChoices = Array.from(new Set([
+        defaultHours,
+        24,
+        48,
+        72,
+        168,
+        Math.min(retentionDays * 24, 720)
+      ].filter((h) => h >= 1 && h <= retentionDays * 24))).sort((a, b) => a - b);
+      let hours = defaultHours;
+      let until = Math.floor(Date.now() / 1e3);
+      let loading = false;
+      const windowLabel = (h) => {
+        if (h === 24) return "24 h";
+        if (h % 24 === 0) {
+          const d = h / 24;
+          return `${d} j`;
+        }
+        return `${h} h`;
+      };
+      const renderBody = (pts, fromSec, untilSec) => {
+        const vals = bag.metricValues(pts, key);
+        const n = vals.length;
+        const last = n ? vals[n - 1] : 0;
+        const max = n ? Math.max(...vals) : 0;
+        const min = n ? Math.min(...vals) : 0;
+        const avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
+        const delta = n >= 2 ? vals[n - 1] - vals[n - 2] : 0;
+        const chart = bag.resourceChart(pts, {
+          wrapId: "metric-detail-wave",
+          keys: [{ key, color: meta.color, label: meta.label }],
+          maxY: Math.max(max, 1) * 1.15
+        });
+        const now = Math.floor(Date.now() / 1e3);
+        const floor = now - retentionDays * 86400;
+        const canPrev = until - hours > floor + 60;
+        const canNext = until < now - 90;
+        const chips = windowChoices.map(
+          (h) => `<button type="button" class="btn btn-sm metric-win-chip${h === hours ? " is-active" : ""}" data-metric-hours="${h}">${bag.esc(windowLabel(h))}</button>`
+        ).join("");
+        return `
+          <div class="metric-detail-nav">
+            <div class="metric-detail-nav-row">
+              <button type="button" class="btn btn-sm" data-metric-prev ${canPrev ? "" : "disabled"} title="Fen\xEAtre pr\xE9c\xE9dente">\u2190 Pr\xE9c.</button>
+              <button type="button" class="btn btn-sm" data-metric-live ${canNext ? "" : "disabled"} title="Revenir \xE0 maintenant">Maintenant</button>
+              <button type="button" class="btn btn-sm" data-metric-next ${canNext ? "" : "disabled"} title="Fen\xEAtre suivante">Suiv. \u2192</button>
+            </div>
+            <div class="metric-detail-nav-row metric-win-chips">${chips}</div>
+            <p class="muted metric-detail-range">${bag.esc(bag.formatMetricRange(fromSec, untilSec))} \xB7 r\xE9tention ${retentionDays} j</p>
+          </div>
+          <div class="metric-detail-kpis">
+            <div class="metric-kpi"><span class="muted">${canNext ? "Fin fen\xEAtre" : "Actuel"}</span><strong>${last}</strong></div>
+            <div class="metric-kpi"><span class="muted">Min</span><strong>${min}</strong></div>
+            <div class="metric-kpi"><span class="muted">Max</span><strong>${max}</strong></div>
+            <div class="metric-kpi"><span class="muted">Moyenne</span><strong>${avg.toFixed(1)}</strong></div>
+            <div class="metric-kpi"><span class="muted">\u0394 dernier</span><strong class="${delta > 0 ? "ok" : delta < 0 ? "bad" : ""}">${delta > 0 ? "+" : ""}${delta}</strong></div>
+            <div class="metric-kpi"><span class="muted">Relev\xE9s</span><strong>${n}</strong></div>
+          </div>
+          <div class="metric-detail-chart">${chart}</div>`;
+      };
       bag.closeAppModal();
       const host = bag.modalHost();
       host.innerHTML = `
@@ -1524,20 +1652,14 @@
               <div class="stat-ico ${bag.esc(meta.tone)}">${bag.ico(key === "networks" ? "networks" : key)}</div>
               <div>
                 <h3>${bag.esc(meta.label)}</h3>
-                <div class="modal-sub">Historique \xB7 ${bag.esc(bag.metricWindowLabel())} \xB7 r\xE9tention ${bag.esc(String(bag.metricRetentionDays()))} j</div>
+                <div class="modal-sub" id="metric-detail-sub">Historique \xB7 navigation sur ${retentionDays} j de r\xE9tention</div>
               </div>
             </div>
             <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">\u2715</button>
           </div>
-          <div class="metric-detail-kpis">
-            <div class="metric-kpi"><span class="muted">Actuel</span><strong>${last}</strong></div>
-            <div class="metric-kpi"><span class="muted">Min</span><strong>${min}</strong></div>
-            <div class="metric-kpi"><span class="muted">Max</span><strong>${max}</strong></div>
-            <div class="metric-kpi"><span class="muted">Moyenne</span><strong>${avg.toFixed(1)}</strong></div>
-            <div class="metric-kpi"><span class="muted">\u0394 dernier</span><strong class="${delta > 0 ? "ok" : delta < 0 ? "bad" : ""}">${delta > 0 ? "+" : ""}${delta}</strong></div>
-            <div class="metric-kpi"><span class="muted">Relev\xE9s</span><strong>${n}</strong></div>
+          <div id="metric-detail-body">
+            <div class="muted" style="padding:12px 0">Chargement\u2026</div>
           </div>
-          <div class="metric-detail-chart">${chart}</div>
           <div class="actions-bar">
             <a class="btn btn-primary" href="${bag.esc(meta.href)}">Ouvrir ${bag.esc(meta.label)}</a>
             <button type="button" class="btn" data-close-modal>Fermer</button>
@@ -1545,6 +1667,73 @@
         </div>
       </div>`;
       bag.bindAppModalChrome();
+      const bodyEl = () => document.getElementById("metric-detail-body");
+      const subEl = () => document.getElementById("metric-detail-sub");
+      const bindNav = () => {
+        const root = bodyEl();
+        if (!root) return;
+        root.querySelector("[data-metric-prev]")?.addEventListener("click", () => {
+          until = Math.max(
+            Math.floor(Date.now() / 1e3) - retentionDays * 86400 + hours,
+            until - hours
+          );
+          void load();
+        });
+        root.querySelector("[data-metric-next]")?.addEventListener("click", () => {
+          until = Math.min(Math.floor(Date.now() / 1e3), until + hours);
+          void load();
+        });
+        root.querySelector("[data-metric-live]")?.addEventListener("click", () => {
+          until = Math.floor(Date.now() / 1e3);
+          void load();
+        });
+        root.querySelectorAll("[data-metric-hours]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const h = parseInt(btn.getAttribute("data-metric-hours") || "", 10);
+            if (!Number.isFinite(h) || h < 1) return;
+            hours = h;
+            void load();
+          });
+        });
+      };
+      const paint = (pts, fromSec, untilSec) => {
+        const el = bodyEl();
+        if (!el) return;
+        el.innerHTML = renderBody(pts, fromSec, untilSec);
+        if (subEl()) {
+          subEl().textContent = `Fen\xEAtre ${windowLabel(hours)} \xB7 r\xE9tention ${retentionDays} j`;
+        }
+        bindNav();
+      };
+      const load = async () => {
+        if (loading) return;
+        loading = true;
+        const el = bodyEl();
+        if (el) el.innerHTML = `<div class="muted" style="padding:12px 0">Chargement\u2026</div>`;
+        try {
+          const scope = bag.metricScopeKey();
+          const points = Math.min(720, Math.max(48, Math.ceil(hours * 60 / 5)));
+          const now = Math.floor(Date.now() / 1e3);
+          if (until > now) until = now;
+          const data = await bag.Api.metricsHistory(scope, { hours, until, points });
+          const pts = Array.isArray(data?.Series) ? data.Series : [];
+          const fromSec = Number(data?.From) || until - hours * 3600;
+          const untilSec = Number(data?.Until) || until;
+          until = untilSec;
+          paint(pts, fromSec, untilSec);
+        } catch (err) {
+          if (el) {
+            el.innerHTML = `<div class="error-box">${bag.esc(err.message || String(err))}</div>`;
+          }
+        } finally {
+          loading = false;
+        }
+      };
+      if (Array.isArray(series) && series.length) {
+        const fromSec = until - hours * 3600;
+        paint(series, fromSec, until);
+      }
+      void load();
     };
     bag.updateHostResourceChart = function updateHostResourceChart(series, counts) {
       const wrap = document.getElementById("host-wave-wrap");
@@ -2291,6 +2480,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         logout: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5H3.5A1.5 1.5 0 002 4v8a1.5 1.5 0 001.5 1.5H6M10.5 11.5L14 8l-3.5-3.5M14 8H6"/></svg>',
         bell: '<svg viewBox="0 0 16 16"><path d="M8 1.75a3.5 3.5 0 00-3.5 3.5v2.1L3.2 9.6A.75.75 0 003.75 11h8.5a.75.75 0 00.55-1.25L11.5 7.35V5.25A3.5 3.5 0 008 1.75zM6.6 12.5a1.4 1.4 0 002.8 0"/></svg>',
         pull: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8M5 7.5L8 10l3-2.5M3 12.5h10"/></svg>',
+        download: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v7.5M5 7l3 2.5L11 7M3 12.5h10"/><path d="M3.5 14h9"/></svg>',
         clean: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5c1.8-3.2 4.2-5 8-6.5l.8.8c-1.8 3.5-3.5 6-7.2 7.7L4 12.5zM12 4.5l1.8-1.8"/></svg>',
         plus: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>',
         edit: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5l3 3L5 14H2v-3L9.5 3.5zM8 5l3 3"/></svg>',
@@ -5650,7 +5840,10 @@ ${title}`;
         return `<tr data-search="${bag.esc(search)}" data-resource-id="${bag.esc(v.Name)}" data-resource-name="${bag.esc(v.Name)}" data-bind="${isBind ? "1" : "0"}" data-bind-id="${bag.esc(isBind ? v.Id || "" : "")}">
       ${all ? "" : bag.bulkSelectTd(v.Name, { disabled: isBind, title: isBind ? "Les binds se retirent unitairement" : "" })}
       ${all ? `<td class="muted">${bag.esc(v._nodeName || "\u2014")}</td>` : ""}
-      <td>${all ? bag.esc(v.Name) : `<a href="#volumes/${encodeURIComponent(v.Name)}">${bag.esc(v.Name)}</a>`}${isBind && v.StackName ? ` <span class="muted" style="font-size:11px">(${bag.esc(v.StackName)})</span>` : ""}</td>
+      <td class="name-cell">
+        <strong>${all ? bag.esc(v.Name) : `<a href="#volumes/${encodeURIComponent(v.Name)}">${bag.esc(v.Name)}</a>`}</strong>
+        ${isBind ? `<span class="id">${v.StackName ? bag.esc(v.StackName) : "bind"}</span>` : ""}
+      </td>
       <td>${bag.esc(driverLabel)}</td>
       <td>${usageCell}</td>
       <td class="mono cell-clip" title="${bag.esc(mount)}">${bag.esc(mount)}</td>
@@ -7577,6 +7770,8 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
           <tbody><tr><td colspan="4" class="muted">V\xE9rification des digests\u2026</td></tr></tbody>
         </table>
       </div>
+      <div class="section-title">Fichier Compose</div>
+      <pre class="compose-preview cm-s-wharf" id="compose-preview" style="margin-bottom:1rem"></pre>
       <div class="section-title">Planifications</div>
       <div class="toolbar" style="margin-bottom:8px">
         ${bag.createBtn("add-schedule", "Nouvelle planification")}
@@ -7587,8 +7782,12 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
           <tbody><tr><td colspan="6" class="muted">Chargement\u2026</td></tr></tbody>
         </table>
       </div>
-      <div class="section-title">Fichier Compose</div>
-      <pre class="compose-preview cm-s-wharf" id="compose-preview"></pre>
+      <div class="section-title">Export</div>
+      <div class="toolbar" style="margin-bottom:8px; flex-wrap:wrap; gap:10px; align-items:center">
+        <button type="button" class="btn btn-primary" id="stack-export">Exporter compose + volumes</button>
+        <span class="muted" style="font-size:12.5px">ZIP : docker-compose, .env, donn\xE9es des volumes et binds</span>
+      </div>
+      <div id="stack-export-status" style="margin-bottom:1rem"></div>
       <div id="sched-modal"></div>`);
       const preview = document.getElementById("compose-preview");
       const composeText = file.StackFileContent || "";
@@ -7603,6 +7802,21 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
       if (editBtn) {
         editBtn.onclick = () => bag.showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
       }
+      bag.onBusyClick(document.getElementById("stack-export"), async () => {
+        const status = document.getElementById("stack-export-status");
+        const setStatus = (html) => {
+          if (status) status.innerHTML = html;
+        };
+        setStatus(`<div class="info-box">Pr\xE9paration de l\u2019export (compose + volumes)\u2026 cela peut prendre un moment.</div>`);
+        try {
+          const res = await bag.Api.downloadStackExport(stack.Id);
+          const sizeMo = res?.size ? ` (${(res.size / (1e3 * 1e3)).toFixed(1)} Mo)` : "";
+          setStatus(`<div class="info-box">Export t\xE9l\xE9charg\xE9${res?.filename ? ` : <span class="mono">${bag.esc(res.filename)}</span>` : ""}${sizeMo}.</div>`);
+        } catch (err) {
+          setStatus(`<div class="error-box">${bag.esc(err.message || String(err))}</div>`);
+          throw err;
+        }
+      }, { minMs: 400, disableSiblings: false });
       bag.onBusyClick(document.getElementById("stack-pull-redeploy"), async (el) => {
         const errBox = document.getElementById("stack-detail-err");
         const focus = bag.captureListFocus(el);

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 
 use App\Access\EndpointAcl;
 use App\Access\Ownership;
+use App\Docker\VolumeBrowser;
 use App\Http\Request;
 use App\Http\Response;
 

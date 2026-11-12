@@ -172,6 +172,49 @@ SH;
     private const MAX_DOWNLOAD_BYTES = 20_000_000;
     /** Max raw file size for volume uploads (300 Mo). */
     public const MAX_WRITE_BYTES = 300_000_000;
+    /** Max tar size when exporting a whole volume (streamed to a temp file). */
+    public const MAX_EXPORT_BYTES = 1_500_000_000;
+
+    /**
+     * Export the whole volume (or bind mount) as a Docker archive tar.
+     * Writes to $destPath (caller deletes). Returns bytes written.
+     */
+    public function exportTarToFile(string $volumeName, string $destPath): int
+    {
+        $this->assertVolume($volumeName);
+        $this->ensureBrowseImage();
+        $containerId = $this->startBrowseContainer($volumeName, true);
+        try {
+            $res = $this->docker->request(
+                'GET',
+                '/containers/' . rawurlencode($containerId) . '/archive',
+                null,
+                [],
+                ['path' => '/volume'],
+                900,
+            );
+            if ($res['status'] >= 400) {
+                $msg = trim($res['body']) !== '' ? trim($res['body']) : 'Export archive Docker impossible';
+                throw new \RuntimeException($msg, $res['status'] >= 400 && $res['status'] < 600 ? $res['status'] : 500);
+            }
+            $tar = $res['body'];
+            $len = strlen($tar);
+            if ($len > self::MAX_EXPORT_BYTES) {
+                throw new \RuntimeException(
+                    'Volume trop volumineux pour l’export (max '
+                    . (int) (self::MAX_EXPORT_BYTES / 1_000_000)
+                    . ' Mo)',
+                    413,
+                );
+            }
+            if (file_put_contents($destPath, $tar) === false) {
+                throw new \RuntimeException('Impossible d’écrire l’archive volume temporaire', 500);
+            }
+            return $len;
+        } finally {
+            $this->removeContainer($containerId);
+        }
+    }
 
     /**
      * Create a directory (parents allowed).

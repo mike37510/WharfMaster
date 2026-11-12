@@ -110,7 +110,13 @@ final class AppContext
 
         $auth = $request->header('Authorization');
         if (!$auth || !preg_match('/^Bearer\s+(\S+)$/i', $auth, $m)) {
-            return Response::error('Non autorisé', 401);
+            // Allow short-lived GET downloads (export ZIP, etc.) via ?access_token=
+            $qToken = trim((string) ($request->query('access_token') ?? $request->query('token') ?? ''));
+            if ($qToken !== '' && strtoupper($request->method) === 'GET') {
+                $m = [1 => $qToken];
+            } else {
+                return Response::error('Non autorisé', 401);
+            }
         }
         $claims = $this->jwt->decode($m[1]);
         if (!$claims || !isset($claims['id'])) {
@@ -466,7 +472,7 @@ final class AppContext
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/2.3.1',
+                'User-Agent: WharfMaster/2.3.2',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1060,7 +1066,7 @@ YAML;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.1');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.2');
         return 'curl -fsSL ' . escapeshellarg($base . '/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)

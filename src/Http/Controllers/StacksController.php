@@ -8,6 +8,7 @@ use App\Access\Ownership;
 use App\Http\Request;
 use App\Http\Response;
 use App\Stack\ImageUpdateChecker;
+use App\Stack\StackExporter;
 
 final class StacksController extends BaseController
 {
@@ -145,6 +146,58 @@ final class StacksController extends BaseController
             return Response::error($e->getMessage(), 404);
         }
         return Response::json(['StackFileContent' => $content]);
+    }
+
+    /**
+     * ZIP: compose + .env + données volumes/binds de la stack.
+     * @param array{id:int,username:string,role:int} $user
+     */
+    public function exportStack(int $id, Request $request, array $user): Response
+    {
+        $stack = $this->repo->getStack($id);
+        if (!$stack || !$this->canAccessStack($stack, $user)) {
+            return Response::error('Stack introuvable', 404);
+        }
+        $endpointId = (int) ($stack['endpoint_id'] ?? 0);
+        [$ep, $deny] = $this->requireEndpointAccess($endpointId, $user, EndpointAcl::READ);
+        if ($deny) {
+            // Stack share may allow access without endpoint ACL — still need docker for volumes
+            $ep = $this->repo->getEndpoint($endpointId);
+            if (!$ep) {
+                return Response::error('Nœud introuvable', 404);
+            }
+        }
+        unset($deny);
+        try {
+            $docker = $this->dockerForEndpoint($ep);
+            $exporter = new StackExporter($this->repo, $this->compose);
+            [$err, $zipPath, $downloadName] = $exporter->buildZip($stack, $docker, $user);
+            if ($err) {
+                return $err;
+            }
+            if (!$zipPath || !is_file($zipPath) || !$downloadName) {
+                return Response::error('Export impossible', 500);
+            }
+            $blob = (string) file_get_contents($zipPath);
+            @unlink($zipPath);
+            $this->audit($user, 'stack.export', 'Export ZIP de la stack « ' . ($stack['name'] ?? '') . ' »', $request, [
+                'stackId' => $id,
+                'name' => $stack['name'] ?? '',
+                'bytes' => strlen($blob),
+            ]);
+            return new Response(200, $blob, [
+                'Content-Type' => 'application/zip',
+                'Content-Disposition' => 'attachment; filename="' . $downloadName . '"',
+                'Cache-Control' => 'no-store',
+                'Content-Security-Policy' => "default-src 'none'",
+            ]);
+        } catch (\Throwable $e) {
+            $code = (int) $e->getCode();
+            return Response::error(
+                $e->getMessage() !== '' ? $e->getMessage() : 'Export impossible',
+                $code >= 400 && $code < 600 ? $code : 500,
+            );
+        }
     }
 
     /** @param array<string, mixed> $user */

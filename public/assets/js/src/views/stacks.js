@@ -959,6 +959,8 @@ export function install() {
           <tbody><tr><td colspan="4" class="muted">Vérification des digests…</td></tr></tbody>
         </table>
       </div>
+      <div class="section-title">Fichier Compose</div>
+      <pre class="compose-preview cm-s-wharf" id="compose-preview" style="margin-bottom:1rem"></pre>
       <div class="section-title">Planifications</div>
       <div class="toolbar" style="margin-bottom:8px">
         ${bag.createBtn('add-schedule', 'Nouvelle planification')}
@@ -969,8 +971,12 @@ export function install() {
           <tbody><tr><td colspan="6" class="muted">Chargement…</td></tr></tbody>
         </table>
       </div>
-      <div class="section-title">Fichier Compose</div>
-      <pre class="compose-preview cm-s-wharf" id="compose-preview"></pre>
+      <div class="section-title">Export</div>
+      <div class="toolbar" style="margin-bottom:8px; flex-wrap:wrap; gap:10px; align-items:center">
+        <button type="button" class="btn btn-primary" id="stack-export">Exporter compose + volumes</button>
+        <span class="muted" style="font-size:12.5px">ZIP : docker-compose, .env, données des volumes et binds</span>
+      </div>
+      <div id="stack-export-status" style="margin-bottom:1rem"></div>
       <div id="sched-modal"></div>`);
     const preview = document.getElementById('compose-preview');
     const composeText = file.StackFileContent || '';
@@ -986,6 +992,19 @@ export function install() {
       editBtn.onclick = () =>
         bag.showStackEditor({ Id: stack.Id, Name: stack.Name, content: file.StackFileContent, Env: stack.Env || [] });
     }
+    bag.onBusyClick(document.getElementById('stack-export'), async () => {
+      const status = document.getElementById('stack-export-status');
+      const setStatus = (html) => { if (status) status.innerHTML = html; };
+      setStatus(`<div class="info-box">Préparation de l’export (compose + volumes)… cela peut prendre un moment.</div>`);
+      try {
+        const res = await bag.Api.downloadStackExport(stack.Id);
+        const sizeMo = res?.size ? ` (${(res.size / (1000 * 1000)).toFixed(1)} Mo)` : '';
+        setStatus(`<div class="info-box">Export téléchargé${res?.filename ? ` : <span class="mono">${bag.esc(res.filename)}</span>` : ''}${sizeMo}.</div>`);
+      } catch (err) {
+        setStatus(`<div class="error-box">${bag.esc(err.message || String(err))}</div>`);
+        throw err;
+      }
+    }, { minMs: 400, disableSiblings: false });
     bag.onBusyClick(document.getElementById('stack-pull-redeploy'), async (el) => {
       const errBox = document.getElementById('stack-detail-err');
       const focus = bag.captureListFocus(el);

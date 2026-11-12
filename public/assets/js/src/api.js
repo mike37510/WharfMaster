@@ -84,6 +84,7 @@ export const Api = (() => {
       if (opts.hours != null) q.set('hours', String(opts.hours));
       else q.set('days', String(opts.days != null ? opts.days : 90));
       q.set('points', String(opts.points != null ? opts.points : 180));
+      if (opts.until != null && Number(opts.until) > 0) q.set('until', String(Math.floor(Number(opts.until))));
       return request(`/api/metrics/history?${q.toString()}`);
     },
     metricsSample: (payload) =>
@@ -292,6 +293,68 @@ export const Api = (() => {
       request(`/api/stacks/${id}/updates${refresh ? '?refresh=1' : ''}`),
     stack: (id) => request(`/api/stacks/${id}`),
     stackFile: (id) => request(`/api/stacks/${id}/file`),
+    /** Download stack ZIP (compose + .env + volume/bind data). */
+    downloadStackExport: async (id) => {
+      const token = getToken();
+      if (!token) throw new Error('Session expirée — reconnectez-vous');
+      // Direct navigation download (Content-Disposition) — more reliable than fetch+blob
+      // after async UI handlers; auth via access_token for this GET only.
+      const q = new URLSearchParams({ access_token: token });
+      const url = `/api/stacks/${encodeURIComponent(id)}/export?${q.toString()}`;
+      // Probe first to surface API errors as JSON instead of downloading an error payload
+      const probe = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/zip',
+          Authorization: 'Bearer ' + token,
+        },
+      });
+      if (!probe.ok) {
+        let msg = probe.statusText;
+        try {
+          const data = await probe.json();
+          if (data && data.message) msg = data.message;
+        } catch (_) {
+          try { msg = await probe.text() || msg; } catch (__) {}
+        }
+        const err = new Error(msg || 'Export impossible');
+        err.status = probe.status;
+        throw err;
+      }
+      const cd = probe.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="?([^";]+)"?/i);
+      const filename = (m && m[1]) || `stack-${id}-export.zip`;
+      const ct = (probe.headers.get('Content-Type') || '').toLowerCase();
+      if (!ct.includes('zip') && !ct.includes('octet-stream')) {
+        let msg = 'Réponse d’export invalide';
+        try {
+          const data = await probe.json();
+          if (data && data.message) msg = data.message;
+        } catch (_) { /* ignore */ }
+        throw new Error(msg);
+      }
+      const blob = await probe.blob();
+      if (!blob || blob.size < 22) {
+        throw new Error('Archive vide ou invalide');
+      }
+      if (window.navigator && typeof window.navigator.msSaveOrOpenBlob === 'function') {
+        window.navigator.msSaveOrOpenBlob(blob, filename);
+        return { filename, size: blob.size };
+      }
+      const obj = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = obj;
+      a.download = filename;
+      a.rel = 'noopener';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(obj);
+      }, 1500);
+      return { filename, size: blob.size };
+    },
     createStack: (Name, StackFileContent, Env = [], PullImages = false) =>
       request(`/api/stacks/create/standalone/string?endpointId=${getEndpointId()}`, {
         method: 'POST',

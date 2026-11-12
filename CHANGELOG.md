@@ -4,6 +4,25 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.2] — 2026-11-12
+
+### Ajouté
+- **Thème Beacon** : 4ᵉ thème (charbon / ambre signal) dans le cycle header
+- **Export stack** : ZIP compose + `.env` + données volumes/binds depuis le détail stack
+- Navigation temporelle des courbes dashboard (Préc. / Suiv. / fenêtres) sur toute la rétention
+
+### Amélioré
+- Hero dashboard : artwork confiné à droite, texte toujours lisible
+- Noms de volumes alignés sur le style stacks/conteneurs (`name-cell` gras)
+- Ordre détail stack : Images → Compose → Planifications → Export
+
+### Corrigé
+- Upload drag-and-drop volumes : import manquant `VolumeBrowser` (« Erreur interne »)
+- Téléchargement export stack plus fiable (statut sous le bouton, auth GET)
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.2`**
+
 ## [2.3.1] — 2026-11-11
 
 ### Ajouté
