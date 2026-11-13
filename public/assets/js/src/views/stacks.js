@@ -154,6 +154,30 @@ export function install() {
     return `${names[0]} +${names.length - 1}`;
   }
 
+  /** Short digest for UI (sha256:abcdef123456). */
+  bag.shortDigest = function shortDigest(digest) {
+    const d = String(digest || '').toLowerCase();
+    if (!d) return '—';
+    if (d.startsWith('sha256:') && d.length >= 19) return `sha256:${d.slice(7, 19)}`;
+    return d.length > 16 ? `${d.slice(0, 12)}…` : d;
+  }
+
+  /** One-line actuel → proposé from an update payload item. */
+  bag.formatImageUpdateVersions = function formatImageUpdateVersions(u) {
+    if (!u || typeof u !== 'object') return '';
+    if (u.Detail && /Actuel |À jour \(|Épinglée \(/.test(String(u.Detail))) {
+      return String(u.Detail);
+    }
+    const cur = bag.shortDigest(u.LocalDigest);
+    const next = bag.shortDigest(u.RemoteDigest);
+    const st = u.Status || 'unknown';
+    if (st === 'update') return `Actuel ${cur} → proposé ${next}`;
+    if (st === 'fresh') return `À jour (${cur})`;
+    if (st === 'pinned') return `Épinglée (${cur})`;
+    if (u.Detail) return String(u.Detail);
+    return cur !== '—' ? `Local ${cur}` : '';
+  }
+
   bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
     const st = status || 'unknown';
     const cls = st === 'update' ? 'is-update' : (st === 'fresh' || st === 'pinned' ? 'is-fresh' : 'is-unknown');
@@ -293,10 +317,13 @@ export function install() {
       if (!slot) return;
       const u = map[id] || {};
       if (!u.Status || u.Status === 'unknown') return;
-      let title = u.Detail || 'Résultat en cache';
+      let title = bag.formatImageUpdateVersions(u) || u.Detail || 'Résultat en cache';
       if (u.Image) title = `${u.Image}\n${title}`;
       if (kind === 'stacks' && Array.isArray(u.Images)) {
-        title = u.Images.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`).join('\n') || title;
+        title = u.Images.map((i) => {
+          const ver = bag.formatImageUpdateVersions(i);
+          return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
+        }).join('\n') || title;
       }
       title += '\n(cache local · actualisation…)';
       slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
@@ -320,7 +347,10 @@ export function install() {
         const u = map[id] || {};
         const imgs = u.Images || [];
         const imgLabel = bag.formatImageListLabel(imgs);
-        const lines = imgs.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`);
+        const lines = imgs.map((i) => {
+          const ver = bag.formatImageUpdateVersions(i);
+          return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
+        });
         let title = lines.length ? lines.join('\n') : (u.Error || 'Aucun contrôle');
         if (u.FromCache && u.CheckedAt) {
           title += `\n(cache · vérifié ${new Date(u.CheckedAt * 1000).toLocaleString()})`;
@@ -1001,8 +1031,8 @@ export function install() {
       <div class="section-title">Images des services</div>
       <div class="table-wrap" style="margin-bottom:1rem">
         <table class="data" id="stack-upd-table">
-          <thead><tr><th>Service</th><th>Image</th><th>État</th><th>Détail</th></tr></thead>
-          <tbody><tr><td colspan="4" class="muted">Vérification des digests…</td></tr></tbody>
+          <thead><tr><th>Service</th><th>Image</th><th>État</th><th>Actuel</th><th>Proposé</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">Vérification des digests…</td></tr></tbody>
         </table>
       </div>
       <div class="section-title">Fichier Compose</div>
@@ -1230,17 +1260,23 @@ export function install() {
       const imgs = upd.Images || [];
       if (tb) {
         if (!imgs.length) {
-          tb.innerHTML = `<tr><td colspan="4" class="muted">Aucune image à contrôler</td></tr>`;
+          tb.innerHTML = `<tr><td colspan="5" class="muted">Aucune image à contrôler</td></tr>`;
         } else {
-          tb.innerHTML = imgs.map((i) => `<tr>
+          tb.innerHTML = imgs.map((i) => {
+            const ver = bag.formatImageUpdateVersions(i);
+            const tip = [i.Image, ver, i.LocalDigest && `Local: ${i.LocalDigest}`, i.RemoteDigest && `Registre: ${i.RemoteDigest}`]
+              .filter(Boolean).join('\n');
+            return `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>
             <td class="mono">${bag.esc(i.Image)}</td>
-            <td>${bag.stackUpdatePill(i.Status, i.Status === 'update' ? 1 : 0, i.Detail || '', {
+            <td>${bag.stackUpdatePill(i.Status, i.Status === 'update' ? 1 : 0, tip, {
               action: i.Status === 'update' ? 'stack' : null,
               id,
             })}</td>
-            <td class="muted">${bag.esc(i.Detail || '')}</td>
-          </tr>`).join('');
+            <td class="mono muted">${bag.esc(bag.shortDigest(i.LocalDigest))}</td>
+            <td class="mono muted">${bag.esc(i.Status === 'update' ? bag.shortDigest(i.RemoteDigest) : (i.Status === 'fresh' || i.Status === 'pinned' ? '—' : bag.shortDigest(i.RemoteDigest)))}</td>
+          </tr>`;
+          }).join('');
         }
       }
       bag.bindImageUpdateActions(bag.root);
@@ -1248,7 +1284,7 @@ export function install() {
       const sum = document.getElementById('stack-upd-summary');
       if (sum) sum.innerHTML = bag.stackUpdatePill('unknown', 0, err.message || 'Erreur');
       const tb = document.querySelector('#stack-upd-table tbody');
-      if (tb) tb.innerHTML = `<tr><td colspan="4" class="error-box">${bag.esc(err.message || 'Contrôle impossible')}</td></tr>`;
+      if (tb) tb.innerHTML = `<tr><td colspan="5" class="error-box">${bag.esc(err.message || 'Contrôle impossible')}</td></tr>`;
     }
   }
 

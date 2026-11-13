@@ -66,6 +66,7 @@ final class ImageUpdateChecker
                 $ttl = $cachedStatus === 'unknown' ? self::NEGATIVE_CACHE_TTL : self::STACK_CACHE_TTL;
                 if ((time() - (int) $cached['t']) < $ttl) {
                     $result = $cached['result'];
+                    $result['Images'] = $this->refreshImageDetails(is_array($result['Images'] ?? null) ? $result['Images'] : []);
                     $result['FromCache'] = true;
                     $result['CheckedAt'] = (int) $cached['t'];
                     $result['ExpiresAt'] = (int) $cached['t'] + $ttl;
@@ -195,8 +196,19 @@ final class ImageUpdateChecker
                 && (time() - (int) $cached['t']) < self::STACK_CACHE_TTL
             ) {
                 $t = (int) $cached['t'];
+                $updates = is_array($cached['updates']) ? $cached['updates'] : [];
+                foreach ($updates as $cid => $row) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+                    $updates[$cid]['Detail'] = $this->detailFor(
+                        (string) ($row['Status'] ?? 'unknown'),
+                        isset($row['LocalDigest']) && is_string($row['LocalDigest']) ? $row['LocalDigest'] : null,
+                        isset($row['RemoteDigest']) && is_string($row['RemoteDigest']) ? $row['RemoteDigest'] : null,
+                    );
+                }
                 return [
-                    'Updates' => $cached['updates'],
+                    'Updates' => $updates,
                     'FromCache' => true,
                     'CheckedAt' => $t,
                     'ExpiresAt' => $t + self::STACK_CACHE_TTL,
@@ -398,7 +410,7 @@ final class ImageUpdateChecker
             return $this->item($service, $image, 'unknown', null, null, 'Référence image invalide');
         }
         if ($parsed['digest'] !== null) {
-            return $this->item($service, $image, 'pinned', $parsed['digest'], $parsed['digest'], 'Image épinglée par digest');
+            return $this->item($service, $image, 'pinned', $parsed['digest'], $parsed['digest']);
         }
 
         $local = $this->localDigest($docker, $image, $parsed);
@@ -411,6 +423,12 @@ final class ImageUpdateChecker
             $cachedStatus = $this->readImageStatusCache($image, $local);
             if ($cachedStatus !== null) {
                 $cachedStatus['Service'] = $service;
+                // Refresh human Detail (actuel → proposé) even from cache
+                $cachedStatus['Detail'] = $this->detailFor(
+                    (string) $cachedStatus['Status'],
+                    $cachedStatus['LocalDigest'] ?? $local,
+                    $cachedStatus['RemoteDigest'] ?? null,
+                );
                 return $cachedStatus;
             }
         }
@@ -424,11 +442,8 @@ final class ImageUpdateChecker
             return $this->item($service, $image, 'unknown', $local, null, 'Impossible de joindre le registre');
         }
 
-        if (hash_equals($local, $remote)) {
-            $item = $this->item($service, $image, 'fresh', $local, $remote, 'À jour');
-        } else {
-            $item = $this->item($service, $image, 'update', $local, $remote, 'Nouvelle image disponible sur le registre');
-        }
+        $status = hash_equals($local, $remote) ? 'fresh' : 'update';
+        $item = $this->item($service, $image, $status, $local, $remote);
         $this->writeImageStatusCache($image, $local, $item);
         return $item;
     }
@@ -632,7 +647,7 @@ final class ImageUpdateChecker
         string $status,
         ?string $local,
         ?string $remote,
-        string $detail,
+        ?string $detail = null,
     ): array {
         return [
             'Service' => $service,
@@ -640,7 +655,55 @@ final class ImageUpdateChecker
             'Status' => $status,
             'LocalDigest' => $local,
             'RemoteDigest' => $remote,
-            'Detail' => $detail,
+            'Detail' => $detail ?? $this->detailFor($status, $local, $remote),
         ];
+    }
+
+    /** Human line: actuel vs proposé (digest court). */
+    private function detailFor(string $status, ?string $local, ?string $remote): string
+    {
+        $cur = $this->shortDigest($local);
+        $next = $this->shortDigest($remote);
+        return match ($status) {
+            'update' => 'Actuel ' . $cur . ' → proposé ' . $next,
+            'fresh' => 'À jour (' . $cur . ')',
+            'pinned' => 'Épinglée (' . $cur . ')',
+            default => $remote === null && $local !== null
+                ? 'Contrôle incomplet (local ' . $cur . ')'
+                : 'État inconnu',
+        };
+    }
+
+    /**
+     * @param list<array<string, mixed>> $images
+     * @return list<array<string, mixed>>
+     */
+    private function refreshImageDetails(array $images): array
+    {
+        $out = [];
+        foreach ($images as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $row['Detail'] = $this->detailFor(
+                (string) ($row['Status'] ?? 'unknown'),
+                isset($row['LocalDigest']) && is_string($row['LocalDigest']) ? $row['LocalDigest'] : null,
+                isset($row['RemoteDigest']) && is_string($row['RemoteDigest']) ? $row['RemoteDigest'] : null,
+            );
+            $out[] = $row;
+        }
+        return $out;
+    }
+
+    private function shortDigest(?string $digest): string
+    {
+        if ($digest === null || $digest === '') {
+            return '—';
+        }
+        $d = strtolower($digest);
+        if (str_starts_with($d, 'sha256:')) {
+            return 'sha256:' . substr($d, 7, 12);
+        }
+        return strlen($d) > 16 ? substr($d, 0, 12) . '…' : $d;
     }
 }

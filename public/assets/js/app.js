@@ -4613,9 +4613,14 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
           if (!slot) return;
           const u = map[id] || {};
-          let title = u.Detail || u.Error || "Aucun contr\xF4le";
+          const ver = bag.formatImageUpdateVersions(u);
+          let title = ver || u.Detail || u.Error || "Aucun contr\xF4le";
           if (u.Image) title = `${u.Image}
 ${title}`;
+          if (u.LocalDigest) title += `
+Local: ${u.LocalDigest}`;
+          if (u.RemoteDigest && u.Status === "update") title += `
+Propos\xE9: ${u.RemoteDigest}`;
           if (fromCache && checkedAt) {
             title += `
 (cache \xB7 v\xE9rifi\xE9 ${new Date(checkedAt * 1e3).toLocaleString()})`;
@@ -4741,7 +4746,17 @@ ${title}`;
           sum.innerHTML = bag.stackUpdatePill(
             upd.Status,
             upd.UpdateCount || 0,
-            upd.Detail || `${upd.Checked || 0} contr\xF4le(s)`,
+            (() => {
+              const ver = bag.formatImageUpdateVersions(upd);
+              let tip = ver || upd.Detail || `${upd.Checked || 0} contr\xF4le(s)`;
+              if (upd.Image) tip = `${upd.Image}
+${tip}`;
+              if (upd.LocalDigest) tip += `
+Local: ${upd.LocalDigest}`;
+              if (upd.RemoteDigest && upd.Status === "update") tip += `
+Propos\xE9: ${upd.RemoteDigest}`;
+              return tip;
+            })(),
             { action: "container", id }
           );
           bag.bindImageUpdateActions(sum);
@@ -7086,6 +7101,26 @@ ${title}`;
       if (names.length === 2) return `${names[0]}, ${names[1]}`;
       return `${names[0]} +${names.length - 1}`;
     };
+    bag.shortDigest = function shortDigest(digest) {
+      const d = String(digest || "").toLowerCase();
+      if (!d) return "\u2014";
+      if (d.startsWith("sha256:") && d.length >= 19) return `sha256:${d.slice(7, 19)}`;
+      return d.length > 16 ? `${d.slice(0, 12)}\u2026` : d;
+    };
+    bag.formatImageUpdateVersions = function formatImageUpdateVersions(u) {
+      if (!u || typeof u !== "object") return "";
+      if (u.Detail && /Actuel |À jour \(|Épinglée \(/.test(String(u.Detail))) {
+        return String(u.Detail);
+      }
+      const cur = bag.shortDigest(u.LocalDigest);
+      const next = bag.shortDigest(u.RemoteDigest);
+      const st = u.Status || "unknown";
+      if (st === "update") return `Actuel ${cur} \u2192 propos\xE9 ${next}`;
+      if (st === "fresh") return `\xC0 jour (${cur})`;
+      if (st === "pinned") return `\xC9pingl\xE9e (${cur})`;
+      if (u.Detail) return String(u.Detail);
+      return cur !== "\u2014" ? `Local ${cur}` : "";
+    };
     bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
       const st = status || "unknown";
       const cls = st === "update" ? "is-update" : st === "fresh" || st === "pinned" ? "is-fresh" : "is-unknown";
@@ -7204,11 +7239,14 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         if (!slot) return;
         const u = map[id] || {};
         if (!u.Status || u.Status === "unknown") return;
-        let title = u.Detail || "R\xE9sultat en cache";
+        let title = bag.formatImageUpdateVersions(u) || u.Detail || "R\xE9sultat en cache";
         if (u.Image) title = `${u.Image}
 ${title}`;
         if (kind === "stacks" && Array.isArray(u.Images)) {
-          title = u.Images.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`).join("\n") || title;
+          title = u.Images.map((i) => {
+            const ver = bag.formatImageUpdateVersions(i);
+            return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
+          }).join("\n") || title;
         }
         title += "\n(cache local \xB7 actualisation\u2026)";
         slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
@@ -7231,7 +7269,10 @@ ${title}`;
           const u = map[id] || {};
           const imgs = u.Images || [];
           const imgLabel = bag.formatImageListLabel(imgs);
-          const lines = imgs.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`);
+          const lines = imgs.map((i) => {
+            const ver = bag.formatImageUpdateVersions(i);
+            return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
+          });
           let title = lines.length ? lines.join("\n") : u.Error || "Aucun contr\xF4le";
           if (u.FromCache && u.CheckedAt) {
             title += `
@@ -7868,8 +7909,8 @@ ${title}`;
       <div class="section-title">Images des services</div>
       <div class="table-wrap" style="margin-bottom:1rem">
         <table class="data" id="stack-upd-table">
-          <thead><tr><th>Service</th><th>Image</th><th>\xC9tat</th><th>D\xE9tail</th></tr></thead>
-          <tbody><tr><td colspan="4" class="muted">V\xE9rification des digests\u2026</td></tr></tbody>
+          <thead><tr><th>Service</th><th>Image</th><th>\xC9tat</th><th>Actuel</th><th>Propos\xE9</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">V\xE9rification des digests\u2026</td></tr></tbody>
         </table>
       </div>
       <div class="section-title">Fichier Compose</div>
@@ -8099,17 +8140,22 @@ ${title}`;
         const imgs = upd.Images || [];
         if (tb) {
           if (!imgs.length) {
-            tb.innerHTML = `<tr><td colspan="4" class="muted">Aucune image \xE0 contr\xF4ler</td></tr>`;
+            tb.innerHTML = `<tr><td colspan="5" class="muted">Aucune image \xE0 contr\xF4ler</td></tr>`;
           } else {
-            tb.innerHTML = imgs.map((i) => `<tr>
+            tb.innerHTML = imgs.map((i) => {
+              const ver = bag.formatImageUpdateVersions(i);
+              const tip = [i.Image, ver, i.LocalDigest && `Local: ${i.LocalDigest}`, i.RemoteDigest && `Registre: ${i.RemoteDigest}`].filter(Boolean).join("\n");
+              return `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>
             <td class="mono">${bag.esc(i.Image)}</td>
-            <td>${bag.stackUpdatePill(i.Status, i.Status === "update" ? 1 : 0, i.Detail || "", {
-              action: i.Status === "update" ? "stack" : null,
-              id
-            })}</td>
-            <td class="muted">${bag.esc(i.Detail || "")}</td>
-          </tr>`).join("");
+            <td>${bag.stackUpdatePill(i.Status, i.Status === "update" ? 1 : 0, tip, {
+                action: i.Status === "update" ? "stack" : null,
+                id
+              })}</td>
+            <td class="mono muted">${bag.esc(bag.shortDigest(i.LocalDigest))}</td>
+            <td class="mono muted">${bag.esc(i.Status === "update" ? bag.shortDigest(i.RemoteDigest) : i.Status === "fresh" || i.Status === "pinned" ? "\u2014" : bag.shortDigest(i.RemoteDigest))}</td>
+          </tr>`;
+            }).join("");
           }
         }
         bag.bindImageUpdateActions(bag.root);
@@ -8117,7 +8163,7 @@ ${title}`;
         const sum = document.getElementById("stack-upd-summary");
         if (sum) sum.innerHTML = bag.stackUpdatePill("unknown", 0, err.message || "Erreur");
         const tb = document.querySelector("#stack-upd-table tbody");
-        if (tb) tb.innerHTML = `<tr><td colspan="4" class="error-box">${bag.esc(err.message || "Contr\xF4le impossible")}</td></tr>`;
+        if (tb) tb.innerHTML = `<tr><td colspan="5" class="error-box">${bag.esc(err.message || "Contr\xF4le impossible")}</td></tr>`;
       }
     };
   }
