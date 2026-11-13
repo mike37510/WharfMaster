@@ -15,44 +15,47 @@ final class ManifestClient
      */
     public function remoteDigest(string $imageRef, array $registryCreds = []): ?string
     {
+        $meta = $this->remoteMeta($imageRef, $registryCreds, false);
+        return $meta['digest'] ?? null;
+    }
+
+    /**
+     * Remote digest + human version (OCI / label-schema) when available.
+     *
+     * @param array{url?:string,username?:string,password?:string,type?:string} $registryCreds
+     * @return array{digest:?string,version:string,tag:string}
+     */
+    public function remoteMeta(string $imageRef, array $registryCreds = [], bool $withVersion = true): array
+    {
+        $empty = ['digest' => null, 'version' => '', 'tag' => ''];
         $parsed = self::parse($imageRef);
-        if ($parsed === null || $parsed['digest'] !== null) {
-            return $parsed['digest'] ?? null;
+        if ($parsed === null) {
+            return $empty;
+        }
+        if ($parsed['digest'] !== null) {
+            return [
+                'digest' => $parsed['digest'],
+                'version' => '',
+                'tag' => (string) $parsed['tag'],
+            ];
         }
 
-        $scheme = (string) ($registryCreds['scheme'] ?? 'https');
-        if (!empty($registryCreds['url'])) {
-            $u = parse_url((string) $registryCreds['url']);
-            if (is_array($u) && !empty($u['scheme'])) {
-                $scheme = (string) $u['scheme'];
-            }
+        $ctx = $this->registryContext($parsed, $registryCreds);
+        if ($ctx === null) {
+            return $empty + ['tag' => (string) $parsed['tag']];
         }
-        $host = $parsed['host'];
-        $port = $parsed['port'];
-        $base = $scheme . '://' . $host . ($port ? ':' . $port : '');
-        // Docker Hub always uses registry-1.docker.io over HTTPS
-        if (self::isDockerHub($host)) {
-            $base = 'https://registry-1.docker.io';
-            $host = 'registry-1.docker.io';
-        }
-
-        $repo = $parsed['repository'];
-        $tag = $parsed['tag'];
-        $user = trim((string) ($registryCreds['username'] ?? ''));
-        $pass = (string) ($registryCreds['password'] ?? '');
+        ['base' => $base, 'repo' => $repo, 'tag' => $tag, 'headers' => $headers] = $ctx;
 
         $manifestUrl = $base . '/v2/' . $repo . '/manifests/' . rawurlencode($tag);
-        $headers = [
-            'Accept: ' . self::ACCEPT,
-            'User-Agent: WharfMaster/2.3.4',
-        ];
-        if ($user !== '' || $pass !== '') {
-            $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
-        }
-
         $res = $this->httpHeadOrGet($manifestUrl, $headers, 8);
         if ($res['status'] === 401) {
-            $token = $this->fetchBearer($res['headers'], $base, $user, $pass, $repo);
+            $token = $this->fetchBearer(
+                $res['headers'],
+                $base,
+                trim((string) ($registryCreds['username'] ?? '')),
+                (string) ($registryCreds['password'] ?? ''),
+                $repo,
+            );
             if ($token !== null) {
                 $headers = [
                     'Accept: ' . self::ACCEPT,
@@ -63,16 +66,171 @@ final class ManifestClient
             }
         }
         if ($res['status'] < 200 || $res['status'] >= 300) {
-            return null;
+            return $empty + ['tag' => $tag];
         }
-        $digest = $res['headers']['docker-content-digest'] ?? $res['headers']['Docker-Content-Digest'] ?? '';
-        if ($digest === '') {
-            // Some registries only return digest on GET body config — try GET once
-            $res = $this->http('GET', $manifestUrl, $headers, 8);
-            $digest = $res['headers']['docker-content-digest'] ?? '';
+        $digest = strtolower(trim((string) ($res['headers']['docker-content-digest'] ?? '')));
+        $manifestBody = $res['body'];
+        if ($digest === '' || ($withVersion && $manifestBody === '')) {
+            $res = $this->http('GET', $manifestUrl, $headers, 10);
+            if ($res['status'] < 200 || $res['status'] >= 300) {
+                return $empty + ['tag' => $tag];
+            }
+            if ($digest === '') {
+                $digest = strtolower(trim((string) ($res['headers']['docker-content-digest'] ?? '')));
+            }
+            $manifestBody = $res['body'];
         }
-        $digest = strtolower(trim($digest));
-        return str_starts_with($digest, 'sha256:') ? $digest : null;
+        if (!str_starts_with($digest, 'sha256:')) {
+            $digest = null;
+        }
+
+        $version = '';
+        if ($withVersion && $manifestBody !== '') {
+            $version = $this->versionFromManifestBody($base, $repo, $headers, $manifestBody, $tag);
+        }
+        if ($version === '' && $tag !== '' && strtolower($tag) !== 'latest') {
+            $version = $tag;
+        }
+
+        return ['digest' => $digest, 'version' => $version, 'tag' => $tag];
+    }
+
+    /**
+     * Prefer OCI / label-schema version labels; else non-latest tag.
+     *
+     * @param array<string, mixed>|null $labels
+     */
+    public static function versionFromLabels(?array $labels, string $tagFallback = ''): string
+    {
+        if (is_array($labels)) {
+            foreach ([
+                'org.opencontainers.image.version',
+                'org.label-schema.version',
+                'version',
+                'VERSION',
+                'image.version',
+                'app.version',
+            ] as $key) {
+                $v = trim((string) ($labels[$key] ?? ''));
+                if ($v !== '' && strtolower($v) !== 'latest') {
+                    return $v;
+                }
+            }
+        }
+        $tag = trim($tagFallback);
+        if ($tag !== '' && strtolower($tag) !== 'latest') {
+            return $tag;
+        }
+        return '';
+    }
+
+    /**
+     * @param array{host:string,port:?int,repository:string,tag:string,digest:?string} $parsed
+     * @param array{url?:string,username?:string,password?:string,type?:string} $registryCreds
+     * @return array{base:string,repo:string,tag:string,headers:list<string>}|null
+     */
+    private function registryContext(array $parsed, array $registryCreds): ?array
+    {
+        $scheme = (string) ($registryCreds['scheme'] ?? 'https');
+        if (!empty($registryCreds['url'])) {
+            $u = parse_url((string) $registryCreds['url']);
+            if (is_array($u) && !empty($u['scheme'])) {
+                $scheme = (string) $u['scheme'];
+            }
+        }
+        $host = $parsed['host'];
+        $port = $parsed['port'];
+        $base = $scheme . '://' . $host . ($port ? ':' . $port : '');
+        if (self::isDockerHub($host)) {
+            $base = 'https://registry-1.docker.io';
+        }
+        $repo = $parsed['repository'];
+        $tag = $parsed['tag'];
+        $user = trim((string) ($registryCreds['username'] ?? ''));
+        $pass = (string) ($registryCreds['password'] ?? '');
+        $headers = [
+            'Accept: ' . self::ACCEPT,
+            'User-Agent: WharfMaster/2.3.4',
+        ];
+        if ($user !== '' || $pass !== '') {
+            $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
+        }
+        return ['base' => $base, 'repo' => $repo, 'tag' => $tag, 'headers' => $headers];
+    }
+
+    /**
+     * @param list<string> $headers
+     */
+    private function versionFromManifestBody(
+        string $base,
+        string $repo,
+        array $headers,
+        string $manifestBody,
+        string $tag,
+    ): string {
+        $manifest = json_decode($manifestBody, true);
+        if (!is_array($manifest)) {
+            return '';
+        }
+        // Manifest list / index → pick first amd64/arm64 or first manifest
+        if (($manifest['mediaType'] ?? '') === 'application/vnd.docker.distribution.manifest.list.v2+json'
+            || ($manifest['mediaType'] ?? '') === 'application/vnd.oci.image.index.v1+json'
+            || isset($manifest['manifests'])
+        ) {
+            $list = is_array($manifest['manifests'] ?? null) ? $manifest['manifests'] : [];
+            $pick = null;
+            foreach ($list as $m) {
+                if (!is_array($m)) {
+                    continue;
+                }
+                $arch = strtolower((string) (($m['platform']['architecture'] ?? '') ?: ''));
+                if ($arch === 'amd64' || $arch === 'arm64') {
+                    $pick = $m;
+                    if ($arch === 'amd64') {
+                        break;
+                    }
+                }
+                $pick ??= $m;
+            }
+            $childDigest = is_array($pick) ? (string) ($pick['digest'] ?? '') : '';
+            if ($childDigest === '') {
+                return '';
+            }
+            $childUrl = $base . '/v2/' . $repo . '/manifests/' . rawurlencode($childDigest);
+            $child = $this->http('GET', $childUrl, $headers, 10);
+            if ($child['status'] < 200 || $child['status'] >= 300) {
+                return '';
+            }
+            $manifest = json_decode($child['body'], true);
+            if (!is_array($manifest)) {
+                return '';
+            }
+        }
+
+        $configDigest = (string) ($manifest['config']['digest'] ?? '');
+        if ($configDigest === '' || !str_starts_with(strtolower($configDigest), 'sha256:')) {
+            return '';
+        }
+        $blobUrl = $base . '/v2/' . $repo . '/blobs/' . rawurlencode($configDigest);
+        $blobHeaders = ['Accept: application/vnd.docker.container.image.v1+json,application/vnd.oci.image.config.v1+json,application/json'];
+        foreach ($headers as $h) {
+            if (str_starts_with(strtolower($h), 'authorization:') || str_starts_with(strtolower($h), 'user-agent:')) {
+                $blobHeaders[] = $h;
+            }
+        }
+        $blob = $this->http('GET', $blobUrl, $blobHeaders, 10);
+        if ($blob['status'] < 200 || $blob['status'] >= 300) {
+            return '';
+        }
+        $config = json_decode($blob['body'], true);
+        if (!is_array($config)) {
+            return '';
+        }
+        $labels = $config['config']['Labels'] ?? $config['container_config']['Labels'] ?? null;
+        if (!is_array($labels)) {
+            $labels = null;
+        }
+        return self::versionFromLabels($labels, $tag);
     }
 
     /**

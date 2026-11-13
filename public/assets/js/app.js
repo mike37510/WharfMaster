@@ -4617,10 +4617,6 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           let title = ver || u.Detail || u.Error || "Aucun contr\xF4le";
           if (u.Image) title = `${u.Image}
 ${title}`;
-          if (u.LocalDigest) title += `
-Local: ${u.LocalDigest}`;
-          if (u.RemoteDigest && u.Status === "update") title += `
-Propos\xE9: ${u.RemoteDigest}`;
           if (fromCache && checkedAt) {
             title += `
 (cache \xB7 v\xE9rifi\xE9 ${new Date(checkedAt * 1e3).toLocaleString()})`;
@@ -4751,10 +4747,6 @@ Propos\xE9: ${u.RemoteDigest}`;
               let tip = ver || upd.Detail || `${upd.Checked || 0} contr\xF4le(s)`;
               if (upd.Image) tip = `${upd.Image}
 ${tip}`;
-              if (upd.LocalDigest) tip += `
-Local: ${upd.LocalDigest}`;
-              if (upd.RemoteDigest && upd.Status === "update") tip += `
-Propos\xE9: ${upd.RemoteDigest}`;
               return tip;
             })(),
             { action: "container", id }
@@ -7101,25 +7093,28 @@ Propos\xE9: ${upd.RemoteDigest}`;
       if (names.length === 2) return `${names[0]}, ${names[1]}`;
       return `${names[0]} +${names.length - 1}`;
     };
-    bag.shortDigest = function shortDigest(digest) {
-      const d = String(digest || "").toLowerCase();
-      if (!d) return "\u2014";
-      if (d.startsWith("sha256:") && d.length >= 19) return `sha256:${d.slice(7, 19)}`;
-      return d.length > 16 ? `${d.slice(0, 12)}\u2026` : d;
+    bag.formatImageVersionLabel = function formatImageVersionLabel(name, version) {
+      const n = String(name || "").trim();
+      const v = String(version || "").trim();
+      if (n && v) return `${n} ${v}`;
+      if (n) return n;
+      if (v) return v;
+      return "\u2014";
     };
     bag.formatImageUpdateVersions = function formatImageUpdateVersions(u) {
       if (!u || typeof u !== "object") return "";
-      if (u.Detail && /Actuel |À jour \(|Épinglée \(/.test(String(u.Detail))) {
+      if (u.Detail && / : .+ → | : à jour| : épinglée/.test(String(u.Detail))) {
         return String(u.Detail);
       }
-      const cur = bag.shortDigest(u.LocalDigest);
-      const next = bag.shortDigest(u.RemoteDigest);
+      const name = String(u.ImageName || "").trim() || String(u.Image || "").replace(/:.*$/, "");
+      const cur = String(u.LocalVersion || "").trim() || "\u2014";
+      const next = String(u.RemoteVersion || "").trim() || "\u2014";
       const st = u.Status || "unknown";
-      if (st === "update") return `Actuel ${cur} \u2192 propos\xE9 ${next}`;
-      if (st === "fresh") return `\xC0 jour (${cur})`;
-      if (st === "pinned") return `\xC9pingl\xE9e (${cur})`;
+      if (st === "update") return `${name || "image"} : ${cur} \u2192 ${next}`;
+      if (st === "fresh") return `${name || "image"} : \xE0 jour (${cur})`;
+      if (st === "pinned") return `${name || "image"} : \xE9pingl\xE9e (${cur})`;
       if (u.Detail) return String(u.Detail);
-      return cur !== "\u2014" ? `Local ${cur}` : "";
+      return name ? `${name} (${cur})` : "";
     };
     bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
       const st = status || "unknown";
@@ -8144,7 +8139,10 @@ ${title}`;
           } else {
             tb.innerHTML = imgs.map((i) => {
               const ver = bag.formatImageUpdateVersions(i);
-              const tip = [i.Image, ver, i.LocalDigest && `Local: ${i.LocalDigest}`, i.RemoteDigest && `Registre: ${i.RemoteDigest}`].filter(Boolean).join("\n");
+              const name = i.ImageName || String(i.Image || "").replace(/:.*$/, "");
+              const tip = [i.Image, ver].filter(Boolean).join("\n");
+              const actuel = bag.formatImageVersionLabel(name, i.LocalVersion);
+              const propose = i.Status === "update" ? bag.formatImageVersionLabel(name, i.RemoteVersion) : "\u2014";
               return `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>
             <td class="mono">${bag.esc(i.Image)}</td>
@@ -8152,8 +8150,8 @@ ${title}`;
                 action: i.Status === "update" ? "stack" : null,
                 id
               })}</td>
-            <td class="mono muted">${bag.esc(bag.shortDigest(i.LocalDigest))}</td>
-            <td class="mono muted">${bag.esc(i.Status === "update" ? bag.shortDigest(i.RemoteDigest) : i.Status === "fresh" || i.Status === "pinned" ? "\u2014" : bag.shortDigest(i.RemoteDigest))}</td>
+            <td class="mono">${bag.esc(actuel)}</td>
+            <td class="mono">${bag.esc(propose)}</td>
           </tr>`;
             }).join("");
           }

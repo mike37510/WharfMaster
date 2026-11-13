@@ -90,9 +90,12 @@ final class ContainersController extends BaseController
                 'UpdateCount' => $item['Status'] === 'update' ? 1 : 0,
                 'Checked' => in_array($item['Status'], ['update', 'fresh', 'pinned'], true) ? 1 : 0,
                 'Image' => $item['Image'],
+                'ImageName' => $item['ImageName'] ?? '',
                 'Detail' => $item['Detail'],
                 'LocalDigest' => $item['LocalDigest'],
                 'RemoteDigest' => $item['RemoteDigest'],
+                'LocalVersion' => $item['LocalVersion'] ?? '',
+                'RemoteVersion' => $item['RemoteVersion'] ?? '',
                 'Images' => [$item],
             ]);
         } catch (\Throwable $e) {

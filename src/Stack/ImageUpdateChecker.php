@@ -203,8 +203,9 @@ final class ImageUpdateChecker
                     }
                     $updates[$cid]['Detail'] = $this->detailFor(
                         (string) ($row['Status'] ?? 'unknown'),
-                        isset($row['LocalDigest']) && is_string($row['LocalDigest']) ? $row['LocalDigest'] : null,
-                        isset($row['RemoteDigest']) && is_string($row['RemoteDigest']) ? $row['RemoteDigest'] : null,
+                        (string) ($row['ImageName'] ?? $row['Image'] ?? ''),
+                        (string) ($row['LocalVersion'] ?? ''),
+                        (string) ($row['RemoteVersion'] ?? ''),
                     );
                 }
                 return [
@@ -241,9 +242,12 @@ final class ImageUpdateChecker
                     'UpdateCount' => 0,
                     'Checked' => 0,
                     'Image' => $image,
+                    'ImageName' => $image,
                     'Detail' => $image === '' ? 'Image absente' : 'Référence par digest local (tag indisponible)',
                     'LocalDigest' => str_starts_with($image, 'sha256:') ? strtolower($image) : null,
                     'RemoteDigest' => null,
+                    'LocalVersion' => '',
+                    'RemoteVersion' => '',
                 ];
                 continue;
             }
@@ -258,9 +262,12 @@ final class ImageUpdateChecker
                 'UpdateCount' => $status === 'update' ? 1 : 0,
                 'Checked' => in_array($status, ['update', 'fresh', 'pinned'], true) ? 1 : 0,
                 'Image' => (string) ($item['Image'] ?? $image),
+                'ImageName' => (string) ($item['ImageName'] ?? $image),
                 'Detail' => (string) ($item['Detail'] ?? ''),
                 'LocalDigest' => $item['LocalDigest'] ?? null,
                 'RemoteDigest' => $item['RemoteDigest'] ?? null,
+                'LocalVersion' => (string) ($item['LocalVersion'] ?? ''),
+                'RemoteVersion' => (string) ($item['RemoteVersion'] ?? ''),
             ];
         }
 
@@ -396,7 +403,10 @@ final class ImageUpdateChecker
 
     /**
      * @param list<array<string, mixed>> $registries
-     * @return array{Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,Detail:string}
+     * @return array{
+     *   Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,
+     *   LocalVersion:string,RemoteVersion:string,ImageName:string,Detail:string
+     * }
      */
     private function checkImage(
         string $service,
@@ -407,15 +417,26 @@ final class ImageUpdateChecker
     ): array {
         $parsed = ManifestClient::parse($image);
         if ($parsed === null) {
-            return $this->item($service, $image, 'unknown', null, null, 'Référence image invalide');
+            return $this->item($service, $image, 'unknown', null, null, '', '', 'Référence image invalide');
         }
+        $imageName = $this->imageDisplayName($parsed);
         if ($parsed['digest'] !== null) {
-            return $this->item($service, $image, 'pinned', $parsed['digest'], $parsed['digest']);
+            return $this->item(
+                $service,
+                $image,
+                'pinned',
+                $parsed['digest'],
+                $parsed['digest'],
+                $parsed['tag'] !== 'latest' ? $parsed['tag'] : '',
+                $parsed['tag'] !== 'latest' ? $parsed['tag'] : '',
+            );
         }
 
-        $local = $this->localDigest($docker, $image, $parsed);
+        $localInfo = $this->localImageInfo($docker, $image, $parsed);
+        $local = $localInfo['digest'];
+        $localVersion = $localInfo['version'];
         if ($local === null) {
-            return $this->item($service, $image, 'unknown', null, null, 'Image absente localement (pull requis)');
+            return $this->item($service, $image, 'unknown', null, null, $localVersion, '', 'Image absente localement (pull requis)');
         }
 
         // Keep previous definitive result (fresh / update) while local digest unchanged
@@ -423,11 +444,11 @@ final class ImageUpdateChecker
             $cachedStatus = $this->readImageStatusCache($image, $local);
             if ($cachedStatus !== null) {
                 $cachedStatus['Service'] = $service;
-                // Refresh human Detail (actuel → proposé) even from cache
                 $cachedStatus['Detail'] = $this->detailFor(
                     (string) $cachedStatus['Status'],
-                    $cachedStatus['LocalDigest'] ?? $local,
-                    $cachedStatus['RemoteDigest'] ?? null,
+                    (string) ($cachedStatus['ImageName'] ?? $imageName),
+                    (string) ($cachedStatus['LocalVersion'] ?? $localVersion),
+                    (string) ($cachedStatus['RemoteVersion'] ?? ''),
                 );
                 return $cachedStatus;
             }
@@ -435,15 +456,25 @@ final class ImageUpdateChecker
 
         $creds = $this->matchRegistry($parsed, $registries);
         $cacheKey = strtolower($parsed['host'] . '/' . $parsed['repository'] . ':' . $parsed['tag']);
-        $remote = $this->cachedRemote($cacheKey, function () use ($image, $creds): ?string {
-            return $this->manifests->remoteDigest($image, $creds);
+        $needVersion = true;
+        $remoteMeta = $this->cachedRemoteMeta($cacheKey, function () use ($image, $creds, $needVersion): array {
+            return $this->manifests->remoteMeta($image, $creds, $needVersion);
         }, $forceRefresh);
+        $remote = $remoteMeta['digest'] ?? null;
+        $remoteVersion = (string) ($remoteMeta['version'] ?? '');
+        if ($remoteVersion === '' && ($parsed['tag'] ?? '') !== '' && strtolower((string) $parsed['tag']) !== 'latest') {
+            $remoteVersion = (string) $parsed['tag'];
+        }
         if ($remote === null) {
-            return $this->item($service, $image, 'unknown', $local, null, 'Impossible de joindre le registre');
+            return $this->item($service, $image, 'unknown', $local, null, $localVersion, '', 'Impossible de joindre le registre');
         }
 
         $status = hash_equals($local, $remote) ? 'fresh' : 'update';
-        $item = $this->item($service, $image, $status, $local, $remote);
+        // For updates with same tag/version label, still show tag so the name is clear
+        if ($status === 'update' && $remoteVersion === '' && $localVersion !== '') {
+            $remoteVersion = 'nouveau build';
+        }
+        $item = $this->item($service, $image, $status, $local, $remote, $localVersion, $remoteVersion);
         $this->writeImageStatusCache($image, $local, $item);
         return $item;
     }
@@ -474,18 +505,27 @@ final class ImageUpdateChecker
         if (strtolower((string) ($data['local'] ?? '')) !== strtolower($localDigest)) {
             return null;
         }
+        $item = is_array($data['item']) ? $data['item'] : [];
+        $imageName = (string) ($item['ImageName'] ?? '');
+        if ($imageName === '') {
+            $p = ManifestClient::parse((string) ($item['Image'] ?? $image));
+            $imageName = $p ? $this->imageDisplayName($p) : (string) ($item['Image'] ?? $image);
+        }
         return [
-            'Service' => (string) ($data['item']['Service'] ?? ''),
-            'Image' => (string) ($data['item']['Image'] ?? $image),
+            'Service' => (string) ($item['Service'] ?? ''),
+            'Image' => (string) ($item['Image'] ?? $image),
+            'ImageName' => $imageName,
             'Status' => $status,
-            'LocalDigest' => $data['item']['LocalDigest'] ?? $localDigest,
-            'RemoteDigest' => $data['item']['RemoteDigest'] ?? null,
-            'Detail' => (string) ($data['item']['Detail'] ?? ''),
+            'LocalDigest' => $item['LocalDigest'] ?? $localDigest,
+            'RemoteDigest' => $item['RemoteDigest'] ?? null,
+            'LocalVersion' => (string) ($item['LocalVersion'] ?? ''),
+            'RemoteVersion' => (string) ($item['RemoteVersion'] ?? ''),
+            'Detail' => (string) ($item['Detail'] ?? ''),
         ];
     }
 
     /**
-     * @param array{Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,Detail:string} $item
+     * @param array<string, mixed> $item
      */
     private function writeImageStatusCache(string $image, string $localDigest, array $item): void
     {
@@ -499,12 +539,15 @@ final class ImageUpdateChecker
             'image' => $image,
             'local' => $localDigest,
             'item' => [
-                'Service' => $item['Service'],
-                'Image' => $item['Image'],
-                'Status' => $item['Status'],
-                'LocalDigest' => $item['LocalDigest'],
-                'RemoteDigest' => $item['RemoteDigest'],
-                'Detail' => $item['Detail'],
+                'Service' => $item['Service'] ?? '',
+                'Image' => $item['Image'] ?? $image,
+                'ImageName' => $item['ImageName'] ?? '',
+                'Status' => $item['Status'] ?? '',
+                'LocalDigest' => $item['LocalDigest'] ?? null,
+                'RemoteDigest' => $item['RemoteDigest'] ?? null,
+                'LocalVersion' => $item['LocalVersion'] ?? '',
+                'RemoteVersion' => $item['RemoteVersion'] ?? '',
+                'Detail' => $item['Detail'] ?? '',
             ],
         ], JSON_UNESCAPED_SLASHES));
     }
@@ -517,14 +560,21 @@ final class ImageUpdateChecker
 
     /**
      * @param array{host:string,port:?int,repository:string,tag:string,digest:?string} $parsed
+     * @return array{digest:?string,version:string}
      */
-    private function localDigest(DockerClient $docker, string $image, array $parsed): ?string
+    private function localImageInfo(DockerClient $docker, string $image, array $parsed): array
     {
         try {
             $info = $docker->json('GET', '/images/' . rawurlencode($image) . '/json');
         } catch (\Throwable) {
-            return null;
+            return ['digest' => null, 'version' => ''];
         }
+        $labels = $info['Config']['Labels'] ?? $info['ContainerConfig']['Labels'] ?? null;
+        if (!is_array($labels)) {
+            $labels = null;
+        }
+        $version = ManifestClient::versionFromLabels($labels, (string) ($parsed['tag'] ?? ''));
+        $digest = null;
         $repoDigests = $info['RepoDigests'] ?? [];
         if (is_array($repoDigests)) {
             $wantRepo = $parsed['repository'];
@@ -533,28 +583,45 @@ final class ImageUpdateChecker
                 if (!is_string($rd) || !str_contains($rd, '@')) {
                     continue;
                 }
-                [$name, $digest] = explode('@', $rd, 2);
-                $digest = strtolower($digest);
-                if (!str_starts_with($digest, 'sha256:')) {
+                [$name, $dig] = explode('@', $rd, 2);
+                $dig = strtolower($dig);
+                if (!str_starts_with($dig, 'sha256:')) {
                     continue;
                 }
-                // name may be "nginx" or "docker.io/library/nginx"
                 $n = strtolower($name);
                 if (str_contains($n, $wantRepo)
                     || ($hub && (str_ends_with($n, '/' . $wantRepo) || $n === 'library/' . basename($wantRepo) || basename($n) === basename($wantRepo)))
                 ) {
-                    return $digest;
+                    $digest = $dig;
+                    break;
                 }
             }
-            // Any digest is better than nothing when RepoDigests exist
-            foreach ($repoDigests as $rd) {
-                if (is_string($rd) && preg_match('/@(sha256:[a-f0-9]+)$/i', $rd, $m)) {
-                    return strtolower($m[1]);
+            if ($digest === null) {
+                foreach ($repoDigests as $rd) {
+                    if (is_string($rd) && preg_match('/@(sha256:[a-f0-9]+)$/i', $rd, $m)) {
+                        $digest = strtolower($m[1]);
+                        break;
+                    }
                 }
             }
         }
-        $id = strtolower((string) ($info['Id'] ?? ''));
-        return str_starts_with($id, 'sha256:') ? $id : null;
+        if ($digest === null) {
+            $id = strtolower((string) ($info['Id'] ?? ''));
+            $digest = str_starts_with($id, 'sha256:') ? $id : null;
+        }
+        return ['digest' => $digest, 'version' => $version];
+    }
+
+    /** @param array{host:string,port:?int,repository:string,tag:string,digest:?string} $parsed */
+    private function imageDisplayName(array $parsed): string
+    {
+        $repo = (string) ($parsed['repository'] ?? '');
+        $host = (string) ($parsed['host'] ?? 'docker.io');
+        if (ManifestClient::isDockerHub($host)) {
+            return str_starts_with($repo, 'library/') ? substr($repo, strlen('library/')) : $repo;
+        }
+        $port = $parsed['port'] ?? null;
+        return $host . ($port ? ':' . $port : '') . '/' . $repo;
     }
 
     /**
@@ -609,7 +676,11 @@ final class ImageUpdateChecker
     /**
      * @param callable():?string $fetch
      */
-    private function cachedRemote(string $key, callable $fetch, bool $forceRefresh = false): ?string
+    /**
+     * @param callable():array{digest:?string,version?:string,tag?:string} $fetch
+     * @return array{digest:?string,version:string}
+     */
+    private function cachedRemoteMeta(string $key, callable $fetch, bool $forceRefresh = false): array
     {
         $file = rtrim($this->cacheDir, '/') . '/digest-' . hash('sha256', $key) . '.json';
         if (!$forceRefresh && is_file($file)) {
@@ -620,26 +691,43 @@ final class ImageUpdateChecker
                 $positive = is_string($d) && $d !== '';
                 $ttl = $positive ? self::STACK_CACHE_TTL : self::NEGATIVE_CACHE_TTL;
                 if ((time() - (int) $data['t']) < $ttl) {
-                    return $positive ? $d : null;
+                    return [
+                        'digest' => $positive ? $d : null,
+                        'version' => (string) ($data['v'] ?? ''),
+                    ];
                 }
             }
         }
-        $digest = $fetch();
-        // Keep a previous good digest if the registry briefly fails
+        $meta = $fetch();
+        $digest = is_array($meta) ? ($meta['digest'] ?? null) : null;
+        $version = is_array($meta) ? (string) ($meta['version'] ?? '') : '';
         if (($digest === null || $digest === '') && !$forceRefresh && is_file($file)) {
             $raw = @file_get_contents($file);
             $prev = is_string($raw) ? json_decode($raw, true) : null;
             $prevD = is_array($prev) ? ($prev['d'] ?? null) : null;
             if (is_string($prevD) && $prevD !== '') {
-                return $prevD;
+                return [
+                    'digest' => $prevD,
+                    'version' => (string) ($prev['v'] ?? $version),
+                ];
             }
         }
-        @file_put_contents($file, json_encode(['t' => time(), 'd' => $digest], JSON_UNESCAPED_SLASHES));
-        return is_string($digest) && $digest !== '' ? $digest : null;
+        @file_put_contents($file, json_encode([
+            't' => time(),
+            'd' => $digest,
+            'v' => $version,
+        ], JSON_UNESCAPED_SLASHES));
+        return [
+            'digest' => is_string($digest) && $digest !== '' ? $digest : null,
+            'version' => $version,
+        ];
     }
 
     /**
-     * @return array{Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,Detail:string}
+     * @return array{
+     *   Service:string,Image:string,ImageName:string,Status:string,
+     *   LocalDigest:?string,RemoteDigest:?string,LocalVersion:string,RemoteVersion:string,Detail:string
+     * }
      */
     private function item(
         string $service,
@@ -647,30 +735,36 @@ final class ImageUpdateChecker
         string $status,
         ?string $local,
         ?string $remote,
+        string $localVersion = '',
+        string $remoteVersion = '',
         ?string $detail = null,
     ): array {
+        $parsed = ManifestClient::parse($image);
+        $imageName = $parsed ? $this->imageDisplayName($parsed) : $image;
         return [
             'Service' => $service,
             'Image' => $image,
+            'ImageName' => $imageName,
             'Status' => $status,
             'LocalDigest' => $local,
             'RemoteDigest' => $remote,
-            'Detail' => $detail ?? $this->detailFor($status, $local, $remote),
+            'LocalVersion' => $localVersion,
+            'RemoteVersion' => $remoteVersion,
+            'Detail' => $detail ?? $this->detailFor($status, $imageName, $localVersion, $remoteVersion),
         ];
     }
 
-    /** Human line: actuel vs proposé (digest court). */
-    private function detailFor(string $status, ?string $local, ?string $remote): string
+    /** Human line: nom + versions (pas les digests). */
+    private function detailFor(string $status, string $imageName, string $localVersion, string $remoteVersion): string
     {
-        $cur = $this->shortDigest($local);
-        $next = $this->shortDigest($remote);
+        $name = trim($imageName) !== '' ? trim($imageName) : 'image';
+        $cur = trim($localVersion) !== '' ? trim($localVersion) : '—';
+        $next = trim($remoteVersion) !== '' ? trim($remoteVersion) : '—';
         return match ($status) {
-            'update' => 'Actuel ' . $cur . ' → proposé ' . $next,
-            'fresh' => 'À jour (' . $cur . ')',
-            'pinned' => 'Épinglée (' . $cur . ')',
-            default => $remote === null && $local !== null
-                ? 'Contrôle incomplet (local ' . $cur . ')'
-                : 'État inconnu',
+            'update' => $name . ' : ' . $cur . ' → ' . $next,
+            'fresh' => $name . ' : à jour (' . $cur . ')',
+            'pinned' => $name . ' : épinglée (' . $cur . ')',
+            default => $name . ' : contrôle incomplet',
         };
     }
 
@@ -687,23 +781,12 @@ final class ImageUpdateChecker
             }
             $row['Detail'] = $this->detailFor(
                 (string) ($row['Status'] ?? 'unknown'),
-                isset($row['LocalDigest']) && is_string($row['LocalDigest']) ? $row['LocalDigest'] : null,
-                isset($row['RemoteDigest']) && is_string($row['RemoteDigest']) ? $row['RemoteDigest'] : null,
+                (string) ($row['ImageName'] ?? $row['Image'] ?? ''),
+                (string) ($row['LocalVersion'] ?? ''),
+                (string) ($row['RemoteVersion'] ?? ''),
             );
             $out[] = $row;
         }
         return $out;
-    }
-
-    private function shortDigest(?string $digest): string
-    {
-        if ($digest === null || $digest === '') {
-            return '—';
-        }
-        $d = strtolower($digest);
-        if (str_starts_with($d, 'sha256:')) {
-            return 'sha256:' . substr($d, 7, 12);
-        }
-        return strlen($d) > 16 ? substr($d, 0, 12) . '…' : $d;
     }
 }

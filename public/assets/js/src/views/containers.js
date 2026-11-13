@@ -810,8 +810,6 @@ export function install() {
         const ver = bag.formatImageUpdateVersions(u);
         let title = ver || u.Detail || u.Error || 'Aucun contrôle';
         if (u.Image) title = `${u.Image}\n${title}`;
-        if (u.LocalDigest) title += `\nLocal: ${u.LocalDigest}`;
-        if (u.RemoteDigest && u.Status === 'update') title += `\nProposé: ${u.RemoteDigest}`;
         if (fromCache && checkedAt) {
           title += `\n(cache · vérifié ${new Date(checkedAt * 1000).toLocaleString()})`;
         }
@@ -940,8 +938,6 @@ export function install() {
             const ver = bag.formatImageUpdateVersions(upd);
             let tip = ver || upd.Detail || `${upd.Checked || 0} contrôle(s)`;
             if (upd.Image) tip = `${upd.Image}\n${tip}`;
-            if (upd.LocalDigest) tip += `\nLocal: ${upd.LocalDigest}`;
-            if (upd.RemoteDigest && upd.Status === 'update') tip += `\nProposé: ${upd.RemoteDigest}`;
             return tip;
           })(),
           { action: 'container', id },

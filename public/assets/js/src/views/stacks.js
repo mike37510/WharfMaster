@@ -154,28 +154,31 @@ export function install() {
     return `${names[0]} +${names.length - 1}`;
   }
 
-  /** Short digest for UI (sha256:abcdef123456). */
-  bag.shortDigest = function shortDigest(digest) {
-    const d = String(digest || '').toLowerCase();
-    if (!d) return '—';
-    if (d.startsWith('sha256:') && d.length >= 19) return `sha256:${d.slice(7, 19)}`;
-    return d.length > 16 ? `${d.slice(0, 12)}…` : d;
+  /** Display name + version for update UI (not digests). */
+  bag.formatImageVersionLabel = function formatImageVersionLabel(name, version) {
+    const n = String(name || '').trim();
+    const v = String(version || '').trim();
+    if (n && v) return `${n} ${v}`;
+    if (n) return n;
+    if (v) return v;
+    return '—';
   }
 
-  /** One-line actuel → proposé from an update payload item. */
+  /** One-line actuel → proposé (nom + n° de version). */
   bag.formatImageUpdateVersions = function formatImageUpdateVersions(u) {
     if (!u || typeof u !== 'object') return '';
-    if (u.Detail && /Actuel |À jour \(|Épinglée \(/.test(String(u.Detail))) {
+    if (u.Detail && / : .+ → | : à jour| : épinglée/.test(String(u.Detail))) {
       return String(u.Detail);
     }
-    const cur = bag.shortDigest(u.LocalDigest);
-    const next = bag.shortDigest(u.RemoteDigest);
+    const name = String(u.ImageName || '').trim() || String(u.Image || '').replace(/:.*$/, '');
+    const cur = String(u.LocalVersion || '').trim() || '—';
+    const next = String(u.RemoteVersion || '').trim() || '—';
     const st = u.Status || 'unknown';
-    if (st === 'update') return `Actuel ${cur} → proposé ${next}`;
-    if (st === 'fresh') return `À jour (${cur})`;
-    if (st === 'pinned') return `Épinglée (${cur})`;
+    if (st === 'update') return `${name || 'image'} : ${cur} → ${next}`;
+    if (st === 'fresh') return `${name || 'image'} : à jour (${cur})`;
+    if (st === 'pinned') return `${name || 'image'} : épinglée (${cur})`;
     if (u.Detail) return String(u.Detail);
-    return cur !== '—' ? `Local ${cur}` : '';
+    return name ? `${name} (${cur})` : '';
   }
 
   bag.stackUpdatePill = function stackUpdatePill(status, updateCount, title, opts = {}) {
@@ -1264,8 +1267,12 @@ export function install() {
         } else {
           tb.innerHTML = imgs.map((i) => {
             const ver = bag.formatImageUpdateVersions(i);
-            const tip = [i.Image, ver, i.LocalDigest && `Local: ${i.LocalDigest}`, i.RemoteDigest && `Registre: ${i.RemoteDigest}`]
-              .filter(Boolean).join('\n');
+            const name = i.ImageName || String(i.Image || '').replace(/:.*$/, '');
+            const tip = [i.Image, ver].filter(Boolean).join('\n');
+            const actuel = bag.formatImageVersionLabel(name, i.LocalVersion);
+            const propose = i.Status === 'update'
+              ? bag.formatImageVersionLabel(name, i.RemoteVersion)
+              : '—';
             return `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>
             <td class="mono">${bag.esc(i.Image)}</td>
@@ -1273,8 +1280,8 @@ export function install() {
               action: i.Status === 'update' ? 'stack' : null,
               id,
             })}</td>
-            <td class="mono muted">${bag.esc(bag.shortDigest(i.LocalDigest))}</td>
-            <td class="mono muted">${bag.esc(i.Status === 'update' ? bag.shortDigest(i.RemoteDigest) : (i.Status === 'fresh' || i.Status === 'pinned' ? '—' : bag.shortDigest(i.RemoteDigest)))}</td>
+            <td class="mono">${bag.esc(actuel)}</td>
+            <td class="mono">${bag.esc(propose)}</td>
           </tr>`;
           }).join('');
         }
