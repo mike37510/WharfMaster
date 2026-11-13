@@ -23,6 +23,12 @@ final class ImageUpdateChecker
     /** Short TTL for failed registry probes (do not lock « unknown » for a full day). */
     public const NEGATIVE_CACHE_TTL = 600; // 10 min
 
+    /** Bump when remote version extraction changes (ENV / labels) so old digest caches re-fetch. */
+    private const META_CACHE_VER = 2;
+
+    /** Bump when status payload shape / version labels change. */
+    private const STATUS_CACHE_VER = 2;
+
     private ManifestClient $manifests;
 
     public function __construct(
@@ -458,14 +464,31 @@ final class ImageUpdateChecker
 
         $creds = $this->matchRegistry($parsed, $registries);
         $cacheKey = strtolower($parsed['host'] . '/' . $parsed['repository'] . ':' . $parsed['tag']);
+        $tag = (string) ($parsed['tag'] ?? '');
         $remoteMeta = $this->cachedRemoteMeta($cacheKey, function () use ($image, $creds): array {
             return $this->manifests->remoteMeta($image, $creds, true);
         }, $forceRefresh);
         $remote = $remoteMeta['digest'] ?? null;
         $remoteVersionRaw = (string) ($remoteMeta['version'] ?? '');
         $remoteCreated = (string) ($remoteMeta['created'] ?? '');
-        if ($remoteVersionRaw === '' && ($parsed['tag'] ?? '') !== '' && strtolower((string) $parsed['tag']) !== 'latest') {
-            $remoteVersionRaw = (string) $parsed['tag'];
+        // Cache may still hold only the floating tag (pg16) while local has PG_VERSION — refresh once
+        if (
+            !$forceRefresh
+            && $tag !== ''
+            && $remoteVersionRaw !== ''
+            && strtolower($remoteVersionRaw) === strtolower($tag)
+            && $localVersionRaw !== ''
+            && strtolower($localVersionRaw) !== strtolower($tag)
+        ) {
+            $remoteMeta = $this->cachedRemoteMeta($cacheKey, function () use ($image, $creds): array {
+                return $this->manifests->remoteMeta($image, $creds, true);
+            }, true);
+            $remote = $remoteMeta['digest'] ?? $remote;
+            $remoteVersionRaw = (string) ($remoteMeta['version'] ?? '');
+            $remoteCreated = (string) ($remoteMeta['created'] ?? $remoteCreated);
+        }
+        if ($remoteVersionRaw === '' && $tag !== '' && strtolower($tag) !== 'latest') {
+            $remoteVersionRaw = $tag;
         }
         if ($remote === null) {
             $localVersion = ManifestClient::versionWithDate($localVersionRaw, $localCreated);
@@ -473,7 +496,6 @@ final class ImageUpdateChecker
         }
 
         $status = hash_equals($local, $remote) ? 'fresh' : 'update';
-        $tag = (string) ($parsed['tag'] ?? '');
         $floating = $this->isSameFloatingVersion($localVersionRaw, $remoteVersionRaw, $tag);
 
         if ($status === 'update' && $floating) {
@@ -534,6 +556,9 @@ final class ImageUpdateChecker
         if (!is_array($data) || !isset($data['t'], $data['item']) || !is_array($data['item'])) {
             return null;
         }
+        if ((int) ($data['cv'] ?? 0) < self::STATUS_CACHE_VER) {
+            return null;
+        }
         if ((time() - (int) $data['t']) >= self::STACK_CACHE_TTL) {
             return null;
         }
@@ -545,14 +570,28 @@ final class ImageUpdateChecker
             return null;
         }
         $item = is_array($data['item']) ? $data['item'] : [];
+        $imgRef = (string) ($item['Image'] ?? $image);
+        $p = ManifestClient::parse($imgRef);
+        $tag = is_array($p) ? (string) ($p['tag'] ?? '') : '';
+        $lvCore = $this->versionCore((string) ($item['LocalVersion'] ?? ''));
+        $rvCore = $this->versionCore((string) ($item['RemoteVersion'] ?? ''));
+        // Stale: remote still only the floating tag while local has a real package version
+        if (
+            $tag !== ''
+            && $rvCore !== ''
+            && strtolower($rvCore) === strtolower($tag)
+            && $lvCore !== ''
+            && strtolower($lvCore) !== strtolower($tag)
+        ) {
+            return null;
+        }
         $imageName = (string) ($item['ImageName'] ?? '');
         if ($imageName === '') {
-            $p = ManifestClient::parse((string) ($item['Image'] ?? $image));
-            $imageName = $p ? $this->imageDisplayName($p) : (string) ($item['Image'] ?? $image);
+            $imageName = $p ? $this->imageDisplayName($p) : $imgRef;
         }
         return [
             'Service' => (string) ($item['Service'] ?? ''),
-            'Image' => (string) ($item['Image'] ?? $image),
+            'Image' => $imgRef,
             'ImageName' => $imageName,
             'Status' => $status,
             'LocalDigest' => $item['LocalDigest'] ?? $localDigest,
@@ -575,6 +614,7 @@ final class ImageUpdateChecker
         $file = $this->imageStatusCacheFile($image, $localDigest);
         @file_put_contents($file, json_encode([
             't' => time(),
+            'cv' => self::STATUS_CACHE_VER,
             'image' => $image,
             'local' => $localDigest,
             'item' => [
@@ -597,6 +637,22 @@ final class ImageUpdateChecker
         return rtrim($this->cacheDir, '/') . '/status-' . hash('sha256', $key) . '.json';
     }
 
+    /** Strip « (date) » / « · … » suffixes for comparing version cores. */
+    private function versionCore(string $labeled): string
+    {
+        $s = trim($labeled);
+        if ($s === '') {
+            return '';
+        }
+        if (preg_match('/^(.+?)\s+\(/u', $s, $m)) {
+            return trim($m[1]);
+        }
+        if (preg_match('/^(.+?)\s+·/u', $s, $m)) {
+            return trim($m[1]);
+        }
+        return $s;
+    }
+
     /**
      * @param array{host:string,port:?int,repository:string,tag:string,digest:?string} $parsed
      * @return array{digest:?string,version:string,created:string}
@@ -612,7 +668,12 @@ final class ImageUpdateChecker
         if (!is_array($labels)) {
             $labels = null;
         }
-        $version = ManifestClient::versionFromLabels($labels, (string) ($parsed['tag'] ?? ''));
+        $env = $info['Config']['Env'] ?? $info['ContainerConfig']['Env'] ?? null;
+        if (!is_array($env)) {
+            $env = null;
+        }
+        // Prefer package ENV (ex. PG_VERSION=16.15-…) over floating tag pg16
+        $version = ManifestClient::versionFromConfig($labels, $env, (string) ($parsed['tag'] ?? ''));
         $created = trim((string) ($info['Created'] ?? ''));
         $digest = null;
         $repoDigests = $info['RepoDigests'] ?? [];
@@ -726,7 +787,7 @@ final class ImageUpdateChecker
         if (!$forceRefresh && is_file($file)) {
             $raw = @file_get_contents($file);
             $data = is_string($raw) ? json_decode($raw, true) : null;
-            if (is_array($data) && isset($data['t'])) {
+            if (is_array($data) && isset($data['t']) && (int) ($data['cv'] ?? 0) >= self::META_CACHE_VER) {
                 $d = $data['d'] ?? null;
                 $positive = is_string($d) && $d !== '';
                 $ttl = $positive ? self::STACK_CACHE_TTL : self::NEGATIVE_CACHE_TTL;
@@ -747,7 +808,7 @@ final class ImageUpdateChecker
             $raw = @file_get_contents($file);
             $prev = is_string($raw) ? json_decode($raw, true) : null;
             $prevD = is_array($prev) ? ($prev['d'] ?? null) : null;
-            if (is_string($prevD) && $prevD !== '') {
+            if (is_string($prevD) && $prevD !== '' && (int) ($prev['cv'] ?? 0) >= self::META_CACHE_VER) {
                 return [
                     'digest' => $prevD,
                     'version' => (string) ($prev['v'] ?? $version),
@@ -757,6 +818,7 @@ final class ImageUpdateChecker
         }
         @file_put_contents($file, json_encode([
             't' => time(),
+            'cv' => self::META_CACHE_VER,
             'd' => $digest,
             'v' => $version,
             'c' => $created,

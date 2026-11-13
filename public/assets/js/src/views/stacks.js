@@ -1274,9 +1274,10 @@ export function install() {
             const ver = bag.formatImageUpdateVersions(i);
             const name = i.ImageName || String(i.Image || '').replace(/:.*$/, '');
             const tip = [i.Image, ver].filter(Boolean).join('\n');
-            const actuel = bag.formatImageVersionLabel(name, i.LocalVersion);
+            // Colonnes dédiées : n° de version seul (le nom est déjà dans « Image »)
+            const actuel = String(i.LocalVersion || '').trim() || '—';
             const propose = i.Status === 'update'
-              ? bag.formatImageVersionLabel(name, i.RemoteVersion)
+              ? (String(i.RemoteVersion || '').trim() || '—')
               : '—';
             return `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>

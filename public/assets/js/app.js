@@ -5836,6 +5836,67 @@ ${tip}`;
         }
       }, { disableSiblings: false, minMs: 250 });
     };
+    bag.bindsFromContainers = function bindsFromContainers(containers) {
+      const out = [];
+      const seenPath = /* @__PURE__ */ new Set();
+      (containers || []).forEach((c) => {
+        const project = String(c?.Labels?.["com.docker.compose.project"] || "").trim();
+        const mounts = Array.isArray(c?.Mounts) ? c.Mounts : [];
+        mounts.forEach((m) => {
+          if (String(m?.Type || "").toLowerCase() !== "bind") return;
+          let src = String(m?.Source || "").replace(/\\/g, "/").trim();
+          if (!src.startsWith("/")) return;
+          src = src.replace(/\/+$/, "") || "/";
+          if (src.startsWith("/var/lib/docker/") || src.startsWith("/run/docker/")) return;
+          const pathKey = `${c?._nodeId || 0}:${src.toLowerCase()}`;
+          if (seenPath.has(pathKey)) return;
+          seenPath.add(pathKey);
+          const base = src.split("/").filter(Boolean).pop() || "bind";
+          const prefix = project || "runtime";
+          const name = `${prefix}-${base}`.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "bind";
+          out.push({
+            Name: name,
+            Driver: "bind",
+            HostPath: src,
+            Mountpoint: src,
+            Source: "runtime",
+            StackName: project,
+            CreatedAt: 0,
+            _bind: true,
+            _nodeId: c?._nodeId,
+            _nodeName: c?._nodeName
+          });
+        });
+      });
+      return out;
+    };
+    bag.mergeVolumeLists = function mergeVolumeLists(namedVolumes, bindList) {
+      const volumes = [...namedVolumes || []];
+      const named = new Set(volumes.map((v) => String(v.Name || "").toLowerCase()));
+      const paths = new Set(
+        volumes.filter((v) => v._bind || String(v.Driver || "").toLowerCase() === "bind").map((v) => String(v.HostPath || v.Mountpoint || "").toLowerCase()).filter(Boolean)
+      );
+      (bindList || []).forEach((b) => {
+        const key = String(b.Name || "").toLowerCase();
+        const path = String(b.HostPath || b.Mountpoint || "").toLowerCase();
+        if (path && paths.has(path)) return;
+        if (key && named.has(key) && !path) return;
+        if (key && named.has(key) && path) {
+          if (paths.has(path)) return;
+        }
+        volumes.push(b);
+        if (key) named.add(key);
+        if (path) paths.add(path);
+      });
+      return volumes;
+    };
+    bag.bindDriverLabel = function bindDriverLabel(v) {
+      const src = String(v?.Source || "").toLowerCase();
+      if (src === "stack") return "bind \xB7 stack";
+      if (src === "runtime") return "bind \xB7 conteneur";
+      if (src === "manual") return "bind \xB7 d\xE9clar\xE9";
+      return "bind";
+    };
     bag.viewVolumes = async function viewVolumes() {
       const all = bag.isAllNodes();
       const isAdmin = Number(bag.state.user?.Role) === 1;
@@ -5847,7 +5908,7 @@ ${tip}`;
           bag.dockerAll("/volumes", { pick: (d) => d?.Volumes || [] }),
           bag.dockerAll("/containers/json?all=true")
         ]);
-        volumes = aggVol.items;
+        volumes = bag.mergeVolumeLists(aggVol.items, bag.bindsFromContainers(aggCtr.items));
         containers = aggCtr.items;
         partial = aggVol.failed > 0 || aggCtr.failed > 0;
       } else {
@@ -5856,16 +5917,12 @@ ${tip}`;
           bag.Api.docker("/containers/json?all=true"),
           bag.Api.bindVolumes().catch(() => ({ Volumes: [] }))
         ]);
-        volumes = data.Volumes || [];
         containers = ctrs || [];
-        const bindList = binds?.Volumes || [];
-        const named = new Set(volumes.map((v) => String(v.Name || "").toLowerCase()));
-        bindList.forEach((b) => {
-          const key = String(b.Name || "").toLowerCase();
-          if (!key || named.has(key)) return;
-          volumes.push(b);
-          named.add(key);
-        });
+        const bindList = [
+          ...binds?.Volumes || [],
+          ...bag.bindsFromContainers(containers)
+        ];
+        volumes = bag.mergeVolumeLists(data.Volumes || [], bindList);
       }
       const usageByKey = /* @__PURE__ */ new Map();
       volumes.forEach((v, idx) => {
@@ -5889,9 +5946,9 @@ ${tip}`;
         const isBind = !!(v._bind || String(v.Driver || "").toLowerCase() === "bind");
         const mount = v.HostPath || v.Mountpoint || "";
         const usageCell = users.length ? `<button type="button" class="badge badge-inuse img-usage-btn" data-vol-key="${bag.esc(key)}" title="Voir les conteneurs">${users.length}&nbsp;conteneur${users.length > 1 ? "s" : ""}</button>` : `<span class="badge badge-unused">Inutilis\xE9</span>`;
-        const driverLabel = isBind ? v.Source === "stack" ? "bind \xB7 stack" : "bind" : v.Driver || "";
+        const driverLabel = isBind ? bag.bindDriverLabel(v) : v.Driver || "";
         const search = `${v.Name} ${driverLabel} ${mount} ${v.StackName || ""} ${v._nodeName || ""} ${users.length ? "utilise used" : "inutilise unused"} bind`.toLowerCase();
-        const canDelete = !all && (!isBind || isAdmin);
+        const canDelete = !all && (!isBind || isAdmin && v.Source !== "runtime");
         const actions = all ? '<span class="muted">\u2014</span>' : `<div class="quick-actions">
         ${bag.iconBtn({ tag: "a", href: `#volumes/${encodeURIComponent(v.Name)}`, title: "Explorer", icon: "search" })}
         ${!isBind ? bag.shareBtn("volume", v.Name) : ""}
@@ -5908,7 +5965,7 @@ ${tip}`;
       ${all ? `<td class="muted">${bag.esc(v._nodeName || "\u2014")}</td>` : ""}
       <td class="name-cell">
         <strong>${all ? bag.esc(v.Name) : `<a href="#volumes/${encodeURIComponent(v.Name)}">${bag.esc(v.Name)}</a>`}</strong>
-        ${isBind ? `<span class="id">${v.StackName ? bag.esc(v.StackName) : "bind"}</span>` : ""}
+        ${isBind ? `<span class="id">${v.StackName ? bag.esc(v.StackName) : v.Source === "runtime" ? "conteneur" : "bind"}</span>` : ""}
       </td>
       <td>${bag.esc(driverLabel)}</td>
       <td>${usageCell}</td>
@@ -5926,7 +5983,7 @@ ${tip}`;
         <input class="search" id="filter" type="search" placeholder="Rechercher des volumes\u2026" value="${bag.esc(bag.state.filters.volumes || "")}">
         ${all ? "" : `${bag.createBtn("create", isAdmin ? "Cr\xE9er / d\xE9clarer" : "Cr\xE9er un volume")}${bag.bulkDeleteBtnHtml()}`}
         <div class="spacer"></div>
-        ${all ? "" : '<span class="muted" style="font-size:12px">bind = chemin h\xF4te \xB7 sync auto depuis les stacks</span>'}
+        ${all ? "" : '<span class="muted" style="font-size:12px">bind = chemin h\xF4te \xB7 sync stacks + conteneurs</span>'}
         <span class="muted mono" id="filter-count">${volumes.length} / ${volumes.length}</span>
       </div>
       <div class="table-wrap"><table class="data">
@@ -8146,8 +8203,8 @@ ${title}`;
               const ver = bag.formatImageUpdateVersions(i);
               const name = i.ImageName || String(i.Image || "").replace(/:.*$/, "");
               const tip = [i.Image, ver].filter(Boolean).join("\n");
-              const actuel = bag.formatImageVersionLabel(name, i.LocalVersion);
-              const propose = i.Status === "update" ? bag.formatImageVersionLabel(name, i.RemoteVersion) : "\u2014";
+              const actuel = String(i.LocalVersion || "").trim() || "\u2014";
+              const propose = i.Status === "update" ? String(i.RemoteVersion || "").trim() || "\u2014" : "\u2014";
               return `<tr>
             <td class="mono">${bag.esc(i.Service)}</td>
             <td class="mono">${bag.esc(i.Image)}</td>

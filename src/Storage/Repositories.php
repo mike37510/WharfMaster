@@ -1446,6 +1446,16 @@ final class Repositories
         return $stmt->fetchAll() ?: [];
     }
 
+    public function getBindVolumeByHostPath(int $endpointId, string $hostPath): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT * FROM bind_volumes WHERE endpoint_id = ? AND host_path = ? LIMIT 1'
+        );
+        $stmt->execute([$endpointId, $hostPath]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
     public function getBindVolumeByName(int $endpointId, string $name): ?array
     {
         $stmt = $this->pdo->prepare(
@@ -1531,6 +1541,24 @@ final class Repositories
             "DELETE FROM bind_volumes WHERE stack_id = ? AND source = 'stack' AND name NOT IN ($placeholders)"
         );
         $stmt->execute([$stackId, ...$keep]);
+    }
+
+    /** Remove runtime-sourced binds no longer mounted by any container. */
+    public function pruneRuntimeBindVolumes(int $endpointId, array $keepNames): void
+    {
+        $keep = array_values(array_filter(array_map('strval', $keepNames)));
+        if ($keep === []) {
+            $stmt = $this->pdo->prepare(
+                "DELETE FROM bind_volumes WHERE endpoint_id = ? AND source = 'runtime'"
+            );
+            $stmt->execute([$endpointId]);
+            return;
+        }
+        $placeholders = implode(',', array_fill(0, count($keep), '?'));
+        $stmt = $this->pdo->prepare(
+            "DELETE FROM bind_volumes WHERE endpoint_id = ? AND source = 'runtime' AND name NOT IN ($placeholders)"
+        );
+        $stmt->execute([$endpointId, ...$keep]);
     }
 
     public const SHARE_TYPES = ['stack', 'container', 'volume', 'network'];

@@ -60,7 +60,7 @@ final class ManifestClient
             if ($token !== null) {
                 $headers = [
                     'Accept: ' . self::ACCEPT,
-                    'User-Agent: WharfMaster/2.3.4',
+                    'User-Agent: WharfMaster/2.3.5',
                     'Authorization: Bearer ' . $token,
                 ];
                 $res = $this->httpHeadOrGet($manifestUrl, $headers, 8);
@@ -90,7 +90,8 @@ final class ManifestClient
         if ($withVersion && $manifestBody !== '') {
             $cfg = $this->configFromManifestBody($base, $repo, $headers, $manifestBody);
             $labels = is_array($cfg['labels'] ?? null) ? $cfg['labels'] : null;
-            $version = self::versionFromLabels($labels, $tag);
+            $env = is_array($cfg['env'] ?? null) ? $cfg['env'] : null;
+            $version = self::versionFromConfig($labels, $env, $tag);
             $created = (string) ($cfg['created'] ?? '');
         }
         if ($version === '' && $tag !== '' && strtolower($tag) !== 'latest') {
@@ -142,6 +143,73 @@ final class ManifestClient
     }
 
     /**
+     * Version from labels, then well-known ENV (PG_VERSION, …), then tag.
+     *
+     * @param array<string, mixed>|null $labels
+     * @param list<string>|null $env Config.Env lines KEY=value
+     */
+    public static function versionFromConfig(?array $labels, ?array $env, string $tagFallback = ''): string
+    {
+        $fromLabels = self::versionFromLabels($labels, '');
+        $map = [];
+        if (is_array($env)) {
+            foreach ($env as $line) {
+                if (!is_string($line) || !str_contains($line, '=')) {
+                    continue;
+                }
+                [$k, $v] = explode('=', $line, 2);
+                $map[trim($k)] = trim($v);
+            }
+        }
+        $fromEnv = '';
+        foreach ([
+            'PG_VERSION',
+            'POSTGRES_VERSION',
+            'MYSQL_VERSION',
+            'MARIADB_VERSION',
+            'REDIS_VERSION',
+            'NGINX_VERSION',
+            'NODE_VERSION',
+            'JAVA_VERSION',
+            'PHP_VERSION',
+            'PYTHON_VERSION',
+            'APP_VERSION',
+            'VERSION',
+        ] as $key) {
+            $v = trim((string) ($map[$key] ?? ''));
+            if ($v !== '' && strtolower($v) !== 'latest') {
+                $fromEnv = $v;
+                break;
+            }
+        }
+        if ($fromEnv === '') {
+            $skip = ['GOSU_VERSION', 'SU_EXEC_VERSION', 'TINI_VERSION'];
+            foreach ($map as $k => $v) {
+                if (!str_ends_with($k, '_VERSION') || in_array($k, $skip, true)) {
+                    continue;
+                }
+                $v = trim((string) $v);
+                if ($v !== '' && strtolower($v) !== 'latest') {
+                    $fromEnv = $v;
+                    break;
+                }
+            }
+        }
+        $tag = strtolower(trim($tagFallback));
+        // Prefer ENV package version when labels are absent or only echo the floating tag (pg16)
+        if ($fromEnv !== '' && ($fromLabels === '' || strtolower($fromLabels) === $tag)) {
+            return $fromEnv;
+        }
+        if ($fromLabels !== '') {
+            return $fromLabels;
+        }
+        if ($fromEnv !== '') {
+            return $fromEnv;
+        }
+        return self::versionFromLabels(null, $tagFallback);
+    }
+
+    /**
      * @param array{host:string,port:?int,repository:string,tag:string,digest:?string} $parsed
      * @param array{url?:string,username?:string,password?:string,type?:string} $registryCreds
      * @return array{base:string,repo:string,tag:string,headers:list<string>}|null
@@ -167,7 +235,7 @@ final class ManifestClient
         $pass = (string) ($registryCreds['password'] ?? '');
         $headers = [
             'Accept: ' . self::ACCEPT,
-            'User-Agent: WharfMaster/2.3.4',
+            'User-Agent: WharfMaster/2.3.5',
         ];
         if ($user !== '' || $pass !== '') {
             $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
@@ -177,7 +245,7 @@ final class ManifestClient
 
     /**
      * @param list<string> $headers
-     * @return array{labels:?array<string,mixed>,created:string}
+     * @return array{labels:?array<string,mixed>,env:?list<string>,created:string}
      */
     private function configFromManifestBody(
         string $base,
@@ -185,37 +253,44 @@ final class ManifestClient
         array $headers,
         string $manifestBody,
     ): array {
-        $empty = ['labels' => null, 'created' => ''];
+        $empty = ['labels' => null, 'env' => null, 'created' => ''];
         $manifest = json_decode($manifestBody, true);
         if (!is_array($manifest)) {
             return $empty;
         }
-        // Manifest list / index → pick first amd64/arm64 or first manifest
+        // Manifest list / index → prefer linux/amd64 (skip attestation unknown/unknown)
         if (($manifest['mediaType'] ?? '') === 'application/vnd.docker.distribution.manifest.list.v2+json'
             || ($manifest['mediaType'] ?? '') === 'application/vnd.oci.image.index.v1+json'
             || isset($manifest['manifests'])
         ) {
             $list = is_array($manifest['manifests'] ?? null) ? $manifest['manifests'] : [];
             $pick = null;
+            $arm = null;
             foreach ($list as $m) {
                 if (!is_array($m)) {
                     continue;
                 }
+                $os = strtolower((string) (($m['platform']['os'] ?? '') ?: ''));
                 $arch = strtolower((string) (($m['platform']['architecture'] ?? '') ?: ''));
-                if ($arch === 'amd64' || $arch === 'arm64') {
+                if ($os === 'unknown' || $arch === 'unknown') {
+                    continue;
+                }
+                if ($arch === 'amd64') {
                     $pick = $m;
-                    if ($arch === 'amd64') {
-                        break;
-                    }
+                    break;
+                }
+                if ($arch === 'arm64') {
+                    $arm = $m;
                 }
                 $pick ??= $m;
             }
+            $pick = $pick ?? $arm;
             $childDigest = is_array($pick) ? (string) ($pick['digest'] ?? '') : '';
             if ($childDigest === '') {
                 return $empty;
             }
             $childUrl = $base . '/v2/' . $repo . '/manifests/' . rawurlencode($childDigest);
-            $child = $this->http('GET', $childUrl, $headers, 10);
+            $child = $this->http('GET', $childUrl, $headers, 12);
             if ($child['status'] < 200 || $child['status'] >= 300) {
                 return $empty;
             }
@@ -236,7 +311,7 @@ final class ManifestClient
                 $blobHeaders[] = $h;
             }
         }
-        $blob = $this->http('GET', $blobUrl, $blobHeaders, 10);
+        $blob = $this->http('GET', $blobUrl, $blobHeaders, 15);
         if ($blob['status'] < 200 || $blob['status'] >= 300) {
             return $empty;
         }
@@ -248,8 +323,12 @@ final class ManifestClient
         if (!is_array($labels)) {
             $labels = null;
         }
+        $env = $config['config']['Env'] ?? $config['container_config']['Env'] ?? null;
+        if (!is_array($env)) {
+            $env = null;
+        }
         $created = trim((string) ($config['created'] ?? ''));
-        return ['labels' => $labels, 'created' => $created];
+        return ['labels' => $labels, 'env' => $env, 'created' => $created];
     }
 
     /** @return array{created:string,version:string} */
@@ -262,7 +341,7 @@ final class ManifestClient
         $url = 'https://hub.docker.com/v2/repositories/' . $repo . '/tags/' . rawurlencode($tag);
         $res = $this->http('GET', $url, [
             'Accept: application/json',
-            'User-Agent: WharfMaster/2.3.4',
+            'User-Agent: WharfMaster/2.3.5',
         ], 8);
         if ($res['status'] < 200 || $res['status'] >= 300) {
             return ['created' => '', 'version' => ''];
@@ -467,7 +546,7 @@ final class ManifestClient
             $query['scope'] = $params['scope'] ?? ('repository:' . $repository . ':pull');
         }
         $url = $realm . (str_contains($realm, '?') ? '&' : '?') . http_build_query($query);
-        $headers = ['Accept: application/json', 'User-Agent: WharfMaster/2.3.4'];
+        $headers = ['Accept: application/json', 'User-Agent: WharfMaster/2.3.5'];
         if ($user !== '' || $pass !== '') {
             $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
         }

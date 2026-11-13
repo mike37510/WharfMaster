@@ -334,6 +334,150 @@ final class AppContext
         $this->repo->pruneStackBindVolumes($stackId, $keep);
     }
 
+    /**
+     * Discover bind mounts from any local container (Compose hors WharfMaster inclus).
+     * Upserts source=runtime ; ne remplace pas manual/stack.
+     */
+    public function syncBindVolumesFromContainers(int $endpointId, DockerClient $docker): void
+    {
+        try {
+            $list = $docker->json('GET', '/containers/json', null, ['all' => 'true']);
+        } catch (\Throwable) {
+            return;
+        }
+        if (!is_array($list)) {
+            return;
+        }
+
+        /** @var array<string, array{name:string,stackName:string,hostPath:string}> $byPath */
+        $byPath = [];
+        foreach ($list as $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $labels = is_array($c['Labels'] ?? null) ? $c['Labels'] : [];
+            $project = trim((string) ($labels['com.docker.compose.project'] ?? ''));
+            $mounts = is_array($c['Mounts'] ?? null) ? $c['Mounts'] : [];
+            foreach ($mounts as $m) {
+                if (!is_array($m)) {
+                    continue;
+                }
+                if (strtolower((string) ($m['Type'] ?? '')) !== 'bind') {
+                    continue;
+                }
+                $src = str_replace('\\', '/', trim((string) ($m['Source'] ?? '')));
+                if ($src === '' || !str_starts_with($src, '/') || str_contains($src, "\0")) {
+                    continue;
+                }
+                $src = rtrim($src, '/') ?: '/';
+                // Ignore noisy Docker/engine internals
+                if (str_starts_with($src, '/var/lib/docker/') || str_starts_with($src, '/run/docker/')) {
+                    continue;
+                }
+                $key = strtolower($src);
+                if (isset($byPath[$key])) {
+                    if ($byPath[$key]['stackName'] === '' && $project !== '') {
+                        $byPath[$key]['stackName'] = $project;
+                    }
+                    continue;
+                }
+                $base = basename($src);
+                if ($base === '' || $base === '/' || $base === '.') {
+                    $base = 'bind';
+                }
+                $prefix = $project !== '' ? $project : 'runtime';
+                $name = $this->slugBindName($prefix . '-' . $base);
+                $byPath[$key] = ['name' => $name, 'stackName' => $project, 'hostPath' => $src];
+            }
+        }
+
+        // Disambiguate names that collide across different host paths
+        $used = [];
+        foreach ($byPath as $key => &$info) {
+            $n = $info['name'];
+            if (isset($used[$n])) {
+                $info['name'] = $this->slugBindName($n . '-' . substr(sha1($info['hostPath']), 0, 6));
+            }
+            $used[$info['name']] = true;
+        }
+        unset($info);
+
+        $keep = [];
+        foreach ($byPath as $info) {
+            $host = $info['hostPath'];
+            $name = $info['name'];
+            $stackName = $info['stackName'];
+
+            $byHost = $this->repo->getBindVolumeByHostPath($endpointId, $host);
+            if ($byHost) {
+                $src = (string) ($byHost['source'] ?? '');
+                // Prefer existing manual/stack declaration for the same path
+                if ($src === 'manual' || $src === 'stack') {
+                    $keep[] = (string) ($byHost['name'] ?? $name);
+                    continue;
+                }
+                // Refresh runtime row (name / project may change)
+                $this->repo->upsertBindVolume(
+                    $endpointId,
+                    (string) ($byHost['name'] ?? $name),
+                    $host,
+                    'runtime',
+                    null,
+                    $stackName,
+                    (string) ($byHost['created_by'] ?? 'system'),
+                );
+                $keep[] = (string) ($byHost['name'] ?? $name);
+                continue;
+            }
+
+            $existing = $this->repo->getBindVolumeByName($endpointId, $name);
+            if ($existing) {
+                $src = (string) ($existing['source'] ?? '');
+                if ($src === 'manual' || $src === 'stack') {
+                    // Name taken by another bind — pick a unique runtime name
+                    $name = $this->slugBindName($name . '-' . substr(sha1($host), 0, 6));
+                } elseif ((string) ($existing['host_path'] ?? '') !== $host) {
+                    $name = $this->slugBindName($name . '-' . substr(sha1($host), 0, 6));
+                } else {
+                    $this->repo->upsertBindVolume(
+                        $endpointId,
+                        $name,
+                        $host,
+                        'runtime',
+                        null,
+                        $stackName,
+                        (string) ($existing['created_by'] ?? 'system'),
+                    );
+                    $keep[] = $name;
+                    continue;
+                }
+            }
+
+            $this->repo->upsertBindVolume(
+                $endpointId,
+                $name,
+                $host,
+                'runtime',
+                null,
+                $stackName,
+                'system',
+            );
+            $keep[] = $name;
+        }
+        $this->repo->pruneRuntimeBindVolumes($endpointId, $keep);
+    }
+
+    private function slugBindName(string $value): string
+    {
+        $value = strtolower(trim($value));
+        $value = preg_replace('/[^a-z0-9_.-]+/', '-', $value) ?? 'bind';
+        $value = trim($value, '-.');
+        if ($value === '' || !preg_match('/^[a-z0-9]/', $value)) {
+            $value = 'b' . $value;
+        }
+        return substr($value, 0, 120);
+    }
+
     /** @param array{id:int,username:string,role:int} $user */
     public function formatRegistry(array $row): array
     {
@@ -472,7 +616,7 @@ final class AppContext
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/2.3.4',
+                'User-Agent: WharfMaster/2.3.5',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1066,7 +1210,7 @@ YAML;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.4');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.5');
         return 'curl -fsSL ' . escapeshellarg($base . '/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)

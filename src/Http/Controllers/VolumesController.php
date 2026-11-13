@@ -17,9 +17,13 @@ final class VolumesController extends BaseController
         if ($deny) {
             return $deny;
         }
-        unset($ep);
-        // Refresh stack-sourced binds so compose bind mounts appear in Volumes
+        // Refresh stack-sourced binds + binds from any running container (Compose hors app inclus)
         $this->syncBindVolumesFromEndpointStacks($endpointId);
+        try {
+            $this->syncBindVolumesFromContainers($endpointId, $this->dockerForEndpoint($ep));
+        } catch (\Throwable) {
+            // listing still works with previously synced rows
+        }
         $rows = $this->repo->listBindVolumes($endpointId);
         if (!Ownership::isGlobalAdmin($user) && !$this->endpointAcl->can($user, $endpointId, EndpointAcl::ADMIN)) {
             $stacks = $this->repo->listStacksForUser(
@@ -47,6 +51,7 @@ final class VolumesController extends BaseController
                     return true;
                 }
                 $sn = strtolower((string) ($r['stack_name'] ?? ''));
+                // runtime binds from a Compose project the user owns
                 return $sn !== '' && isset($stackNames[$sn]);
             }));
         }

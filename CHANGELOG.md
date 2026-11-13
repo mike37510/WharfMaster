@@ -4,6 +4,16 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.5] — 2026-11-13
+
+### Amélioré
+- **Versions images** : sous-versions lues depuis `Config.Env` (`PG_VERSION`, etc.) — ex. `pg16` affiche `16.15-…` → `16.16-…` au lieu du seul tag flottant
+- Invalidation du cache digest/status quand la version distante n’était que le tag flottant
+- **Volumes** : les binds (et volumes Docker) montés par des conteneurs démarrés hors WharfMaster (Compose externe) apparaissent dans Volumes — sync depuis les `Mounts` + pastille `bind · conteneur`
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.5`**
+
 ## [2.3.4] — 2026-11-13
 
 ### Corrigé
