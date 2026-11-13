@@ -195,7 +195,15 @@ export function install() {
     bag.closeAppModal();
     const host = bag.modalHost();
     let running = !!runningHint;
-    let history = await bag.loadContainerMetricHistory(id);
+    const retentionDays = bag.metricRetentionDays();
+    let hours = bag.metricChartHours();
+    let until = Math.floor(Date.now() / 1000);
+    let fromSec = until - hours * 3600;
+    let history = [];
+    let chartLoading = false;
+
+    const isLiveWindow = () => until >= Math.floor(Date.now() / 1000) - 90;
+
     host.innerHTML = `
       <div class="modal-backdrop">
         <div class="modal modal-form modal-form-wide modal-cstats" role="dialog" aria-modal="true">
@@ -209,10 +217,12 @@ export function install() {
           <div class="cstats-toolbar">
             <span class="logs-status" id="cstats-status"><span class="dot"></span><span class="label">Chargement…</span></span>
             <div class="spacer"></div>
-            <span class="muted" style="font-size:12px" title="Identique au dashboard (Paramètres)">${bag.esc(bag.metricWindowLabel())} · rétention ${bag.esc(String(bag.metricRetentionDays()))} j</span>
+            <span class="muted" style="font-size:12px" id="cstats-win-hint" title="Identique au dashboard (Paramètres)">rétention ${bag.esc(String(retentionDays))} j</span>
             <button type="button" class="btn btn-sm" id="cstats-refresh">Actualiser</button>
           </div>
-          <div id="cstats-chart" class="cstats-chart">${bag.containerResourceChart(history)}</div>
+          <div id="cstats-chart" class="cstats-chart">
+            <div class="muted" style="padding:12px 0">Chargement de l’historique…</div>
+          </div>
           <div id="cstats-body" class="cstats-body">
             <div class="muted" style="padding:1.5rem;text-align:center">Collecte des métriques…</div>
           </div>
@@ -234,12 +244,66 @@ export function install() {
       if (lbl) lbl.textContent = label;
     };
 
+    const paintChart = (livePoint = null) => {
+      if (!chartEl) return;
+      const series = (isLiveWindow() && livePoint) ? history.concat([livePoint]) : history;
+      chartEl.innerHTML = `
+        ${bag.metricHistoryNavHtml({
+          hours,
+          until,
+          fromSec,
+          untilSec: until,
+          retentionDays,
+        })}
+        ${bag.containerResourceChart(series)}`;
+      bindChartNav();
+    };
+
+    const bindChartNav = () => {
+      if (!chartEl) return;
+      chartEl.querySelector('[data-metric-prev]')?.addEventListener('click', () => {
+        until = Math.max(
+          Math.floor(Date.now() / 1000) - retentionDays * 86400 + hours,
+          until - hours,
+        );
+        void refreshChart(true);
+      });
+      chartEl.querySelector('[data-metric-next]')?.addEventListener('click', () => {
+        until = Math.min(Math.floor(Date.now() / 1000), until + hours);
+        void refreshChart(true);
+      });
+      chartEl.querySelector('[data-metric-live]')?.addEventListener('click', () => {
+        until = Math.floor(Date.now() / 1000);
+        void refreshChart(true);
+      });
+      chartEl.querySelectorAll('[data-metric-hours]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const h = parseInt(btn.getAttribute('data-metric-hours') || '', 10);
+          if (!Number.isFinite(h) || h < 1) return;
+          hours = h;
+          void refreshChart(true);
+        });
+      });
+    };
+
     const refreshChart = async (force = false, livePoint = null) => {
-      if (force || !history.length) {
-        history = await bag.loadContainerMetricHistory(id);
+      if (chartLoading) return;
+      if (!force && history.length && isLiveWindow() && livePoint) {
+        paintChart(livePoint);
+        return;
       }
-      const series = livePoint ? history.concat([livePoint]) : history;
-      if (chartEl) chartEl.innerHTML = bag.containerResourceChart(series);
+      chartLoading = true;
+      try {
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (until > nowSec) until = nowSec;
+        const data = await bag.loadContainerMetricHistory(id, { hours, until });
+        history = data.series || [];
+        fromSec = data.from || (until - hours * 3600);
+        until = data.until || until;
+        paintChart(isLiveWindow() ? livePoint : null);
+      } finally {
+        chartLoading = false;
+      }
     };
 
     const render = (computed, rate, netScore) => {
@@ -260,13 +324,16 @@ export function install() {
           <td class="mono">${bag.esc(bag.formatBytes(tx))}</td>
         </tr>`;
       }).join('');
+      const histHint = isLiveWindow()
+        ? `live · fenêtre ${bag.metricHoursLabel(hours)}`
+        : `historique · ${bag.formatMetricRange(fromSec, until)}`;
       body.innerHTML = `
         <div class="cstats-gauges">
           <div class="gauge">${bag.gaugeRing(cpu, '#3b82f6')}<div class="g-label">CPU</div><div class="g-sub">${cpu.toFixed(1)} %</div></div>
           <div class="gauge">${bag.gaugeRing(mem, '#22c55e')}<div class="g-label">RAM</div><div class="g-sub">${bag.esc(bag.formatBytes(computed.memUsage))} / ${bag.esc(bag.formatBytes(computed.memLimit))}</div></div>
           <div class="gauge">${bag.gaugeRing(netScore, '#a78bfa')}<div class="g-label">Réseau</div><div class="g-sub">↓ ${bag.esc(bag.formatBitRate(rate?.rx || 0))} · ↑ ${bag.esc(bag.formatBitRate(rate?.tx || 0))}</div></div>
         </div>
-        <div class="cstats-meta muted">PID ${bag.esc(String(computed.pids || 0))} · live · historique ${bag.esc(bag.metricWindowLabel())}</div>
+        <div class="cstats-meta muted">PID ${bag.esc(String(computed.pids || 0))} · ${bag.esc(histHint)}</div>
         <div class="section-title" style="margin-top:14px">Interfaces réseau</div>
         <div class="table-wrap" style="margin:0">
           <table class="data">
@@ -298,9 +365,11 @@ export function install() {
           setStatus('is-paused', 'Conteneur arrêté');
           bag.applyStatsIconLevel(id, 'off', 'Conteneur arrêté — pas de charge');
           body.innerHTML = `<div class="info-box">Démarrez le conteneur pour voir CPU, RAM et réseau en direct.</div>`;
+          // Historique toujours consultable même arrêté
+          if (!history.length) await refreshChart(true);
           return;
         }
-        setStatus('is-live', 'En direct');
+        setStatus(isLiveWindow() ? 'is-live' : 'is-paused', isLiveWindow() ? 'En direct' : 'Historique');
         const st = await bag.Api.docker(`/containers/${id}/stats?stream=false`);
         const now = Date.now();
         const computed = bag.computeStats(st, 0);
@@ -330,8 +399,8 @@ export function install() {
         if (!lastPersistAt || (now - lastPersistAt) > 60_000) {
           lastPersistAt = now;
           await bag.pushContainerMetricSample(id, computed.cpuPct, computed.memPct, netScore);
-          await refreshChart(true, livePoint);
-        } else {
+          if (isLiveWindow()) await refreshChart(true, livePoint);
+        } else if (isLiveWindow()) {
           await refreshChart(false, livePoint);
         }
       } catch (err) {
@@ -341,9 +410,11 @@ export function install() {
     };
 
     document.getElementById('cstats-refresh')?.addEventListener('click', async () => {
+      if (isLiveWindow()) until = Math.floor(Date.now() / 1000);
       await refreshChart(true);
       await tick();
     });
+    await refreshChart(true);
     await tick();
     bag.state.statsTimer = setInterval(tick, 2000);
   }
@@ -682,17 +753,18 @@ export function install() {
       const actions = all
         ? `<span class="muted">—</span>`
         : `<div class="quick-actions">
-          ${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
-          ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
-          ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
+          ${bag.iconBtn({ act: 'start', id: c.Id, title: isRunning ? 'Déjà démarré' : 'Démarrer', icon: 'start', success: !isRunning, disabled: isRunning })}
+          ${bag.iconBtn({ act: 'stop', id: c.Id, title: isRunning ? 'Arrêter' : 'Déjà arrêté', icon: 'stop', danger: isRunning, disabled: !isRunning })}
+          ${bag.iconBtn({ act: 'restart', id: c.Id, title: isRunning ? 'Redémarrer' : 'Conteneur arrêté', icon: 'restart', disabled: !isRunning })}
           ${bag.iconBtn({
             modal: 'stats', id: c.Id, name, running: isRunning,
             title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
             icon: 'stats', statsId: c.Id,
             extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
+            disabled: !isRunning,
           })}
           ${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs', icon: 'logs' })}
-          ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
+          ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: isRunning ? 'Console' : 'Conteneur arrêté', icon: 'console', disabled: !isRunning })}
           ${bag.iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || c.Id })}
           ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
@@ -704,6 +776,7 @@ export function install() {
           <strong><a href="#containers/${bag.esc(c.Id)}" ${all ? `data-switch-node="${bag.esc(c._nodeId)}"` : ''}>${bag.esc(name)}</a></strong>
           <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
         </td>
+        <td>${bag.badge(c.State)}</td>
         <td class="mono cell-clip cell-image" title="${bag.esc(c.Image || '')}">
           <span class="img-with-upd">
             ${all ? '' : `<span class="img-upd-slot" data-cupd="${bag.esc(c.Id)}">
@@ -712,7 +785,6 @@ export function install() {
             <span class="img-name">${bag.esc(c.Image || '')}</span>
           </span>
         </td>
-        <td>${bag.badge(c.State)}</td>
         <td>${bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId)}</td>
         <td>${bag.formatCreated(c.Created)}</td>
         <td class="actions">${actions}</td>
@@ -739,8 +811,8 @@ export function install() {
             ${bag.bulkSelectTh(!all)}
             ${all ? bag.sortTh('Nœud', 'node', 'containers') : ''}
             ${bag.sortTh('Nom', 'name', 'containers')}
-            ${bag.sortTh('Image', 'image', 'containers')}
             ${bag.sortTh('État', 'state', 'containers')}
+            ${bag.sortTh('Image', 'image', 'containers')}
             ${bag.sortTh('Ports publiés', 'ports', 'containers')}
             ${bag.sortTh('Créé', 'created', 'containers')}
             <th>Actions</th>
@@ -871,17 +943,18 @@ export function install() {
       <div class="toolbar">
         ${bag.iconBtn({ tag: 'a', href: '#containers', title: 'Retour', icon: 'back' })}
         <div class="quick-actions">
-          ${bag.iconBtn({ act: 'start', title: 'Démarrer', icon: 'start', success: !running })}
-          ${bag.iconBtn({ act: 'stop', title: 'Arrêter', icon: 'stop', danger: running })}
-          ${bag.iconBtn({ act: 'restart', title: 'Redémarrer', icon: 'restart' })}
+          ${bag.iconBtn({ act: 'start', title: running ? 'Déjà démarré' : 'Démarrer', icon: 'start', success: !running, disabled: running })}
+          ${bag.iconBtn({ act: 'stop', title: running ? 'Arrêter' : 'Déjà arrêté', icon: 'stop', danger: running, disabled: !running })}
+          ${bag.iconBtn({ act: 'restart', title: running ? 'Redémarrer' : 'Conteneur arrêté', icon: 'restart', disabled: !running })}
           ${bag.iconBtn({
             modal: 'stats', id, name, running,
             title: running ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
             icon: 'stats', statsId: id,
             extraClass: running ? 'is-stats-ok' : 'is-stats-off',
+            disabled: !running,
           })}
           ${bag.iconBtn({ modal: 'logs', id, name, running, title: 'Logs', icon: 'logs' })}
-          ${bag.iconBtn({ modal: 'console', id, name, running, title: 'Console', icon: 'console' })}
+          ${bag.iconBtn({ modal: 'console', id, name, running, title: running ? 'Console' : 'Conteneur arrêté', icon: 'console', disabled: !running })}
           ${bag.iconBtn({ modal: 'inspect', id, name, running, title: 'Inspecter', icon: 'inspect' })}
           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || id })}
           ${bag.iconBtn({ act: 'remove', title: 'Supprimer', icon: 'remove', danger: true })}

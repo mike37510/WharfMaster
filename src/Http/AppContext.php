@@ -616,7 +616,7 @@ final class AppContext
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/2.3.6',
+                'User-Agent: WharfMaster/2.3.7',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1210,7 +1210,7 @@ YAML;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.6');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.7');
         return 'curl -fsSL ' . escapeshellarg($base . '/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)
@@ -1688,7 +1688,8 @@ YAML;
     public function softAdviseOneImage(array $ep, int $endpointId, string $ref): array
     {
         $cached = $this->repo->getLatestImageScan($endpointId, $ref, '');
-        if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - ImageUpdateChecker::STACK_CACHE_TTL) {
+        $ttl = ImageUpdateChecker::STACK_CACHE_TTL;
+        if ($cached && (int) ($cached['scanned_at'] ?? 0) > time() - $ttl) {
             $summary = json_decode((string) ($cached['summary_json'] ?? '{}'), true);
             return [
                 'ImageRef' => $ref,
@@ -1697,9 +1698,34 @@ YAML;
                 'Summary' => is_array($summary) ? $summary : [],
                 'FromCache' => true,
                 'Warning' => null,
-                'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
+                'CacheTtl' => $ttl,
             ];
         }
+
+        $staleFallback = static function (?array $row, string $imageRef, string $warning) use ($ttl): array {
+            if (!$row) {
+                return [
+                    'ImageRef' => $imageRef,
+                    'Status' => 'skipped',
+                    'ScannedAt' => null,
+                    'Summary' => [],
+                    'FromCache' => false,
+                    'Warning' => $warning,
+                    'CacheTtl' => $ttl,
+                ];
+            }
+            $summary = json_decode((string) ($row['summary_json'] ?? '{}'), true);
+            return [
+                'ImageRef' => $imageRef,
+                'Status' => (string) ($row['status'] ?? 'ok'),
+                'ScannedAt' => (int) ($row['scanned_at'] ?? 0),
+                'Summary' => is_array($summary) ? $summary : [],
+                'FromCache' => true,
+                'Stale' => true,
+                'Warning' => $warning,
+                'CacheTtl' => $ttl,
+            ];
+        };
 
         $kind = (string) ($ep['kind'] ?? 'local');
         try {
@@ -1707,14 +1733,7 @@ YAML;
                 $parsed = $this->scanImageViaAgent($ep, $ref);
             } else {
                 if (!$this->imageScanner->available()) {
-                    return [
-                        'ImageRef' => $ref,
-                        'Status' => 'skipped',
-                        'ScannedAt' => null,
-                        'Summary' => [],
-                        'FromCache' => false,
-                        'Warning' => 'Trivy indisponible — déploiement non bloqué',
-                    ];
+                    return $staleFallback($cached, $ref, 'Trivy indisponible — résultat précédent conservé');
                 }
                 $parsed = $this->imageScanner->scanImage($ref);
             }
@@ -1736,14 +1755,11 @@ YAML;
                 'Warning' => null,
             ];
         } catch (\Throwable $e) {
-            return [
-                'ImageRef' => $ref,
-                'Status' => 'skipped',
-                'ScannedAt' => null,
-                'Summary' => [],
-                'FromCache' => false,
-                'Warning' => 'Scan CVE impossible : ' . $e->getMessage() . ' — déploiement non bloqué',
-            ];
+            return $staleFallback(
+                $cached,
+                $ref,
+                'Scan CVE impossible : ' . $e->getMessage() . ' — résultat précédent conservé'
+            );
         }
     }
 

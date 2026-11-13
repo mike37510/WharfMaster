@@ -107,6 +107,7 @@ export function install() {
       disk: diskPct,
     });
 
+    bag.resetHostChartNav();
     bag.root.innerHTML = bag.shell('Tableau de bord', `
       ${bag.dashHeroHtml()}
       <div class="stat-grid dash-hero-stats">
@@ -158,7 +159,7 @@ export function install() {
               <div class="gauge">${bag.gaugeRing(memPct, '#22c55e')}<div class="g-label">Mémoire</div><div class="g-sub">${bag.formatBytes(memUsage)} / ${bag.formatBytes(memTotal)}</div></div>
               <div class="gauge">${bag.gaugeRing(diskPct, '#fb923c')}<div class="g-label">Disque</div><div class="g-sub">${diskTotal ? `${bag.formatBytes(diskUsed)} / ${bag.formatBytes(diskTotal)}` : '—'}${dockerDisk ? `<div class="g-hint">Docker ${bag.formatBytes(dockerDisk)}</div>` : ''}</div></div>
             </div>
-            ${bag.hostResourceChart(metricSeries)}
+            ${bag.hostChartBlockHtml(metricSeries)}
           </div>
 
           <div class="panel-card">
@@ -184,6 +185,7 @@ export function install() {
     bag.bindSearch('dashboard');
     bag.startDashMetricSampler();
     bag.bindDashMetricSparklines(metricSeries);
+    bag.bindHostResourceChartNav();
     document.getElementById('dash-filters')?.querySelectorAll('button').forEach((btn) => {
       btn.onclick = () => {
         bag.state.dashFilter = btn.dataset.f;

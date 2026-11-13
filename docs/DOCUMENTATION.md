@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.6**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.7**.
 
 | | |
 |---|---|
@@ -23,9 +23,10 @@ Guide d’utilisation de la console et de l’**API HTTP**. Version applicative 
 - multi-utilisateurs (labels owner) + **partages** de ressources ;
 - **équipes**, **ACL par nœud**, **SSO AD/LDAP** ;
 - **scheduler** (start / stop / restart de stacks) ;
-- **scan CVE Trivy** (pastilles Images, cache 24 h) ;
+- **scan CVE Trivy** (pastilles Images, cache 24 h, conservation du dernier résultat si Trivy KO) ;
 - **indicateurs de mise à jour** d’images (stacks & conteneurs) avec **mise à jour en un clic** ;
-- **métriques** CPU / RAM / réseau (pastille couleur + historique) ;
+- **métriques** CPU / RAM / disque·réseau (jauges + courbes) avec **navigation sur toute la rétention** ;
+- **topologie** réseau (détail conteneur / stack) avec volumes montés sur chaque carte ;
 - diagnostics admin + tests API Docker ;
 - API compatible **Portainer CE** + extensions WharfMaster.
 
@@ -69,9 +70,9 @@ DocumentRoot = **`public/`** uniquement (`src/`, `config/`, `var/`, `agent/` hor
 
 | Menu | Contenu |
 |------|---------|
-| Tableau de bord | Stats, ressources hôte, activité, prune (admin) |
-| Stacks | Compose : déployer, start/stop/restart, conteneurs liés, schedules, MàJ images |
-| Conteneurs | CRUD, logs, console, inspect, stats, pastille charge, MàJ image |
+| Tableau de bord | Stats, ressources hôte (courbes navigables), activité, prune (admin) |
+| Stacks | Compose : déployer, start/stop/restart, conteneurs liés, topologie, schedules, MàJ images |
+| Conteneurs | CRUD, logs, console, inspect, stats, topologie, pastille charge, MàJ image |
 | Volumes | Named + binds, explorateur de fichiers |
 | Images | Liste, pull, build, pastilles CVE + usage |
 | Réseaux | Liste, création, schéma d’usage |
@@ -91,40 +92,52 @@ La version affichée dans la barre latérale est lue dynamiquement via `/api/sta
 | Nœuds | Agents : commande / pack ZIP, ping, ACL, pin TLS |
 | Utilisateurs | Comptes locaux |
 | Équipes | Groupes + membres (+ mapping AD) |
-| Diagnostics | Santé runtime |
-| Tests API | Smoke Docker (image / volume / réseau / conteneur) |
 
 ### Sélecteur de nœud
 
 En haut à droite : nœud local, agent, ou **Tous les nœuds** (agrégat surtout en **lecture**). Les écritures Docker demandent un nœud précis ; les actions **stack** passent par l’id de stack (nœud d’origine).
 
+### Tableau de bord
+
+- Cartes stats (conteneurs / images / volumes / réseaux) + sparklines cliquables → modal métrique détaillée.
+- **Ressources hôte** : jauges CPU / RAM / disque + courbes historiques.
+- Navigation temporelle commune (**← Préc.** / **Maintenant** / **Suiv. →**, chips de fenêtre) sur toute la **rétention** (défaut 90 j ; fenêtre glissante configurable, défaut 72 h / 2 j).
+- En fenêtre historique, le live n’écrase pas les courbes ; **Maintenant** revient au présent.
+
 ### Stacks
 
 - Créer / éditer le YAML + variables `.env` ; option **Pull images** au déploiement.
 - Fiche stack : barre d’actions complète (démarrer, arrêter, redémarrer, éditeur, partager, pull+redéployer, supprimer).
-- Section **Conteneurs** : services Compose du projet (`com.docker.compose.project`) avec start / stop / restart.
+- Boutons **start / stop / restart** grisés selon l’état (déjà démarrée / déjà arrêtée).
+- Section **Conteneurs** : services Compose du projet (`com.docker.compose.project`) avec start / stop / restart (idem grisés selon l’état).
+- **Topologie** : schéma réseau (hub = réseau, cartes = conteneurs) avec **volumes / binds** montés sur chaque carte ; clic volume nommé → page Volumes.
 - **Planifications** : cron convivial (tous les jours, lun–ven, hebdo, horaire) → start / stop / restart.
 - Pastille **Images** (vert = à jour, orange = MàJ) : **clic orange** → confirmation → pull + redéploiement Compose.
 - Colonne **Créé** (date) dans la liste.
 
 ### Conteneurs
 
+- Colonnes liste : **Nom → État → Image → Ports → Créé → Actions**.
 - Actions liste : start / stop / restart, pastille charge (vert / orange ≥ 65 % / rouge ≥ 85 %, refresh ~10 s sur la page visible), logs / console / inspect / partager (menu …).
-- Modal **Ressources** : jauges live + courbes historiques (rétention configurable).
+- Boutons **inapplicables grisés** : Démarrer si déjà running ; Arrêter / Redémarrer / Console / Stats si déjà arrêté (tooltip explicatif).
+- Modal **Ressources** : jauges live + courbes historiques, **même navigation temporelle** que le dashboard (rétention / fenêtres).
+- **Topologie** : réseaux attachés + volumes montés par conteneur (comme sur la fiche stack).
 - Pastille **MàJ** : clic orange → si le conteneur appartient à une stack Compose, upgrade de la **stack** ; sinon pull + recreate du conteneur.
-- Colonne **Créé**.
 
 ### Images / CVE
 
-- À l’ouverture de **Images** : scan auto des images taguées (pastille CVE OK / C·H·M), cache **24 h**.
+- À l’ouverture de **Images** : affichage immédiat des scans en cache, puis ensure soft pour les pastilles manquantes uniquement.
+- Pastilles **CVE OK** / C·H·M ; cache **24 h** (aligné sur la vérif. MàJ images).
+- Si Trivy est indisponible ou échoue : le **dernier scan connu** est conservé (pas d’effacement flash des pastilles).
 - Pull Hub / registre, build Dockerfile, usage par conteneurs.
 - Interrupteur global Trivy : Paramètres → Général. L’avis à la création (`advise`) est **non bloquant**.
 
 ### Volumes & réseaux
 
-- Volumes named + **binds** (sync auto depuis les Compose, gestion admin).
+- Volumes named + **binds** (sync depuis Compose et, pour les **admins**, depuis les `Mounts` des conteneurs démarrés hors app).
 - Explorateur de fichiers sur volume.
-- Réseaux : usage / schéma IP·ports ; partage possible.
+- Réseaux : usage / schéma IP·ports (hub + conteneurs) ; partage possible.
+- Vitrine publique `/` : **thème clair**.
 
 ### Partages
 
@@ -175,7 +188,7 @@ Variables utiles :
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.6
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.7
 ```
 
 Backup admin :
@@ -244,10 +257,12 @@ Le reverse-proxy (npmplus, nginx, Traefik…) doit transmettre `Upgrade` et `Con
 | POST | `/api/users/admin/init` | non* | Premier admin |
 | POST | `/api/auth` | non | Login → `{ jwt }` |
 | POST | `/api/nodes/join` | token wmj_ | Enrôlement agent |
-| GET | `/api/metrics/history?scope=&hours=` | user | Historique courbes |
+| GET | `/api/metrics/history?scope=&hours=&until=&points=` | user | Historique courbes (fenêtre + pagination rétention) |
 | POST | `/api/metrics/sample` | user | Échantillon (CPU/RAM/…) |
 
-`scope` métriques : `ep:{id}`, `all`, ou `ctr:{ep}:{containerId}`.
+`scope` métriques : `ep:{id}`, `all`, ou `ctr:{ep}:{containerId}`.  
+`until` (unix) : fin de fenêtre pour se déplacer dans la rétention ; omis = maintenant.  
+`hours` : longueur de fenêtre (plafonnée à `rétention × 24`).
 
 ---
 
@@ -389,7 +404,7 @@ Si `TrivyEnabled=false` : advise → `Worst=disabled` ; scan manuel → 403.
 
 ## 13. Agent distant
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.6` (ou `WHARFMASTER_AGENT_IMAGE`).
+Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.7` (ou `WHARFMASTER_AGENT_IMAGE`).
 
 | Chemin agent | Description |
 |--------------|-------------|
@@ -405,7 +420,7 @@ curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:2.3.6
+  --image ghcr.io/mike37510/wharfmaster-agent:2.3.7
 ```
 
 Pack ZIP : Paramètres → Nœuds → bundle (Dockerfile, sources, `deploy.sh`, `.env`).
@@ -434,7 +449,7 @@ Pack ZIP : Paramètres → Nœuds → bundle (Dockerfile, sources, `deploy.sh`, 
 - Pas de SSO OIDC/SAML (LDAP/AD uniquement).
 - Backup = téléchargement ; restore manuel (`RESTORE.md`).
 - Templates « App Templates » / stacks Git : non fournis (Compose string uniquement).
-- Scan CVE dépend de Trivy ; désactivable sans bloquer les déploiements.
+- Scan CVE dépend de Trivy ; désactivable sans bloquer les déploiements (dernier scan conservé si Trivy KO).
 
 ---
 

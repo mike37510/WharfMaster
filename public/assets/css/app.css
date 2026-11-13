@@ -365,7 +365,21 @@ textarea.code, .code-editor textarea {
   color: var(--text);
 }
 .btn:hover { filter: brightness(1.08); text-decoration: none; color: var(--text); }
-.btn:disabled { opacity: .55; cursor: not-allowed; }
+.btn:disabled,
+.btn.is-disabled {
+  opacity: .42;
+  cursor: not-allowed;
+  filter: grayscale(0.35);
+  box-shadow: none;
+  pointer-events: none;
+}
+.btn.btn-icon:disabled:hover,
+.btn.btn-icon.is-disabled:hover {
+  color: inherit;
+  border-color: var(--border);
+  transform: none;
+  background: transparent;
+}
 
 .spinner {
   display: inline-block;
@@ -2493,6 +2507,15 @@ button.img-usage-btn:active {
   gap: 8px;
   margin: 0 0 14px;
 }
+.host-chart-block {
+  margin-top: 10px;
+}
+.host-chart-block .metric-detail-nav {
+  margin-bottom: 10px;
+}
+.host-chart-block .wave-wrap {
+  margin: 0;
+}
 .metric-detail-nav-row {
   display: flex;
   flex-wrap: wrap;
@@ -2943,6 +2966,9 @@ button.quick-tile {
 }
 .modal-cstats .cstats-chart {
   margin-bottom: 12px;
+}
+.modal-cstats .cstats-chart .cstats-metric-nav {
+  margin-bottom: 10px;
 }
 .modal-cstats .cstats-chart .wave-wrap {
   margin: 0;

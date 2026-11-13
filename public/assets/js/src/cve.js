@@ -30,14 +30,21 @@ export function install() {
     return `<td data-cve-cell="${bag.esc(ref)}"><button type="button" class="cve-pill-btn" data-cve-ref="${bag.esc(ref)}" title="Détail CVE">${bag.cveBadge(scan.Summary)}</button></td>`;
   }
 
-  bag.fillCveCell = function fillCveCell(cell, item) {
+  bag.fillCveCell = function fillCveCell(cell, item, opts = {}) {
     if (!cell || !item) return;
     const ref = item.ImageRef || cell.dataset.cveCell || '';
-    if (item.Status === 'skipped' || item.Warning) {
-      cell.innerHTML = `<span class="muted" title="${bag.esc(item.Warning || 'Scan ignoré')}">—</span>`;
+    const hasBadge = !!cell.querySelector('.cve-pill-btn');
+    const hasSummary = item.Summary && typeof item.Summary === 'object'
+      && (item.Summary.TOTAL != null || item.Status === 'ok' || item.FromCache);
+    // Résultat utilisable (frais ou cache périmé) → badge
+    if (hasSummary && item.Status !== 'skipped') {
+      const tip = item.Warning || (item.Stale ? 'Cache périmé — dernier scan connu' : 'Détail CVE');
+      cell.innerHTML = `<button type="button" class="cve-pill-btn" data-cve-ref="${bag.esc(ref)}" title="${bag.esc(tip)}">${bag.cveBadge(item.Summary)}</button>`;
       return;
     }
-    cell.innerHTML = `<button type="button" class="cve-pill-btn" data-cve-ref="${bag.esc(ref)}" title="Détail CVE">${bag.cveBadge(item.Summary)}</button>`;
+    // Skipped / erreur : ne pas effacer une pastille déjà affichée (évite le flash vert → —)
+    if (hasBadge && !opts.force) return;
+    cell.innerHTML = `<span class="muted" title="${bag.esc(item.Warning || 'Scan ignoré')}">—</span>`;
   }
 
   bag.bindCveDetailButtons = function bindCveDetailButtons(scope) {
@@ -49,9 +56,24 @@ export function install() {
   }
 
   bag.ensureImagesCveColumn = async function ensureImagesCveColumn(root, refs) {
+    // Ne relancer Trivy que pour les cellules encore en attente — les pastilles
+    // déjà fournies par le cache (listImageScans) restent affichées.
+    const pendingRefs = [];
+    bag.root.querySelectorAll('[data-cve-cell]').forEach((cell) => {
+      if (cell.querySelector('.cve-pending') && cell.dataset.cveCell) {
+        pendingRefs.push(cell.dataset.cveCell);
+      }
+    });
+    const toEnsure = pendingRefs.length
+      ? [...new Set(pendingRefs)]
+      : [...new Set((refs || []).filter(Boolean))];
+    if (!toEnsure.length) {
+      bag.bindCveDetailButtons(bag.root);
+      return;
+    }
     let res;
     try {
-      res = await bag.Api.ensureImageScans(bag.Api.getEndpointId(), { Images: refs });
+      res = await bag.Api.ensureImageScans(bag.Api.getEndpointId(), { Images: toEnsure });
     } catch (_) {
       bag.root.querySelectorAll('[data-cve-cell]').forEach((cell) => {
         if (cell.querySelector('.cve-pending')) {

@@ -4,6 +4,24 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.7] — 2026-11-13
+
+### Ajouté
+- **Navigation temporelle** sur les courbes **Ressources hôte** (dashboard) et le modal **Ressources** conteneur — Préc. / Maintenant / Suiv. + chips de fenêtre, sur toute la rétention
+- Actions conteneur / stack : boutons start / stop / restart (et console / stats) **grisés** selon l’état
+
+### Amélioré
+- Liste **Conteneurs** : colonne **État** avant **Image**
+- Site vitrine `/` : **thème clair**
+- Documentation console / API métriques (`until`) mise à jour
+- Menu Paramètres : retrait de l’entrée **Tests API**
+
+### Corrigé
+- Pastilles **CVE** : plus de disparition au rechargement (ensure ne réécrit que les cellules en attente ; conservation du dernier scan si Trivy KO)
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.7`**
+
 ## [2.3.6] — 2026-11-13
 
 ### Ajouté

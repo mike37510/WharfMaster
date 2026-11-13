@@ -28,14 +28,11 @@ export function install() {
       ['nodes', 'Nœuds', isAdmin, '#nodes'],
       ['users', 'Utilisateurs', isAdmin, '#users'],
       ['teams', 'Équipes', isAdmin, '#teams'],
-      ['settings/diagnostics/api', 'Tests API', isAdmin, '#settings/diagnostics/api'],
     ].filter((row) => row[2]);
     return `<nav class="settings-subnav" aria-label="Sections paramètres">
       ${tabs.map(([id, label, , href]) => {
         const isActive = active === id;
-        const ico = id === 'settings/auth'
-          ? 'users'
-          : (id.startsWith('settings/diagnostics') ? 'inspect' : id.split('/')[0]);
+        const ico = id === 'settings/auth' ? 'users' : id.split('/')[0];
         return `<a href="${href}" class="settings-subnav-link${isActive ? ' active' : ''}"><span class="nav-ico">${bag.ico(ico)}</span>${bag.esc(label)}</a>`;
       }).join('')}
     </nav>`;
@@ -532,12 +529,17 @@ export function install() {
   bag.iconBtn = function iconBtn({
     tag = 'button', href, act, id, title, icon,
     danger = false, info = false, success = false,
+    disabled = false,
     modal, name, running, del, reset, elId, label,
     editTeam, delTeam, delAcl, scanImg, runSched, delSched,
     statsId, shareType, shareKey, extraClass = '',
   }) {
     const withLabel = !!(label && String(label).trim());
-    const cls = `btn btn-icon btn-sm${withLabel ? ' btn-icon-label' : ''}${danger ? ' btn-danger' : ''}${info ? ' btn-info' : ''}${success ? ' btn-success' : ''}${extraClass ? ` ${extraClass}` : ''}`;
+    const isDisabled = !!disabled && tag === 'button';
+    const toneDanger = danger && !isDisabled;
+    const toneInfo = info && !isDisabled;
+    const toneSuccess = success && !isDisabled;
+    const cls = `btn btn-icon btn-sm${withLabel ? ' btn-icon-label' : ''}${toneDanger ? ' btn-danger' : ''}${toneInfo ? ' btn-info' : ''}${toneSuccess ? ' btn-success' : ''}${isDisabled ? ' is-disabled' : ''}${extraClass ? ` ${extraClass}` : ''}`;
     const attrs = [
       `class="${cls}"`,
       `title="${bag.esc(title)}"`,
@@ -561,6 +563,7 @@ export function install() {
       shareType != null ? `data-share-type="${bag.esc(shareType)}"` : '',
       shareKey != null ? `data-share-key="${bag.esc(shareKey)}"` : '',
       tag === 'button' ? 'type="button"' : '',
+      isDisabled ? 'disabled aria-disabled="true"' : '',
     ].filter(Boolean).join(' ');
     const labelHtml = withLabel ? `<span class="btn-label">${bag.esc(label)}</span>` : '';
     return `<${tag} ${attrs}><span class="btn-ico">${bag.ico(icon)}</span>${labelHtml}</${tag}>`;

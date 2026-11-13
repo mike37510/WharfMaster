@@ -1059,13 +1059,7 @@
         } else if (bag.state.route === "profile") await bag.viewProfile();
         else if (bag.state.route === "settings" || bag.state.route === "settings/") await bag.viewSettings();
         else if (bag.state.route === "settings/auth") await bag.viewSettingsAuth();
-        else if (bag.state.route === "settings/diagnostics/api") {
-          if (Number(bag.state.user?.Role) !== 1) {
-            location.hash = "#settings";
-            return;
-          }
-          await bag.viewDiagnosticsApi();
-        } else if (bag.state.route === "settings/diagnostics") {
+        else if (bag.state.route === "settings/diagnostics/api" || bag.state.route === "settings/diagnostics") {
           location.hash = "#settings";
           return;
         } else if (bag.state.route === "users") {
@@ -1265,6 +1259,111 @@
         ]
       });
     };
+    bag.resetHostChartNav = function resetHostChartNav() {
+      const hours = bag.metricChartHours();
+      const until = Math.floor(Date.now() / 1e3);
+      bag._hostChartNav = {
+        hours,
+        until,
+        from: until - hours * 3600,
+        loading: false
+      };
+    };
+    bag.isHostChartLive = function isHostChartLive() {
+      const nav = bag._hostChartNav;
+      if (!nav) return true;
+      return Number(nav.until) >= Math.floor(Date.now() / 1e3) - 90;
+    };
+    bag.hostChartBlockHtml = function hostChartBlockHtml(series) {
+      if (!bag._hostChartNav) bag.resetHostChartNav();
+      const nav = bag._hostChartNav;
+      const from = Number(nav.from) || nav.until - nav.hours * 3600;
+      return `<div id="host-chart-block" class="host-chart-block">
+      ${bag.metricHistoryNavHtml({
+        hours: nav.hours,
+        until: nav.until,
+        fromSec: from,
+        untilSec: nav.until,
+        retentionDays: bag.metricRetentionDays()
+      })}
+      ${bag.hostResourceChart(series || [])}
+    </div>`;
+    };
+    bag.loadHostMetricHistory = async function loadHostMetricHistory(opts = {}) {
+      if (!bag._hostChartNav) bag.resetHostChartNav();
+      const retentionDays = bag.metricRetentionDays();
+      const hours = opts.hours != null ? Math.max(1, Math.min(retentionDays * 24, Number(opts.hours) || bag.metricChartHours())) : bag._hostChartNav.hours;
+      let until = opts.until != null ? Math.floor(Number(opts.until)) : bag._hostChartNav.until;
+      const now = Math.floor(Date.now() / 1e3);
+      if (!Number.isFinite(until) || until <= 0 || until > now) until = now;
+      const points = Math.min(720, Math.max(48, Math.ceil(hours * 60 / 5)));
+      try {
+        const data = await bag.Api.metricsHistory(bag.metricScopeKey(), { hours, until, points });
+        if (data?.ChartHours != null) bag.state.metricsChartHours = Number(data.ChartHours) || bag.state.metricsChartHours;
+        if (data?.RetentionDays != null) bag.state.metricsRetentionDays = Number(data.RetentionDays) || bag.state.metricsRetentionDays;
+        const untilOut = Number(data?.Until) || until;
+        const fromOut = Number(data?.From) || untilOut - hours * 3600;
+        return {
+          series: Array.isArray(data?.Series) ? data.Series : [],
+          from: fromOut,
+          until: untilOut,
+          hours
+        };
+      } catch (_) {
+        return { series: [], from: until - hours * 3600, until, hours };
+      }
+    };
+    bag.bindHostResourceChartNav = function bindHostResourceChartNav() {
+      const root = document.getElementById("host-chart-block");
+      if (!root) return;
+      if (!bag._hostChartNav) bag.resetHostChartNav();
+      const retentionDays = bag.metricRetentionDays();
+      root.querySelector("[data-metric-prev]")?.addEventListener("click", () => {
+        const nav = bag._hostChartNav;
+        nav.until = Math.max(
+          Math.floor(Date.now() / 1e3) - retentionDays * 86400 + nav.hours,
+          nav.until - nav.hours
+        );
+        void bag.refreshHostResourceChart();
+      });
+      root.querySelector("[data-metric-next]")?.addEventListener("click", () => {
+        const nav = bag._hostChartNav;
+        nav.until = Math.min(Math.floor(Date.now() / 1e3), nav.until + nav.hours);
+        void bag.refreshHostResourceChart();
+      });
+      root.querySelector("[data-metric-live]")?.addEventListener("click", () => {
+        bag._hostChartNav.until = Math.floor(Date.now() / 1e3);
+        void bag.refreshHostResourceChart();
+      });
+      root.querySelectorAll("[data-metric-hours]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const h = parseInt(btn.getAttribute("data-metric-hours") || "", 10);
+          if (!Number.isFinite(h) || h < 1) return;
+          bag._hostChartNav.hours = h;
+          void bag.refreshHostResourceChart();
+        });
+      });
+    };
+    bag.paintHostResourceChart = function paintHostResourceChart(series) {
+      const block = document.getElementById("host-chart-block");
+      if (!block) return;
+      block.outerHTML = bag.hostChartBlockHtml(series);
+      bag.bindHostResourceChartNav();
+    };
+    bag.refreshHostResourceChart = async function refreshHostResourceChart() {
+      if (!bag._hostChartNav) bag.resetHostChartNav();
+      if (bag._hostChartNav.loading) return;
+      bag._hostChartNav.loading = true;
+      try {
+        const data = await bag.loadHostMetricHistory();
+        bag._hostChartNav.hours = data.hours;
+        bag._hostChartNav.until = data.until;
+        bag._hostChartNav.from = data.from;
+        bag.paintHostResourceChart(data.series);
+      } finally {
+        bag._hostChartNav.loading = false;
+      }
+    };
     bag.containerResourceChart = function containerResourceChart(series) {
       return bag.resourceChart(series, {
         wrapId: "ctr-wave-wrap",
@@ -1322,17 +1421,72 @@
       } catch (_) {
       }
     };
-    bag.loadContainerMetricHistory = async function loadContainerMetricHistory(containerId) {
+    bag.loadContainerMetricHistory = async function loadContainerMetricHistory(containerId, opts = {}) {
+      const retentionDays = bag.metricRetentionDays();
+      const hours = opts.hours != null ? Math.max(1, Math.min(retentionDays * 24, Number(opts.hours) || bag.metricChartHours())) : bag.metricChartHours();
+      const points = opts.points != null ? Number(opts.points) : Math.min(720, Math.max(48, Math.ceil(hours * 60 / 5)));
       try {
-        const hours = bag.metricChartHours();
-        const points = Math.min(288, Math.max(48, Math.ceil(hours * 60 / 5)));
-        const data = await bag.Api.metricsHistory(bag.containerMetricScope(containerId), { hours, points });
+        const params = { hours, points };
+        if (opts.until != null && Number(opts.until) > 0) params.until = Math.floor(Number(opts.until));
+        const data = await bag.Api.metricsHistory(bag.containerMetricScope(containerId), params);
         if (data?.ChartHours != null) bag.state.metricsChartHours = Number(data.ChartHours) || bag.state.metricsChartHours;
         if (data?.RetentionDays != null) bag.state.metricsRetentionDays = Number(data.RetentionDays) || bag.state.metricsRetentionDays;
-        return Array.isArray(data?.Series) ? data.Series : [];
+        const untilOut = Number(data?.Until) || params.until || Math.floor(Date.now() / 1e3);
+        const fromOut = Number(data?.From) || untilOut - hours * 3600;
+        return {
+          series: Array.isArray(data?.Series) ? data.Series : [],
+          from: fromOut,
+          until: untilOut,
+          hours
+        };
       } catch (_) {
-        return [];
+        const untilOut = opts.until != null ? Math.floor(Number(opts.until)) : Math.floor(Date.now() / 1e3);
+        return { series: [], from: untilOut - hours * 3600, until: untilOut, hours };
       }
+    };
+    bag.metricWindowChoices = function metricWindowChoices() {
+      const retentionDays = bag.metricRetentionDays();
+      const defaultHours = bag.metricChartHours();
+      return Array.from(new Set([
+        defaultHours,
+        24,
+        48,
+        72,
+        168,
+        Math.min(retentionDays * 24, 720)
+      ].filter((h) => h >= 1 && h <= retentionDays * 24))).sort((a, b) => a - b);
+    };
+    bag.metricHoursLabel = function metricHoursLabel(h) {
+      const hours = Number(h) || 0;
+      if (hours === 24) return "24 h";
+      if (hours % 24 === 0) {
+        const d = hours / 24;
+        return `${d} j`;
+      }
+      return `${hours} h`;
+    };
+    bag.metricHistoryNavHtml = function metricHistoryNavHtml({ hours, until, fromSec, untilSec, retentionDays } = {}) {
+      const h = Number(hours) || bag.metricChartHours();
+      const ret = Number(retentionDays) || bag.metricRetentionDays();
+      const now = Math.floor(Date.now() / 1e3);
+      const end = Number(until) || now;
+      const floor = now - ret * 86400;
+      const canPrev = end - h > floor + 60;
+      const canNext = end < now - 90;
+      const chips = bag.metricWindowChoices().map(
+        (choice) => `<button type="button" class="btn btn-sm metric-win-chip${choice === h ? " is-active" : ""}" data-metric-hours="${choice}">${bag.esc(bag.metricHoursLabel(choice))}</button>`
+      ).join("");
+      const from = Number(fromSec) || end - h * 3600;
+      const to = Number(untilSec) || end;
+      return `<div class="metric-detail-nav cstats-metric-nav">
+      <div class="metric-detail-nav-row">
+        <button type="button" class="btn btn-sm" data-metric-prev ${canPrev ? "" : "disabled"} title="Fen\xEAtre pr\xE9c\xE9dente">\u2190 Pr\xE9c.</button>
+        <button type="button" class="btn btn-sm" data-metric-live ${canNext ? "" : "disabled"} title="Revenir \xE0 maintenant">Maintenant</button>
+        <button type="button" class="btn btn-sm" data-metric-next ${canNext ? "" : "disabled"} title="Fen\xEAtre suivante">Suiv. \u2192</button>
+      </div>
+      <div class="metric-detail-nav-row metric-win-chips">${chips}</div>
+      <p class="muted metric-detail-range">${bag.esc(bag.formatMetricRange(from, to))} \xB7 r\xE9tention ${ret} j</p>
+    </div>`;
     };
     bag.stopContainerStatsPoll = function stopContainerStatsPoll() {
       if (bag.state.containerStatsTimer) {
@@ -1733,8 +1887,16 @@
       void load();
     };
     bag.updateHostResourceChart = function updateHostResourceChart(series, counts) {
-      const wrap = document.getElementById("host-wave-wrap");
-      if (wrap) wrap.outerHTML = bag.hostResourceChart(series);
+      if (bag.isHostChartLive() && document.getElementById("host-chart-block")) {
+        if (!bag._hostChartNav) bag.resetHostChartNav();
+        const now = Math.floor(Date.now() / 1e3);
+        bag._hostChartNav.until = now;
+        bag._hostChartNav.from = now - bag._hostChartNav.hours * 3600;
+        bag.paintHostResourceChart(series || []);
+      } else if (bag.isHostChartLive()) {
+        const wrap = document.getElementById("host-wave-wrap");
+        if (wrap) wrap.outerHTML = bag.hostResourceChart(series || []);
+      }
       if (!counts) return;
       const gauges = document.querySelectorAll(".panel-card .gauge-row .gauge");
       if (gauges.length >= 3) {
@@ -1795,14 +1957,18 @@
       }
       return `<td data-cve-cell="${bag.esc(ref)}"><button type="button" class="cve-pill-btn" data-cve-ref="${bag.esc(ref)}" title="D\xE9tail CVE">${bag.cveBadge(scan.Summary)}</button></td>`;
     };
-    bag.fillCveCell = function fillCveCell(cell, item) {
+    bag.fillCveCell = function fillCveCell(cell, item, opts = {}) {
       if (!cell || !item) return;
       const ref = item.ImageRef || cell.dataset.cveCell || "";
-      if (item.Status === "skipped" || item.Warning) {
-        cell.innerHTML = `<span class="muted" title="${bag.esc(item.Warning || "Scan ignor\xE9")}">\u2014</span>`;
+      const hasBadge = !!cell.querySelector(".cve-pill-btn");
+      const hasSummary = item.Summary && typeof item.Summary === "object" && (item.Summary.TOTAL != null || item.Status === "ok" || item.FromCache);
+      if (hasSummary && item.Status !== "skipped") {
+        const tip = item.Warning || (item.Stale ? "Cache p\xE9rim\xE9 \u2014 dernier scan connu" : "D\xE9tail CVE");
+        cell.innerHTML = `<button type="button" class="cve-pill-btn" data-cve-ref="${bag.esc(ref)}" title="${bag.esc(tip)}">${bag.cveBadge(item.Summary)}</button>`;
         return;
       }
-      cell.innerHTML = `<button type="button" class="cve-pill-btn" data-cve-ref="${bag.esc(ref)}" title="D\xE9tail CVE">${bag.cveBadge(item.Summary)}</button>`;
+      if (hasBadge && !opts.force) return;
+      cell.innerHTML = `<span class="muted" title="${bag.esc(item.Warning || "Scan ignor\xE9")}">\u2014</span>`;
     };
     bag.bindCveDetailButtons = function bindCveDetailButtons(scope) {
       (scope || document).querySelectorAll("[data-cve-ref]").forEach((btn) => {
@@ -1812,9 +1978,20 @@
       });
     };
     bag.ensureImagesCveColumn = async function ensureImagesCveColumn(root, refs) {
+      const pendingRefs = [];
+      bag.root.querySelectorAll("[data-cve-cell]").forEach((cell) => {
+        if (cell.querySelector(".cve-pending") && cell.dataset.cveCell) {
+          pendingRefs.push(cell.dataset.cveCell);
+        }
+      });
+      const toEnsure = pendingRefs.length ? [...new Set(pendingRefs)] : [...new Set((refs || []).filter(Boolean))];
+      if (!toEnsure.length) {
+        bag.bindCveDetailButtons(bag.root);
+        return;
+      }
       let res;
       try {
-        res = await bag.Api.ensureImageScans(bag.Api.getEndpointId(), { Images: refs });
+        res = await bag.Api.ensureImageScans(bag.Api.getEndpointId(), { Images: toEnsure });
       } catch (_) {
         bag.root.querySelectorAll("[data-cve-cell]").forEach((cell) => {
           if (cell.querySelector(".cve-pending")) {
@@ -1955,13 +2132,12 @@
         ["registries", "Registres", true, "#registries"],
         ["nodes", "N\u0153uds", isAdmin, "#nodes"],
         ["users", "Utilisateurs", isAdmin, "#users"],
-        ["teams", "\xC9quipes", isAdmin, "#teams"],
-        ["settings/diagnostics/api", "Tests API", isAdmin, "#settings/diagnostics/api"]
+        ["teams", "\xC9quipes", isAdmin, "#teams"]
       ].filter((row) => row[2]);
       return `<nav class="settings-subnav" aria-label="Sections param\xE8tres">
       ${tabs.map(([id, label, , href]) => {
         const isActive = active === id;
-        const ico = id === "settings/auth" ? "users" : id.startsWith("settings/diagnostics") ? "inspect" : id.split("/")[0];
+        const ico = id === "settings/auth" ? "users" : id.split("/")[0];
         return `<a href="${href}" class="settings-subnav-link${isActive ? " active" : ""}"><span class="nav-ico">${bag.ico(ico)}</span>${bag.esc(label)}</a>`;
       }).join("")}
     </nav>`;
@@ -2387,6 +2563,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       danger = false,
       info = false,
       success = false,
+      disabled = false,
       modal,
       name,
       running,
@@ -2406,7 +2583,11 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       extraClass = ""
     }) {
       const withLabel = !!(label && String(label).trim());
-      const cls = `btn btn-icon btn-sm${withLabel ? " btn-icon-label" : ""}${danger ? " btn-danger" : ""}${info ? " btn-info" : ""}${success ? " btn-success" : ""}${extraClass ? ` ${extraClass}` : ""}`;
+      const isDisabled = !!disabled && tag === "button";
+      const toneDanger = danger && !isDisabled;
+      const toneInfo = info && !isDisabled;
+      const toneSuccess = success && !isDisabled;
+      const cls = `btn btn-icon btn-sm${withLabel ? " btn-icon-label" : ""}${toneDanger ? " btn-danger" : ""}${toneInfo ? " btn-info" : ""}${toneSuccess ? " btn-success" : ""}${isDisabled ? " is-disabled" : ""}${extraClass ? ` ${extraClass}` : ""}`;
       const attrs = [
         `class="${cls}"`,
         `title="${bag.esc(title)}"`,
@@ -2429,7 +2610,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         statsId != null ? `data-stats-id="${bag.esc(statsId)}"` : "",
         shareType != null ? `data-share-type="${bag.esc(shareType)}"` : "",
         shareKey != null ? `data-share-key="${bag.esc(shareKey)}"` : "",
-        tag === "button" ? 'type="button"' : ""
+        tag === "button" ? 'type="button"' : "",
+        isDisabled ? 'disabled aria-disabled="true"' : ""
       ].filter(Boolean).join(" ");
       const labelHtml = withLabel ? `<span class="btn-label">${bag.esc(label)}</span>` : "";
       return `<${tag} ${attrs}><span class="btn-ico">${bag.ico(icon)}</span>${labelHtml}</${tag}>`;
@@ -3531,6 +3713,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         mem: memPct,
         disk: diskPct
       });
+      bag.resetHostChartNav();
       bag.root.innerHTML = bag.shell("Tableau de bord", `
       ${bag.dashHeroHtml()}
       <div class="stat-grid dash-hero-stats">
@@ -3582,7 +3765,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
               <div class="gauge">${bag.gaugeRing(memPct, "#22c55e")}<div class="g-label">M\xE9moire</div><div class="g-sub">${bag.formatBytes(memUsage)} / ${bag.formatBytes(memTotal)}</div></div>
               <div class="gauge">${bag.gaugeRing(diskPct, "#fb923c")}<div class="g-label">Disque</div><div class="g-sub">${diskTotal ? `${bag.formatBytes(diskUsed)} / ${bag.formatBytes(diskTotal)}` : "\u2014"}${dockerDisk ? `<div class="g-hint">Docker ${bag.formatBytes(dockerDisk)}</div>` : ""}</div></div>
             </div>
-            ${bag.hostResourceChart(metricSeries)}
+            ${bag.hostChartBlockHtml(metricSeries)}
           </div>
 
           <div class="panel-card">
@@ -3607,6 +3790,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       bag.bindSearch("dashboard");
       bag.startDashMetricSampler();
       bag.bindDashMetricSparklines(metricSeries);
+      bag.bindHostResourceChartNav();
       document.getElementById("dash-filters")?.querySelectorAll("button").forEach((btn) => {
         btn.onclick = () => {
           bag.state.dashFilter = btn.dataset.f;
@@ -4026,7 +4210,13 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       bag.closeAppModal();
       const host = bag.modalHost();
       let running = !!runningHint;
-      let history = await bag.loadContainerMetricHistory(id);
+      const retentionDays = bag.metricRetentionDays();
+      let hours = bag.metricChartHours();
+      let until = Math.floor(Date.now() / 1e3);
+      let fromSec = until - hours * 3600;
+      let history = [];
+      let chartLoading = false;
+      const isLiveWindow = () => until >= Math.floor(Date.now() / 1e3) - 90;
       host.innerHTML = `
       <div class="modal-backdrop">
         <div class="modal modal-form modal-form-wide modal-cstats" role="dialog" aria-modal="true">
@@ -4040,10 +4230,12 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           <div class="cstats-toolbar">
             <span class="logs-status" id="cstats-status"><span class="dot"></span><span class="label">Chargement\u2026</span></span>
             <div class="spacer"></div>
-            <span class="muted" style="font-size:12px" title="Identique au dashboard (Param\xE8tres)">${bag.esc(bag.metricWindowLabel())} \xB7 r\xE9tention ${bag.esc(String(bag.metricRetentionDays()))} j</span>
+            <span class="muted" style="font-size:12px" id="cstats-win-hint" title="Identique au dashboard (Param\xE8tres)">r\xE9tention ${bag.esc(String(retentionDays))} j</span>
             <button type="button" class="btn btn-sm" id="cstats-refresh">Actualiser</button>
           </div>
-          <div id="cstats-chart" class="cstats-chart">${bag.containerResourceChart(history)}</div>
+          <div id="cstats-chart" class="cstats-chart">
+            <div class="muted" style="padding:12px 0">Chargement de l\u2019historique\u2026</div>
+          </div>
           <div id="cstats-body" class="cstats-body">
             <div class="muted" style="padding:1.5rem;text-align:center">Collecte des m\xE9triques\u2026</div>
           </div>
@@ -4062,12 +4254,64 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         const lbl = statusEl.querySelector(".label");
         if (lbl) lbl.textContent = label;
       };
+      const paintChart = (livePoint = null) => {
+        if (!chartEl) return;
+        const series = isLiveWindow() && livePoint ? history.concat([livePoint]) : history;
+        chartEl.innerHTML = `
+        ${bag.metricHistoryNavHtml({
+          hours,
+          until,
+          fromSec,
+          untilSec: until,
+          retentionDays
+        })}
+        ${bag.containerResourceChart(series)}`;
+        bindChartNav();
+      };
+      const bindChartNav = () => {
+        if (!chartEl) return;
+        chartEl.querySelector("[data-metric-prev]")?.addEventListener("click", () => {
+          until = Math.max(
+            Math.floor(Date.now() / 1e3) - retentionDays * 86400 + hours,
+            until - hours
+          );
+          void refreshChart(true);
+        });
+        chartEl.querySelector("[data-metric-next]")?.addEventListener("click", () => {
+          until = Math.min(Math.floor(Date.now() / 1e3), until + hours);
+          void refreshChart(true);
+        });
+        chartEl.querySelector("[data-metric-live]")?.addEventListener("click", () => {
+          until = Math.floor(Date.now() / 1e3);
+          void refreshChart(true);
+        });
+        chartEl.querySelectorAll("[data-metric-hours]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const h = parseInt(btn.getAttribute("data-metric-hours") || "", 10);
+            if (!Number.isFinite(h) || h < 1) return;
+            hours = h;
+            void refreshChart(true);
+          });
+        });
+      };
       const refreshChart = async (force = false, livePoint = null) => {
-        if (force || !history.length) {
-          history = await bag.loadContainerMetricHistory(id);
+        if (chartLoading) return;
+        if (!force && history.length && isLiveWindow() && livePoint) {
+          paintChart(livePoint);
+          return;
         }
-        const series = livePoint ? history.concat([livePoint]) : history;
-        if (chartEl) chartEl.innerHTML = bag.containerResourceChart(series);
+        chartLoading = true;
+        try {
+          const nowSec = Math.floor(Date.now() / 1e3);
+          if (until > nowSec) until = nowSec;
+          const data = await bag.loadContainerMetricHistory(id, { hours, until });
+          history = data.series || [];
+          fromSec = data.from || until - hours * 3600;
+          until = data.until || until;
+          paintChart(isLiveWindow() ? livePoint : null);
+        } finally {
+          chartLoading = false;
+        }
       };
       const render = (computed, rate, netScore) => {
         const cpu = Math.max(0, Number(computed.cpuPct) || 0);
@@ -4087,13 +4331,14 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           <td class="mono">${bag.esc(bag.formatBytes(tx))}</td>
         </tr>`;
         }).join("");
+        const histHint = isLiveWindow() ? `live \xB7 fen\xEAtre ${bag.metricHoursLabel(hours)}` : `historique \xB7 ${bag.formatMetricRange(fromSec, until)}`;
         body.innerHTML = `
         <div class="cstats-gauges">
           <div class="gauge">${bag.gaugeRing(cpu, "#3b82f6")}<div class="g-label">CPU</div><div class="g-sub">${cpu.toFixed(1)} %</div></div>
           <div class="gauge">${bag.gaugeRing(mem, "#22c55e")}<div class="g-label">RAM</div><div class="g-sub">${bag.esc(bag.formatBytes(computed.memUsage))} / ${bag.esc(bag.formatBytes(computed.memLimit))}</div></div>
           <div class="gauge">${bag.gaugeRing(netScore, "#a78bfa")}<div class="g-label">R\xE9seau</div><div class="g-sub">\u2193 ${bag.esc(bag.formatBitRate(rate?.rx || 0))} \xB7 \u2191 ${bag.esc(bag.formatBitRate(rate?.tx || 0))}</div></div>
         </div>
-        <div class="cstats-meta muted">PID ${bag.esc(String(computed.pids || 0))} \xB7 live \xB7 historique ${bag.esc(bag.metricWindowLabel())}</div>
+        <div class="cstats-meta muted">PID ${bag.esc(String(computed.pids || 0))} \xB7 ${bag.esc(histHint)}</div>
         <div class="section-title" style="margin-top:14px">Interfaces r\xE9seau</div>
         <div class="table-wrap" style="margin:0">
           <table class="data">
@@ -4125,9 +4370,10 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
             setStatus("is-paused", "Conteneur arr\xEAt\xE9");
             bag.applyStatsIconLevel(id, "off", "Conteneur arr\xEAt\xE9 \u2014 pas de charge");
             body.innerHTML = `<div class="info-box">D\xE9marrez le conteneur pour voir CPU, RAM et r\xE9seau en direct.</div>`;
+            if (!history.length) await refreshChart(true);
             return;
           }
-          setStatus("is-live", "En direct");
+          setStatus(isLiveWindow() ? "is-live" : "is-paused", isLiveWindow() ? "En direct" : "Historique");
           const st = await bag.Api.docker(`/containers/${id}/stats?stream=false`);
           const now = Date.now();
           const computed = bag.computeStats(st, 0);
@@ -4156,8 +4402,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           if (!lastPersistAt || now - lastPersistAt > 6e4) {
             lastPersistAt = now;
             await bag.pushContainerMetricSample(id, computed.cpuPct, computed.memPct, netScore);
-            await refreshChart(true, livePoint);
-          } else {
+            if (isLiveWindow()) await refreshChart(true, livePoint);
+          } else if (isLiveWindow()) {
             await refreshChart(false, livePoint);
           }
         } catch (err) {
@@ -4166,9 +4412,11 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         }
       };
       document.getElementById("cstats-refresh")?.addEventListener("click", async () => {
+        if (isLiveWindow()) until = Math.floor(Date.now() / 1e3);
         await refreshChart(true);
         await tick();
       });
+      await refreshChart(true);
       await tick();
       bag.state.statsTimer = setInterval(tick, 2e3);
     };
@@ -4487,9 +4735,9 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         const rowCls = isRunning ? "" : "row-stopped";
         const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ""}`.toLowerCase();
         const actions = all ? `<span class="muted">\u2014</span>` : `<div class="quick-actions">
-          ${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
-          ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
-          ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
+          ${bag.iconBtn({ act: "start", id: c.Id, title: isRunning ? "D\xE9j\xE0 d\xE9marr\xE9" : "D\xE9marrer", icon: "start", success: !isRunning, disabled: isRunning })}
+          ${bag.iconBtn({ act: "stop", id: c.Id, title: isRunning ? "Arr\xEAter" : "D\xE9j\xE0 arr\xEAt\xE9", icon: "stop", danger: isRunning, disabled: !isRunning })}
+          ${bag.iconBtn({ act: "restart", id: c.Id, title: isRunning ? "Red\xE9marrer" : "Conteneur arr\xEAt\xE9", icon: "restart", disabled: !isRunning })}
           ${bag.iconBtn({
           modal: "stats",
           id: c.Id,
@@ -4498,10 +4746,11 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
           icon: "stats",
           statsId: c.Id,
-          extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
+          extraClass: isRunning ? "is-stats-ok" : "is-stats-off",
+          disabled: !isRunning
         })}
           ${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs", icon: "logs" })}
-          ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console" })}
+          ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: isRunning ? "Console" : "Conteneur arr\xEAt\xE9", icon: "console", disabled: !isRunning })}
           ${bag.iconBtn({ modal: "inspect", id: c.Id, name, running: isRunning, title: "Inspecter", icon: "inspect" })}
           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || c.Id })}
           ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}
@@ -4513,6 +4762,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           <strong><a href="#containers/${bag.esc(c.Id)}" ${all ? `data-switch-node="${bag.esc(c._nodeId)}"` : ""}>${bag.esc(name)}</a></strong>
           <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
         </td>
+        <td>${bag.badge(c.State)}</td>
         <td class="mono cell-clip cell-image" title="${bag.esc(c.Image || "")}">
           <span class="img-with-upd">
             ${all ? "" : `<span class="img-upd-slot" data-cupd="${bag.esc(c.Id)}">
@@ -4521,7 +4771,6 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
             <span class="img-name">${bag.esc(c.Image || "")}</span>
           </span>
         </td>
-        <td>${bag.badge(c.State)}</td>
         <td>${bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId)}</td>
         <td>${bag.formatCreated(c.Created)}</td>
         <td class="actions">${actions}</td>
@@ -4547,8 +4796,8 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
             ${bag.bulkSelectTh(!all)}
             ${all ? bag.sortTh("N\u0153ud", "node", "containers") : ""}
             ${bag.sortTh("Nom", "name", "containers")}
-            ${bag.sortTh("Image", "image", "containers")}
             ${bag.sortTh("\xC9tat", "state", "containers")}
+            ${bag.sortTh("Image", "image", "containers")}
             ${bag.sortTh("Ports publi\xE9s", "ports", "containers")}
             ${bag.sortTh("Cr\xE9\xE9", "created", "containers")}
             <th>Actions</th>
@@ -4676,9 +4925,9 @@ ${title}`;
       <div class="toolbar">
         ${bag.iconBtn({ tag: "a", href: "#containers", title: "Retour", icon: "back" })}
         <div class="quick-actions">
-          ${bag.iconBtn({ act: "start", title: "D\xE9marrer", icon: "start", success: !running })}
-          ${bag.iconBtn({ act: "stop", title: "Arr\xEAter", icon: "stop", danger: running })}
-          ${bag.iconBtn({ act: "restart", title: "Red\xE9marrer", icon: "restart" })}
+          ${bag.iconBtn({ act: "start", title: running ? "D\xE9j\xE0 d\xE9marr\xE9" : "D\xE9marrer", icon: "start", success: !running, disabled: running })}
+          ${bag.iconBtn({ act: "stop", title: running ? "Arr\xEAter" : "D\xE9j\xE0 arr\xEAt\xE9", icon: "stop", danger: running, disabled: !running })}
+          ${bag.iconBtn({ act: "restart", title: running ? "Red\xE9marrer" : "Conteneur arr\xEAt\xE9", icon: "restart", disabled: !running })}
           ${bag.iconBtn({
         modal: "stats",
         id,
@@ -4687,10 +4936,11 @@ ${title}`;
         title: running ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
         icon: "stats",
         statsId: id,
-        extraClass: running ? "is-stats-ok" : "is-stats-off"
+        extraClass: running ? "is-stats-ok" : "is-stats-off",
+        disabled: !running
       })}
           ${bag.iconBtn({ modal: "logs", id, name, running, title: "Logs", icon: "logs" })}
-          ${bag.iconBtn({ modal: "console", id, name, running, title: "Console", icon: "console" })}
+          ${bag.iconBtn({ modal: "console", id, name, running, title: running ? "Console" : "Conteneur arr\xEAt\xE9", icon: "console", disabled: !running })}
           ${bag.iconBtn({ modal: "inspect", id, name, running, title: "Inspecter", icon: "inspect" })}
           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || id })}
           ${bag.iconBtn({ act: "remove", title: "Supprimer", icon: "remove", danger: true })}
@@ -7205,9 +7455,9 @@ ${tip}`;
         const search = `${s.Id} ${s.Name} ${node} ${s.CreatedBy || ""} ${stLabel}`.toLowerCase();
         const isRunning = stLabel === "running";
         const actions = `<div class="quick-actions">
-        ${bag.iconBtn({ act: "start", id: s.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
-        ${bag.iconBtn({ act: "stop", id: s.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
-        ${bag.iconBtn({ act: "restart", id: s.Id, title: "Red\xE9marrer", icon: "restart" })}
+        ${bag.iconBtn({ act: "start", id: s.Id, title: isRunning ? "D\xE9j\xE0 d\xE9marr\xE9e" : "D\xE9marrer", icon: "start", success: !isRunning, disabled: isRunning })}
+        ${bag.iconBtn({ act: "stop", id: s.Id, title: isRunning ? "Arr\xEAter" : "D\xE9j\xE0 arr\xEAt\xE9e", icon: "stop", danger: isRunning, disabled: !isRunning })}
+        ${bag.iconBtn({ act: "restart", id: s.Id, title: isRunning ? "Red\xE9marrer" : "Stack arr\xEAt\xE9e", icon: "restart", disabled: !isRunning })}
         ${bag.iconBtn({ act: "edit", id: s.Id, name: s.Name, title: "\xC9diteur", icon: "edit", info: true })}
         ${bag.iconBtn({ act: "redeploy", id: s.Id, title: "Pull images + red\xE9ployer", icon: "pull" })}
         ${bag.iconBtn({ tag: "a", href: `#stacks/${s.Id}`, title: "D\xE9tail", icon: "inspect" })}
@@ -8111,9 +8361,9 @@ ${title}`;
       <div class="toolbar">
         ${bag.iconBtn({ tag: "a", href: "#stacks", title: "Retour", icon: "back" })}
         <div class="quick-actions">
-          ${bag.iconBtn({ act: "start", id: stack.Id, title: "D\xE9marrer", icon: "start", success: !stackRunning })}
-          ${bag.iconBtn({ act: "stop", id: stack.Id, title: "Arr\xEAter", icon: "stop", danger: stackRunning })}
-          ${bag.iconBtn({ act: "restart", id: stack.Id, title: "Red\xE9marrer", icon: "restart" })}
+          ${bag.iconBtn({ act: "start", id: stack.Id, title: stackRunning ? "D\xE9j\xE0 d\xE9marr\xE9e" : "D\xE9marrer", icon: "start", success: !stackRunning, disabled: stackRunning })}
+          ${bag.iconBtn({ act: "stop", id: stack.Id, title: stackRunning ? "Arr\xEAter" : "D\xE9j\xE0 arr\xEAt\xE9e", icon: "stop", danger: stackRunning, disabled: !stackRunning })}
+          ${bag.iconBtn({ act: "restart", id: stack.Id, title: stackRunning ? "Red\xE9marrer" : "Stack arr\xEAt\xE9e", icon: "restart", disabled: !stackRunning })}
           ${bag.iconBtn({ elId: "edit", title: "\xC9diteur", icon: "edit", info: true })}
           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "stack", shareKey: String(stack.Id) })}
           ${bag.iconBtn({ elId: "stack-pull-redeploy", title: "Pull images + red\xE9ployer", icon: "pull" })}
@@ -8345,9 +8595,9 @@ ${title}`;
             <td class="mono">${bag.esc(c.Image || "")}</td>
             <td>${bag.formatPorts(c.Ports || [], ep)}</td>
             <td class="actions"><div class="quick-actions">
-              ${bag.iconBtn({ act: "start", id: c.Id, title: "D\xE9marrer", icon: "start", success: !isRunning })}
-              ${bag.iconBtn({ act: "stop", id: c.Id, title: "Arr\xEAter", icon: "stop", danger: isRunning })}
-              ${bag.iconBtn({ act: "restart", id: c.Id, title: "Red\xE9marrer", icon: "restart" })}
+              ${bag.iconBtn({ act: "start", id: c.Id, title: isRunning ? "D\xE9j\xE0 d\xE9marr\xE9" : "D\xE9marrer", icon: "start", success: !isRunning, disabled: isRunning })}
+              ${bag.iconBtn({ act: "stop", id: c.Id, title: isRunning ? "Arr\xEAter" : "D\xE9j\xE0 arr\xEAt\xE9", icon: "stop", danger: isRunning, disabled: !isRunning })}
+              ${bag.iconBtn({ act: "restart", id: c.Id, title: isRunning ? "Red\xE9marrer" : "Conteneur arr\xEAt\xE9", icon: "restart", disabled: !isRunning })}
               ${bag.iconBtn({
               modal: "stats",
               id: c.Id,
@@ -8356,10 +8606,11 @@ ${title}`;
               title: isRunning ? "CPU / RAM / R\xE9seau" : "Conteneur arr\xEAt\xE9",
               icon: "stats",
               statsId: c.Id,
-              extraClass: isRunning ? "is-stats-ok" : "is-stats-off"
+              extraClass: isRunning ? "is-stats-ok" : "is-stats-off",
+              disabled: !isRunning
             })}
               ${bag.iconBtn({ modal: "logs", id: c.Id, name, running: isRunning, title: "Logs", icon: "logs" })}
-              ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: "Console", icon: "console" })}
+              ${bag.iconBtn({ modal: "console", id: c.Id, name, running: isRunning, title: isRunning ? "Console" : "Conteneur arr\xEAt\xE9", icon: "console", disabled: !isRunning })}
               ${bag.iconBtn({ modal: "inspect", id: c.Id, name, running: isRunning, title: "Inspecter", icon: "inspect" })}
               ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || c.Id })}
               ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}
@@ -9544,7 +9795,6 @@ ${title}`;
       ["#activity", "Journaux"],
       ["#settings", "Param\xE8tres"],
       ["#settings/auth", "Authentification"],
-      ["#settings/diagnostics/api", "Tests API"],
       ["#registries", "Registres"],
       ["#nodes", "N\u0153uds"],
       ["#users", "Utilisateurs"],
@@ -10166,7 +10416,7 @@ ${title}`;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.1", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.7", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");

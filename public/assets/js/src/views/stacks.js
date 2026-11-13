@@ -32,9 +32,9 @@ export function install() {
       // Actions toujours disponibles (API liée à l’id stack / son nœud)
       const isRunning = stLabel === 'running';
       const actions = `<div class="quick-actions">
-        ${bag.iconBtn({ act: 'start', id: s.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
-        ${bag.iconBtn({ act: 'stop', id: s.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
-        ${bag.iconBtn({ act: 'restart', id: s.Id, title: 'Redémarrer', icon: 'restart' })}
+        ${bag.iconBtn({ act: 'start', id: s.Id, title: isRunning ? 'Déjà démarrée' : 'Démarrer', icon: 'start', success: !isRunning, disabled: isRunning })}
+        ${bag.iconBtn({ act: 'stop', id: s.Id, title: isRunning ? 'Arrêter' : 'Déjà arrêtée', icon: 'stop', danger: isRunning, disabled: !isRunning })}
+        ${bag.iconBtn({ act: 'restart', id: s.Id, title: isRunning ? 'Redémarrer' : 'Stack arrêtée', icon: 'restart', disabled: !isRunning })}
         ${bag.iconBtn({ act: 'edit', id: s.Id, name: s.Name, title: 'Éditeur', icon: 'edit', info: true })}
         ${bag.iconBtn({ act: 'redeploy', id: s.Id, title: 'Pull images + redéployer', icon: 'pull' })}
         ${bag.iconBtn({ tag: 'a', href: `#stacks/${s.Id}`, title: 'Détail', icon: 'inspect' })}
@@ -1010,9 +1010,9 @@ export function install() {
       <div class="toolbar">
         ${bag.iconBtn({ tag: 'a', href: '#stacks', title: 'Retour', icon: 'back' })}
         <div class="quick-actions">
-          ${bag.iconBtn({ act: 'start', id: stack.Id, title: 'Démarrer', icon: 'start', success: !stackRunning })}
-          ${bag.iconBtn({ act: 'stop', id: stack.Id, title: 'Arrêter', icon: 'stop', danger: stackRunning })}
-          ${bag.iconBtn({ act: 'restart', id: stack.Id, title: 'Redémarrer', icon: 'restart' })}
+          ${bag.iconBtn({ act: 'start', id: stack.Id, title: stackRunning ? 'Déjà démarrée' : 'Démarrer', icon: 'start', success: !stackRunning, disabled: stackRunning })}
+          ${bag.iconBtn({ act: 'stop', id: stack.Id, title: stackRunning ? 'Arrêter' : 'Déjà arrêtée', icon: 'stop', danger: stackRunning, disabled: !stackRunning })}
+          ${bag.iconBtn({ act: 'restart', id: stack.Id, title: stackRunning ? 'Redémarrer' : 'Stack arrêtée', icon: 'restart', disabled: !stackRunning })}
           ${bag.iconBtn({ elId: 'edit', title: 'Éditeur', icon: 'edit', info: true })}
           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'stack', shareKey: String(stack.Id) })}
           ${bag.iconBtn({ elId: 'stack-pull-redeploy', title: 'Pull images + redéployer', icon: 'pull' })}
@@ -1250,17 +1250,18 @@ export function install() {
             <td class="mono">${bag.esc(c.Image || '')}</td>
             <td>${bag.formatPorts(c.Ports || [], ep)}</td>
             <td class="actions"><div class="quick-actions">
-              ${bag.iconBtn({ act: 'start', id: c.Id, title: 'Démarrer', icon: 'start', success: !isRunning })}
-              ${bag.iconBtn({ act: 'stop', id: c.Id, title: 'Arrêter', icon: 'stop', danger: isRunning })}
-              ${bag.iconBtn({ act: 'restart', id: c.Id, title: 'Redémarrer', icon: 'restart' })}
+              ${bag.iconBtn({ act: 'start', id: c.Id, title: isRunning ? 'Déjà démarré' : 'Démarrer', icon: 'start', success: !isRunning, disabled: isRunning })}
+              ${bag.iconBtn({ act: 'stop', id: c.Id, title: isRunning ? 'Arrêter' : 'Déjà arrêté', icon: 'stop', danger: isRunning, disabled: !isRunning })}
+              ${bag.iconBtn({ act: 'restart', id: c.Id, title: isRunning ? 'Redémarrer' : 'Conteneur arrêté', icon: 'restart', disabled: !isRunning })}
               ${bag.iconBtn({
                 modal: 'stats', id: c.Id, name, running: isRunning,
                 title: isRunning ? 'CPU / RAM / Réseau' : 'Conteneur arrêté',
                 icon: 'stats', statsId: c.Id,
                 extraClass: isRunning ? 'is-stats-ok' : 'is-stats-off',
+                disabled: !isRunning,
               })}
               ${bag.iconBtn({ modal: 'logs', id: c.Id, name, running: isRunning, title: 'Logs', icon: 'logs' })}
-              ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: 'Console', icon: 'console' })}
+              ${bag.iconBtn({ modal: 'console', id: c.Id, name, running: isRunning, title: isRunning ? 'Console' : 'Conteneur arrêté', icon: 'console', disabled: !isRunning })}
               ${bag.iconBtn({ modal: 'inspect', id: c.Id, name, running: isRunning, title: 'Inspecter', icon: 'inspect' })}
               ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || c.Id })}
               ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}

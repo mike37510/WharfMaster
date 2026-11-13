@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 2.3.6 |
+| **Version** | 2.3.7 |
 | **Console** | `/app` |
 | **API** | `/api` |
 | **DocumentRoot** | `public/` uniquement |
@@ -74,11 +74,11 @@ npm install && npm run build   # régénère public/assets/js/app.js
 
 ## Fonctionnalités
 
-- **Tableau de bord** — stats, conteneurs, ressources hôte (CPU / RAM / disque), activité ; vue **Tous les nœuds** agrégée
-- **Conteneurs** — CRUD, logs / console / inspect, charge CPU·RAM (icônes), métriques historiques, date de création, MàJ image en un clic
-- **Images** — Hub / local, pull, build, **pastilles CVE** auto (Trivy, cache 24 h)
-- **Volumes** — named + binds (sync Compose), explorateur de fichiers
-- **Réseaux & stacks Compose** — YAML + `.env`, conteneurs liés + actions, schedules, pastille MàJ **cliquable** (pull + redeploy), multi-nœud
+- **Tableau de bord** — stats, conteneurs, ressources hôte (CPU / RAM / disque) avec **navigation sur la rétention**, activité ; vue **Tous les nœuds** agrégée
+- **Conteneurs** — CRUD, logs / console / inspect, charge CPU·RAM (icônes), métriques historiques navigables, topologie réseau+volumes, actions grisées selon l’état, MàJ image en un clic
+- **Images** — Hub / local, pull, build, **pastilles CVE** auto (Trivy, cache 24 h, conservation si scan KO)
+- **Volumes** — named + binds (sync Compose + découverte admin), explorateur de fichiers
+- **Réseaux & stacks Compose** — YAML + `.env`, conteneurs liés + topologie, schedules, pastille MàJ **cliquable** (pull + redeploy), multi-nœud
 - **Profil** — avatar → compte, mot de passe, **clés API** personnelles (droits = ceux de l’utilisateur)
 - **Partages** — stack / conteneur / volume / réseau entre utilisateurs (cascade stack → Compose)
 - **Registres** — Hub / Registry V2, parcours dépôts & tags, pull
@@ -116,8 +116,14 @@ npm install && npm run build   # régénère public/assets/js/app.js
 ### Scan CVE Trivy (2.0)
 
 - Activer / couper dans **Paramètres → Général**.
-- Pastilles sur **Images** + scan à la demande.
+- Pastilles sur **Images** (cache 24 h) ; le dernier résultat reste affiché si Trivy est indisponible.
 - À la création d’un conteneur ou au déploiement d’une stack : contrôle soft (`/images/advise`) — **jamais bloquant** si Trivy est KO.
+
+### Métriques & rétention
+
+- Fenêtre glissante et rétention configurables (**Paramètres → Général**, défauts 72 h / 90 j).
+- Navigation **Préc. / Maintenant / Suiv.** + chips de fenêtre : dashboard (ressources hôte), sparklines → modal détail, modal Ressources conteneur.
+- API : `GET /api/metrics/history?scope=&hours=&until=&points=`.
 
 ---
 
@@ -331,7 +337,7 @@ export DOCKER_BIN=/usr/bin/docker
 export COMPOSE_BIN=/usr/local/bin/docker-compose
 export DOCKER_API_VERSION=v1.45
 export WM_MASTER_KEY='…'   # chiffrement registres (sinon dérivé de jwt.secret)
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.6
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.7
 ```
 
 ### Backup / restauration

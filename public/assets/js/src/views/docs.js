@@ -152,7 +152,7 @@ export function install() {
       </div>
     `, { subtitle: 'Guide produit & API' });
     try {
-      const res = await fetch('/docs/DOCUMENTATION.md?v=2.3.1', { headers: { Accept: 'text/plain' } });
+      const res = await fetch('/docs/DOCUMENTATION.md?v=2.3.7', { headers: { Accept: 'text/plain' } });
       if (!res.ok) throw new Error('Impossible de charger la documentation (' + res.status + ')');
       const md = await res.text();
       const el = document.getElementById('docs-body');

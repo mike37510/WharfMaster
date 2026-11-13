@@ -9,4 +9,4 @@ Sources marketing dans `site/` (hors DocumentRoot). Servies par le front control
 | `/site/site.js` | `site/site.js` |
 | `/site/shots/…` | `site/shots/…` |
 
-Console d’administration : **`/app`**.
+Thème **clair** (fond clair, accent bleu). Console d’administration : **`/app`**.

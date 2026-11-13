@@ -386,7 +386,7 @@ final class Client
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_TIMEOUT => 20,
             CURLOPT_HEADER => true,
-            CURLOPT_HTTPHEADER => array_merge($headers, ['User-Agent: WharfMaster/2.3.6']),
+            CURLOPT_HTTPHEADER => array_merge($headers, ['User-Agent: WharfMaster/2.3.7']),
         ]);
         $raw = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -554,7 +554,7 @@ final class Client
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => array_merge(
-                ['Accept: application/json', 'User-Agent: WharfMaster/2.3.6'],
+                ['Accept: application/json', 'User-Agent: WharfMaster/2.3.7'],
                 $headers
             ),
         ]);

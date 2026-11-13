@@ -155,6 +155,122 @@ export function install() {
     });
   }
 
+  bag.resetHostChartNav = function resetHostChartNav() {
+    const hours = bag.metricChartHours();
+    const until = Math.floor(Date.now() / 1000);
+    bag._hostChartNav = {
+      hours,
+      until,
+      from: until - hours * 3600,
+      loading: false,
+    };
+  }
+
+  bag.isHostChartLive = function isHostChartLive() {
+    const nav = bag._hostChartNav;
+    if (!nav) return true;
+    return Number(nav.until) >= Math.floor(Date.now() / 1000) - 90;
+  }
+
+  bag.hostChartBlockHtml = function hostChartBlockHtml(series) {
+    if (!bag._hostChartNav) bag.resetHostChartNav();
+    const nav = bag._hostChartNav;
+    const from = Number(nav.from) || (nav.until - nav.hours * 3600);
+    return `<div id="host-chart-block" class="host-chart-block">
+      ${bag.metricHistoryNavHtml({
+        hours: nav.hours,
+        until: nav.until,
+        fromSec: from,
+        untilSec: nav.until,
+        retentionDays: bag.metricRetentionDays(),
+      })}
+      ${bag.hostResourceChart(series || [])}
+    </div>`;
+  }
+
+  bag.loadHostMetricHistory = async function loadHostMetricHistory(opts = {}) {
+    if (!bag._hostChartNav) bag.resetHostChartNav();
+    const retentionDays = bag.metricRetentionDays();
+    const hours = opts.hours != null
+      ? Math.max(1, Math.min(retentionDays * 24, Number(opts.hours) || bag.metricChartHours()))
+      : bag._hostChartNav.hours;
+    let until = opts.until != null
+      ? Math.floor(Number(opts.until))
+      : bag._hostChartNav.until;
+    const now = Math.floor(Date.now() / 1000);
+    if (!Number.isFinite(until) || until <= 0 || until > now) until = now;
+    const points = Math.min(720, Math.max(48, Math.ceil((hours * 60) / 5)));
+    try {
+      const data = await bag.Api.metricsHistory(bag.metricScopeKey(), { hours, until, points });
+      if (data?.ChartHours != null) bag.state.metricsChartHours = Number(data.ChartHours) || bag.state.metricsChartHours;
+      if (data?.RetentionDays != null) bag.state.metricsRetentionDays = Number(data.RetentionDays) || bag.state.metricsRetentionDays;
+      const untilOut = Number(data?.Until) || until;
+      const fromOut = Number(data?.From) || (untilOut - hours * 3600);
+      return {
+        series: Array.isArray(data?.Series) ? data.Series : [],
+        from: fromOut,
+        until: untilOut,
+        hours,
+      };
+    } catch (_) {
+      return { series: [], from: until - hours * 3600, until, hours };
+    }
+  }
+
+  bag.bindHostResourceChartNav = function bindHostResourceChartNav() {
+    const root = document.getElementById('host-chart-block');
+    if (!root) return;
+    if (!bag._hostChartNav) bag.resetHostChartNav();
+    const retentionDays = bag.metricRetentionDays();
+    root.querySelector('[data-metric-prev]')?.addEventListener('click', () => {
+      const nav = bag._hostChartNav;
+      nav.until = Math.max(
+        Math.floor(Date.now() / 1000) - retentionDays * 86400 + nav.hours,
+        nav.until - nav.hours,
+      );
+      void bag.refreshHostResourceChart();
+    });
+    root.querySelector('[data-metric-next]')?.addEventListener('click', () => {
+      const nav = bag._hostChartNav;
+      nav.until = Math.min(Math.floor(Date.now() / 1000), nav.until + nav.hours);
+      void bag.refreshHostResourceChart();
+    });
+    root.querySelector('[data-metric-live]')?.addEventListener('click', () => {
+      bag._hostChartNav.until = Math.floor(Date.now() / 1000);
+      void bag.refreshHostResourceChart();
+    });
+    root.querySelectorAll('[data-metric-hours]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const h = parseInt(btn.getAttribute('data-metric-hours') || '', 10);
+        if (!Number.isFinite(h) || h < 1) return;
+        bag._hostChartNav.hours = h;
+        void bag.refreshHostResourceChart();
+      });
+    });
+  }
+
+  bag.paintHostResourceChart = function paintHostResourceChart(series) {
+    const block = document.getElementById('host-chart-block');
+    if (!block) return;
+    block.outerHTML = bag.hostChartBlockHtml(series);
+    bag.bindHostResourceChartNav();
+  }
+
+  bag.refreshHostResourceChart = async function refreshHostResourceChart() {
+    if (!bag._hostChartNav) bag.resetHostChartNav();
+    if (bag._hostChartNav.loading) return;
+    bag._hostChartNav.loading = true;
+    try {
+      const data = await bag.loadHostMetricHistory();
+      bag._hostChartNav.hours = data.hours;
+      bag._hostChartNav.until = data.until;
+      bag._hostChartNav.from = data.from;
+      bag.paintHostResourceChart(data.series);
+    } finally {
+      bag._hostChartNav.loading = false;
+    }
+  }
+
   bag.containerResourceChart = function containerResourceChart(series) {
     return bag.resourceChart(series, {
       wrapId: 'ctr-wave-wrap',
@@ -224,17 +340,80 @@ export function install() {
     } catch (_) { /* ignore */ }
   }
 
-  bag.loadContainerMetricHistory = async function loadContainerMetricHistory(containerId) {
+  bag.loadContainerMetricHistory = async function loadContainerMetricHistory(containerId, opts = {}) {
+    const retentionDays = bag.metricRetentionDays();
+    const hours = opts.hours != null
+      ? Math.max(1, Math.min(retentionDays * 24, Number(opts.hours) || bag.metricChartHours()))
+      : bag.metricChartHours();
+    const points = opts.points != null
+      ? Number(opts.points)
+      : Math.min(720, Math.max(48, Math.ceil((hours * 60) / 5)));
     try {
-      const hours = bag.metricChartHours();
-      const points = Math.min(288, Math.max(48, Math.ceil((hours * 60) / 5)));
-      const data = await bag.Api.metricsHistory(bag.containerMetricScope(containerId), { hours, points });
+      const params = { hours, points };
+      if (opts.until != null && Number(opts.until) > 0) params.until = Math.floor(Number(opts.until));
+      const data = await bag.Api.metricsHistory(bag.containerMetricScope(containerId), params);
       if (data?.ChartHours != null) bag.state.metricsChartHours = Number(data.ChartHours) || bag.state.metricsChartHours;
       if (data?.RetentionDays != null) bag.state.metricsRetentionDays = Number(data.RetentionDays) || bag.state.metricsRetentionDays;
-      return Array.isArray(data?.Series) ? data.Series : [];
+      const untilOut = Number(data?.Until) || params.until || Math.floor(Date.now() / 1000);
+      const fromOut = Number(data?.From) || (untilOut - hours * 3600);
+      return {
+        series: Array.isArray(data?.Series) ? data.Series : [],
+        from: fromOut,
+        until: untilOut,
+        hours,
+      };
     } catch (_) {
-      return [];
+      const untilOut = opts.until != null ? Math.floor(Number(opts.until)) : Math.floor(Date.now() / 1000);
+      return { series: [], from: untilOut - hours * 3600, until: untilOut, hours };
     }
+  }
+
+  bag.metricWindowChoices = function metricWindowChoices() {
+    const retentionDays = bag.metricRetentionDays();
+    const defaultHours = bag.metricChartHours();
+    return Array.from(new Set([
+      defaultHours,
+      24,
+      48,
+      72,
+      168,
+      Math.min(retentionDays * 24, 720),
+    ].filter((h) => h >= 1 && h <= retentionDays * 24))).sort((a, b) => a - b);
+  }
+
+  bag.metricHoursLabel = function metricHoursLabel(h) {
+    const hours = Number(h) || 0;
+    if (hours === 24) return '24 h';
+    if (hours % 24 === 0) {
+      const d = hours / 24;
+      return `${d} j`;
+    }
+    return `${hours} h`;
+  }
+
+  /** Nav rétention (Préc. / Maintenant / Suiv. + chips) — dashboard détail & modal conteneur. */
+  bag.metricHistoryNavHtml = function metricHistoryNavHtml({ hours, until, fromSec, untilSec, retentionDays } = {}) {
+    const h = Number(hours) || bag.metricChartHours();
+    const ret = Number(retentionDays) || bag.metricRetentionDays();
+    const now = Math.floor(Date.now() / 1000);
+    const end = Number(until) || now;
+    const floor = now - ret * 86400;
+    const canPrev = end - h > floor + 60;
+    const canNext = end < now - 90;
+    const chips = bag.metricWindowChoices().map((choice) =>
+      `<button type="button" class="btn btn-sm metric-win-chip${choice === h ? ' is-active' : ''}" data-metric-hours="${choice}">${bag.esc(bag.metricHoursLabel(choice))}</button>`
+    ).join('');
+    const from = Number(fromSec) || (end - h * 3600);
+    const to = Number(untilSec) || end;
+    return `<div class="metric-detail-nav cstats-metric-nav">
+      <div class="metric-detail-nav-row">
+        <button type="button" class="btn btn-sm" data-metric-prev ${canPrev ? '' : 'disabled'} title="Fenêtre précédente">← Préc.</button>
+        <button type="button" class="btn btn-sm" data-metric-live ${canNext ? '' : 'disabled'} title="Revenir à maintenant">Maintenant</button>
+        <button type="button" class="btn btn-sm" data-metric-next ${canNext ? '' : 'disabled'} title="Fenêtre suivante">Suiv. →</button>
+      </div>
+      <div class="metric-detail-nav-row metric-win-chips">${chips}</div>
+      <p class="muted metric-detail-range">${bag.esc(bag.formatMetricRange(from, to))} · rétention ${ret} j</p>
+    </div>`;
   }
 
   bag.stopContainerStatsPoll = function stopContainerStatsPoll() {
@@ -662,8 +841,17 @@ export function install() {
   }
 
   bag.updateHostResourceChart = function updateHostResourceChart(series, counts) {
-    const wrap = document.getElementById('host-wave-wrap');
-    if (wrap) wrap.outerHTML = bag.hostResourceChart(series);
+    // Courbes : uniquement en fenêtre « maintenant » (sinon on garde l’historique navigué)
+    if (bag.isHostChartLive() && document.getElementById('host-chart-block')) {
+      if (!bag._hostChartNav) bag.resetHostChartNav();
+      const now = Math.floor(Date.now() / 1000);
+      bag._hostChartNav.until = now;
+      bag._hostChartNav.from = now - bag._hostChartNav.hours * 3600;
+      bag.paintHostResourceChart(series || []);
+    } else if (bag.isHostChartLive()) {
+      const wrap = document.getElementById('host-wave-wrap');
+      if (wrap) wrap.outerHTML = bag.hostResourceChart(series || []);
+    }
     if (!counts) return;
     const gauges = document.querySelectorAll('.panel-card .gauge-row .gauge');
     if (gauges.length >= 3) {
