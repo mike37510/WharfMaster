@@ -20,14 +20,14 @@ final class ManifestClient
     }
 
     /**
-     * Remote digest + human version (OCI / label-schema) when available.
+     * Remote digest + human version (OCI / label-schema) + build date when available.
      *
      * @param array{url?:string,username?:string,password?:string,type?:string} $registryCreds
-     * @return array{digest:?string,version:string,tag:string}
+     * @return array{digest:?string,version:string,tag:string,created:string}
      */
     public function remoteMeta(string $imageRef, array $registryCreds = [], bool $withVersion = true): array
     {
-        $empty = ['digest' => null, 'version' => '', 'tag' => ''];
+        $empty = ['digest' => null, 'version' => '', 'tag' => '', 'created' => ''];
         $parsed = self::parse($imageRef);
         if ($parsed === null) {
             return $empty;
@@ -37,6 +37,7 @@ final class ManifestClient
                 'digest' => $parsed['digest'],
                 'version' => '',
                 'tag' => (string) $parsed['tag'],
+                'created' => '',
             ];
         }
 
@@ -85,14 +86,30 @@ final class ManifestClient
         }
 
         $version = '';
+        $created = '';
         if ($withVersion && $manifestBody !== '') {
-            $version = $this->versionFromManifestBody($base, $repo, $headers, $manifestBody, $tag);
+            $cfg = $this->configFromManifestBody($base, $repo, $headers, $manifestBody);
+            $labels = is_array($cfg['labels'] ?? null) ? $cfg['labels'] : null;
+            $version = self::versionFromLabels($labels, $tag);
+            $created = (string) ($cfg['created'] ?? '');
         }
         if ($version === '' && $tag !== '' && strtolower($tag) !== 'latest') {
             $version = $tag;
         }
+        // Docker Hub tag last_updated when config has no created / to refine floating tags
+        if ($withVersion && self::isDockerHub($parsed['host']) && ($created === '' || strtolower($tag) === 'latest' || $version === $tag)) {
+            $hub = $this->dockerHubTagMeta($repo, $tag);
+            if ($hub['created'] !== '' && $created === '') {
+                $created = $hub['created'];
+            } elseif ($hub['created'] !== '') {
+                $created = $hub['created'];
+            }
+            if ($version === '' && $hub['version'] !== '') {
+                $version = $hub['version'];
+            }
+        }
 
-        return ['digest' => $digest, 'version' => $version, 'tag' => $tag];
+        return ['digest' => $digest, 'version' => $version, 'tag' => $tag, 'created' => $created];
     }
 
     /**
@@ -160,17 +177,18 @@ final class ManifestClient
 
     /**
      * @param list<string> $headers
+     * @return array{labels:?array<string,mixed>,created:string}
      */
-    private function versionFromManifestBody(
+    private function configFromManifestBody(
         string $base,
         string $repo,
         array $headers,
         string $manifestBody,
-        string $tag,
-    ): string {
+    ): array {
+        $empty = ['labels' => null, 'created' => ''];
         $manifest = json_decode($manifestBody, true);
         if (!is_array($manifest)) {
-            return '';
+            return $empty;
         }
         // Manifest list / index → pick first amd64/arm64 or first manifest
         if (($manifest['mediaType'] ?? '') === 'application/vnd.docker.distribution.manifest.list.v2+json'
@@ -194,22 +212,22 @@ final class ManifestClient
             }
             $childDigest = is_array($pick) ? (string) ($pick['digest'] ?? '') : '';
             if ($childDigest === '') {
-                return '';
+                return $empty;
             }
             $childUrl = $base . '/v2/' . $repo . '/manifests/' . rawurlencode($childDigest);
             $child = $this->http('GET', $childUrl, $headers, 10);
             if ($child['status'] < 200 || $child['status'] >= 300) {
-                return '';
+                return $empty;
             }
             $manifest = json_decode($child['body'], true);
             if (!is_array($manifest)) {
-                return '';
+                return $empty;
             }
         }
 
         $configDigest = (string) ($manifest['config']['digest'] ?? '');
         if ($configDigest === '' || !str_starts_with(strtolower($configDigest), 'sha256:')) {
-            return '';
+            return $empty;
         }
         $blobUrl = $base . '/v2/' . $repo . '/blobs/' . rawurlencode($configDigest);
         $blobHeaders = ['Accept: application/vnd.docker.container.image.v1+json,application/vnd.oci.image.config.v1+json,application/json'];
@@ -220,17 +238,73 @@ final class ManifestClient
         }
         $blob = $this->http('GET', $blobUrl, $blobHeaders, 10);
         if ($blob['status'] < 200 || $blob['status'] >= 300) {
-            return '';
+            return $empty;
         }
         $config = json_decode($blob['body'], true);
         if (!is_array($config)) {
-            return '';
+            return $empty;
         }
         $labels = $config['config']['Labels'] ?? $config['container_config']['Labels'] ?? null;
         if (!is_array($labels)) {
             $labels = null;
         }
-        return self::versionFromLabels($labels, $tag);
+        $created = trim((string) ($config['created'] ?? ''));
+        return ['labels' => $labels, 'created' => $created];
+    }
+
+    /** @return array{created:string,version:string} */
+    private function dockerHubTagMeta(string $repository, string $tag): array
+    {
+        $repo = ltrim($repository, '/');
+        if (str_starts_with($repo, 'library/')) {
+            // Hub path for official images is still library/...
+        }
+        $url = 'https://hub.docker.com/v2/repositories/' . $repo . '/tags/' . rawurlencode($tag);
+        $res = $this->http('GET', $url, [
+            'Accept: application/json',
+            'User-Agent: WharfMaster/2.3.4',
+        ], 8);
+        if ($res['status'] < 200 || $res['status'] >= 300) {
+            return ['created' => '', 'version' => ''];
+        }
+        $data = json_decode($res['body'], true);
+        if (!is_array($data)) {
+            return ['created' => '', 'version' => ''];
+        }
+        $created = trim((string) ($data['last_updated'] ?? ''));
+        if ($created === '' && is_array($data['images'][0] ?? null)) {
+            $created = trim((string) ($data['images'][0]['last_pushed'] ?? ''));
+        }
+        return ['created' => $created, 'version' => ''];
+    }
+
+    /** Format ISO date as dd/mm/YYYY for UI. */
+    public static function shortDate(?string $iso): string
+    {
+        $iso = trim((string) $iso);
+        if ($iso === '') {
+            return '';
+        }
+        try {
+            $dt = new \DateTimeImmutable($iso);
+            return $dt->format('d/m/Y');
+        } catch (\Throwable) {
+            return '';
+        }
+    }
+
+    /** Combine tag/semver + date → "pg16 (12/11/2026)". */
+    public static function versionWithDate(string $version, ?string $createdIso): string
+    {
+        $v = trim($version);
+        $d = self::shortDate($createdIso);
+        if ($v !== '' && $d !== '') {
+            return $v . ' (' . $d . ')';
+        }
+        if ($v !== '') {
+            return $v;
+        }
+        return $d !== '' ? $d : '';
     }
 
     /**

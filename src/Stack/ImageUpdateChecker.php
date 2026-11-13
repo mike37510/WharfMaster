@@ -434,8 +434,10 @@ final class ImageUpdateChecker
 
         $localInfo = $this->localImageInfo($docker, $image, $parsed);
         $local = $localInfo['digest'];
-        $localVersion = $localInfo['version'];
+        $localVersionRaw = $localInfo['version'];
+        $localCreated = $localInfo['created'];
         if ($local === null) {
+            $localVersion = ManifestClient::versionWithDate($localVersionRaw, $localCreated);
             return $this->item($service, $image, 'unknown', null, null, $localVersion, '', 'Image absente localement (pull requis)');
         }
 
@@ -447,7 +449,7 @@ final class ImageUpdateChecker
                 $cachedStatus['Detail'] = $this->detailFor(
                     (string) $cachedStatus['Status'],
                     (string) ($cachedStatus['ImageName'] ?? $imageName),
-                    (string) ($cachedStatus['LocalVersion'] ?? $localVersion),
+                    (string) ($cachedStatus['LocalVersion'] ?? ''),
                     (string) ($cachedStatus['RemoteVersion'] ?? ''),
                 );
                 return $cachedStatus;
@@ -456,23 +458,35 @@ final class ImageUpdateChecker
 
         $creds = $this->matchRegistry($parsed, $registries);
         $cacheKey = strtolower($parsed['host'] . '/' . $parsed['repository'] . ':' . $parsed['tag']);
-        $needVersion = true;
-        $remoteMeta = $this->cachedRemoteMeta($cacheKey, function () use ($image, $creds, $needVersion): array {
-            return $this->manifests->remoteMeta($image, $creds, $needVersion);
+        $remoteMeta = $this->cachedRemoteMeta($cacheKey, function () use ($image, $creds): array {
+            return $this->manifests->remoteMeta($image, $creds, true);
         }, $forceRefresh);
         $remote = $remoteMeta['digest'] ?? null;
-        $remoteVersion = (string) ($remoteMeta['version'] ?? '');
-        if ($remoteVersion === '' && ($parsed['tag'] ?? '') !== '' && strtolower((string) $parsed['tag']) !== 'latest') {
-            $remoteVersion = (string) $parsed['tag'];
+        $remoteVersionRaw = (string) ($remoteMeta['version'] ?? '');
+        $remoteCreated = (string) ($remoteMeta['created'] ?? '');
+        if ($remoteVersionRaw === '' && ($parsed['tag'] ?? '') !== '' && strtolower((string) $parsed['tag']) !== 'latest') {
+            $remoteVersionRaw = (string) $parsed['tag'];
         }
+        $localVersion = ManifestClient::versionWithDate($localVersionRaw, $localCreated);
+        $remoteVersion = ManifestClient::versionWithDate($remoteVersionRaw, $remoteCreated);
         if ($remote === null) {
             return $this->item($service, $image, 'unknown', $local, null, $localVersion, '', 'Impossible de joindre le registre');
         }
 
         $status = hash_equals($local, $remote) ? 'fresh' : 'update';
-        // For updates with same tag/version label, still show tag so the name is clear
-        if ($status === 'update' && $remoteVersion === '' && $localVersion !== '') {
-            $remoteVersion = 'nouveau build';
+        // Floating tag (same label both sides) → ensure proposed still shows a distinct build date
+        if ($status === 'update') {
+            if ($remoteVersion === '' && $localVersion !== '') {
+                $remoteVersion = 'nouveau build';
+            } elseif ($remoteVersion !== '' && $remoteVersion === $localVersion) {
+                $remoteVersion = ManifestClient::versionWithDate(
+                    $remoteVersionRaw !== '' ? $remoteVersionRaw : (string) ($parsed['tag'] ?? 'latest'),
+                    $remoteCreated !== '' ? $remoteCreated : null,
+                );
+                if ($remoteVersion === $localVersion || $remoteCreated === '') {
+                    $remoteVersion = ($remoteVersionRaw !== '' ? $remoteVersionRaw : 'build') . ' (nouveau)';
+                }
+            }
         }
         $item = $this->item($service, $image, $status, $local, $remote, $localVersion, $remoteVersion);
         $this->writeImageStatusCache($image, $local, $item);
@@ -560,20 +574,21 @@ final class ImageUpdateChecker
 
     /**
      * @param array{host:string,port:?int,repository:string,tag:string,digest:?string} $parsed
-     * @return array{digest:?string,version:string}
+     * @return array{digest:?string,version:string,created:string}
      */
     private function localImageInfo(DockerClient $docker, string $image, array $parsed): array
     {
         try {
             $info = $docker->json('GET', '/images/' . rawurlencode($image) . '/json');
         } catch (\Throwable) {
-            return ['digest' => null, 'version' => ''];
+            return ['digest' => null, 'version' => '', 'created' => ''];
         }
         $labels = $info['Config']['Labels'] ?? $info['ContainerConfig']['Labels'] ?? null;
         if (!is_array($labels)) {
             $labels = null;
         }
         $version = ManifestClient::versionFromLabels($labels, (string) ($parsed['tag'] ?? ''));
+        $created = trim((string) ($info['Created'] ?? ''));
         $digest = null;
         $repoDigests = $info['RepoDigests'] ?? [];
         if (is_array($repoDigests)) {
@@ -609,7 +624,7 @@ final class ImageUpdateChecker
             $id = strtolower((string) ($info['Id'] ?? ''));
             $digest = str_starts_with($id, 'sha256:') ? $id : null;
         }
-        return ['digest' => $digest, 'version' => $version];
+        return ['digest' => $digest, 'version' => $version, 'created' => $created];
     }
 
     /** @param array{host:string,port:?int,repository:string,tag:string,digest:?string} $parsed */
@@ -677,8 +692,8 @@ final class ImageUpdateChecker
      * @param callable():?string $fetch
      */
     /**
-     * @param callable():array{digest:?string,version?:string,tag?:string} $fetch
-     * @return array{digest:?string,version:string}
+     * @param callable():array{digest:?string,version?:string,tag?:string,created?:string} $fetch
+     * @return array{digest:?string,version:string,created:string}
      */
     private function cachedRemoteMeta(string $key, callable $fetch, bool $forceRefresh = false): array
     {
@@ -694,6 +709,7 @@ final class ImageUpdateChecker
                     return [
                         'digest' => $positive ? $d : null,
                         'version' => (string) ($data['v'] ?? ''),
+                        'created' => (string) ($data['c'] ?? ''),
                     ];
                 }
             }
@@ -701,6 +717,7 @@ final class ImageUpdateChecker
         $meta = $fetch();
         $digest = is_array($meta) ? ($meta['digest'] ?? null) : null;
         $version = is_array($meta) ? (string) ($meta['version'] ?? '') : '';
+        $created = is_array($meta) ? (string) ($meta['created'] ?? '') : '';
         if (($digest === null || $digest === '') && !$forceRefresh && is_file($file)) {
             $raw = @file_get_contents($file);
             $prev = is_string($raw) ? json_decode($raw, true) : null;
@@ -709,6 +726,7 @@ final class ImageUpdateChecker
                 return [
                     'digest' => $prevD,
                     'version' => (string) ($prev['v'] ?? $version),
+                    'created' => (string) ($prev['c'] ?? $created),
                 ];
             }
         }
@@ -716,10 +734,12 @@ final class ImageUpdateChecker
             't' => time(),
             'd' => $digest,
             'v' => $version,
+            'c' => $created,
         ], JSON_UNESCAPED_SLASHES));
         return [
             'digest' => is_string($digest) && $digest !== '' ? $digest : null,
             'version' => $version,
+            'created' => $created,
         ];
     }
 
