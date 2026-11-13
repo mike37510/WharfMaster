@@ -4,6 +4,14 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.4] — 2026-11-13
+
+### Corrigé
+- **MàJ image conteneur** : recreate Docker échouait (`ExposedPorts` envoyé en tableau `[]` au lieu d’un objet) — pastille orange / upgrade depuis la liste Conteneurs
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.4`**
+
 ## [2.3.3] — 2026-11-13
 
 ### Ajouté

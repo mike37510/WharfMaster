@@ -192,6 +192,12 @@ final class ContainerRecreate
 
         $image = (string) ($inspect['Config']['Image'] ?? '');
         $body = $config;
+        // Inspect-only / read-only fields must not be replayed on create
+        foreach (['Hostname', 'Domainname'] as $keepEmptyOk) {
+            if (array_key_exists($keepEmptyOk, $body) && $body[$keepEmptyOk] === '') {
+                unset($body[$keepEmptyOk]);
+            }
+        }
         $body['Image'] = $image;
         // Avoid stale network attachments conflicting with NetworkingConfig
         if ($networks !== [] && is_array($hostConfig)) {
@@ -201,7 +207,100 @@ final class ContainerRecreate
         if ($networks !== []) {
             $body['NetworkingConfig'] = ['EndpointsConfig' => $networks];
         }
+        return $this->normalizeCreateMaps($body);
+    }
+
+    /**
+     * json_decode(…, true) turns Docker JSON {} into []. Go/Docker reject arrays
+     * for ExposedPorts / Volumes / PortBindings (must be objects/maps).
+     *
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>
+     */
+    private function normalizeCreateMaps(array $body): array
+    {
+        $body['ExposedPorts'] = $this->objectMapOfEmptyStructs($body['ExposedPorts'] ?? null);
+        if ($body['ExposedPorts'] === null) {
+            unset($body['ExposedPorts']);
+        }
+
+        $body['Volumes'] = $this->objectMapOfEmptyStructs($body['Volumes'] ?? null);
+        if ($body['Volumes'] === null) {
+            unset($body['Volumes']);
+        }
+
+        if (isset($body['Labels']) && is_array($body['Labels']) && $body['Labels'] === []) {
+            unset($body['Labels']);
+        }
+
+        if (isset($body['HostConfig']) && is_array($body['HostConfig'])) {
+            $hc = &$body['HostConfig'];
+            if (isset($hc['PortBindings'])) {
+                if (!is_array($hc['PortBindings']) || $hc['PortBindings'] === [] || array_is_list($hc['PortBindings'])) {
+                    unset($hc['PortBindings']);
+                } else {
+                    foreach ($hc['PortBindings'] as $port => $bindings) {
+                        if (!is_array($bindings) || $bindings === []) {
+                            unset($hc['PortBindings'][$port]);
+                            continue;
+                        }
+                        $fixed = [];
+                        foreach ($bindings as $b) {
+                            if (!is_array($b) || $b === []) {
+                                continue;
+                            }
+                            if (!array_key_exists('HostPort', $b) && !array_key_exists('HostIp', $b)) {
+                                continue;
+                            }
+                            $obj = new \stdClass();
+                            foreach ($b as $k => $v) {
+                                if (is_string($k)) {
+                                    $obj->{$k} = $v;
+                                }
+                            }
+                            $fixed[] = $obj;
+                        }
+                        if ($fixed === []) {
+                            unset($hc['PortBindings'][$port]);
+                        } else {
+                            $hc['PortBindings'][$port] = $fixed;
+                        }
+                    }
+                    if ($hc['PortBindings'] === []) {
+                        unset($hc['PortBindings']);
+                    }
+                }
+            }
+            foreach (['StorageOpt', 'Sysctls', 'Tmpfs', 'BlkioDeviceReadBps', 'BlkioDeviceWriteBps', 'BlkioDeviceReadIOps', 'BlkioDeviceWriteIOps'] as $mapKey) {
+                if (isset($hc[$mapKey]) && is_array($hc[$mapKey]) && $hc[$mapKey] === []) {
+                    unset($hc[$mapKey]);
+                }
+            }
+            if (isset($hc['RestartPolicy']) && is_array($hc['RestartPolicy']) && ($hc['RestartPolicy']['Name'] ?? '') === '' && empty($hc['RestartPolicy']['MaximumRetryCount'])) {
+                unset($hc['RestartPolicy']);
+            }
+            unset($hc);
+        }
+
         return $body;
+    }
+
+    /**
+     * @return array<string, \stdClass>|null null = omit field
+     */
+    private function objectMapOfEmptyStructs(mixed $map): ?array
+    {
+        if (!is_array($map) || $map === [] || array_is_list($map)) {
+            return null;
+        }
+        $out = [];
+        foreach ($map as $key => $_) {
+            if (!is_string($key) || $key === '') {
+                continue;
+            }
+            $out[$key] = new \stdClass();
+        }
+        return $out === [] ? null : $out;
     }
 
     private function tempName(string $name): string

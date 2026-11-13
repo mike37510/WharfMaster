@@ -9,7 +9,7 @@
 services:
   wharfmaster:
     build: .
-    image: wharfmaster:2.3.3
+    image: wharfmaster:2.3.4
     pull_policy: build
     container_name: wharfmaster
     restart: unless-stopped
@@ -19,7 +19,7 @@ services:
       DOCKER_SOCKET: /var/run/docker.sock
       DOCKER_API_VERSION: ${DOCKER_API_VERSION:-v1.45}
       WHARFMASTER_VAR: /var/www/html/var
-      # WHARFMASTER_AGENT_IMAGE: ghcr.io/mike37510/wharfmaster-agent:2.3.3
+      # WHARFMASTER_AGENT_IMAGE: ghcr.io/mike37510/wharfmaster-agent:2.3.4
     volumes:
       # Persistance : SQLite, stacks Compose, Dockerfiles, JWT
       - wharfmaster-data:/var/www/html/var
