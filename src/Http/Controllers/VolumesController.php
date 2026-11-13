@@ -17,15 +17,19 @@ final class VolumesController extends BaseController
         if ($deny) {
             return $deny;
         }
-        // Refresh stack-sourced binds + binds from any running container (Compose hors app inclus)
+        // Stack binds (WharfMaster) pour tous ; découverte runtime (Compose hors app) = admin uniquement
         $this->syncBindVolumesFromEndpointStacks($endpointId);
-        try {
-            $this->syncBindVolumesFromContainers($endpointId, $this->dockerForEndpoint($ep));
-        } catch (\Throwable) {
-            // listing still works with previously synced rows
+        $isAdmin = Ownership::isGlobalAdmin($user)
+            || $this->endpointAcl->can($user, $endpointId, EndpointAcl::ADMIN);
+        if ($isAdmin) {
+            try {
+                $this->syncBindVolumesFromContainers($endpointId, $this->dockerForEndpoint($ep));
+            } catch (\Throwable) {
+                // listing still works with previously synced rows
+            }
         }
         $rows = $this->repo->listBindVolumes($endpointId);
-        if (!Ownership::isGlobalAdmin($user) && !$this->endpointAcl->can($user, $endpointId, EndpointAcl::ADMIN)) {
+        if (!$isAdmin) {
             $stacks = $this->repo->listStacksForUser(
                 Ownership::username($user),
                 false,
@@ -43,6 +47,10 @@ final class VolumesController extends BaseController
             }
             $uname = strtolower(Ownership::username($user));
             $rows = array_values(array_filter($rows, static function (array $r) use ($stackIds, $stackNames, $uname): bool {
+                // Découverte auto (runtime) réservée aux admins
+                if (strtolower((string) ($r['source'] ?? '')) === 'runtime') {
+                    return false;
+                }
                 if (strcasecmp((string) ($r['created_by'] ?? ''), $uname) === 0) {
                     return true;
                 }
@@ -51,7 +59,6 @@ final class VolumesController extends BaseController
                     return true;
                 }
                 $sn = strtolower((string) ($r['stack_name'] ?? ''));
-                // runtime binds from a Compose project the user owns
                 return $sn !== '' && isset($stackNames[$sn]);
             }));
         }

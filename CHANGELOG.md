@@ -4,6 +4,9 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+### Corrigé
+- **Volumes** : la découverte automatique (binds / volumes des conteneurs hors app) est réservée aux **administrateurs**
+
 ## [2.3.5] — 2026-11-13
 
 ### Amélioré

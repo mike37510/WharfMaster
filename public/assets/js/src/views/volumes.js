@@ -161,7 +161,10 @@ export function install() {
         bag.dockerAll('/volumes', { pick: (d) => d?.Volumes || [] }),
         bag.dockerAll('/containers/json?all=true'),
       ]);
-      volumes = bag.mergeVolumeLists(aggVol.items, bag.bindsFromContainers(aggCtr.items));
+      // Découverte auto des binds = admin uniquement
+      volumes = isAdmin
+        ? bag.mergeVolumeLists(aggVol.items, bag.bindsFromContainers(aggCtr.items))
+        : (aggVol.items || []);
       containers = aggCtr.items;
       partial = aggVol.failed > 0 || aggCtr.failed > 0;
     } else {
@@ -171,10 +174,10 @@ export function install() {
         bag.Api.bindVolumes().catch(() => ({ Volumes: [] })),
       ]);
       containers = ctrs || [];
-      const bindList = [
-        ...(binds?.Volumes || []),
-        ...bag.bindsFromContainers(containers),
-      ];
+      // API filtre déjà runtime pour non-admin ; ne pas réinjecter depuis les Mounts
+      const bindList = isAdmin
+        ? [...(binds?.Volumes || []), ...bag.bindsFromContainers(containers)]
+        : (binds?.Volumes || []).filter((b) => String(b?.Source || '').toLowerCase() !== 'runtime');
       volumes = bag.mergeVolumeLists(data.Volumes || [], bindList);
     }
 

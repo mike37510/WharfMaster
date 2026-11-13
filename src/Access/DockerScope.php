@@ -336,72 +336,16 @@ final class DockerScope
         if (!is_array($vols)) {
             $vols = [];
         }
-        // Volumes montés par un conteneur accessible (Compose hors WharfMaster inclus)
-        $mountedByAccessible = $this->volumeNamesFromAccessibleContainers($user, $ownedStacks, $sharedKeys);
-        $data['Volumes'] = array_values(array_filter($vols, function ($v) use ($user, $ownedStacks, $sharedKeys, $mountedByAccessible) {
+        // Non-admin : ownership / partage uniquement (pas de découverte auto depuis les Mounts)
+        $data['Volumes'] = array_values(array_filter($vols, function ($v) use ($user, $ownedStacks, $sharedKeys) {
             $labels = is_array($v['Labels'] ?? null) ? $v['Labels'] : [];
             if (Ownership::ownsDockerResource($labels, $user, $ownedStacks)) {
                 return true;
             }
             $name = (string) ($v['Name'] ?? '');
-            if ($name !== '' && isset($mountedByAccessible[strtolower($name)])) {
-                return true;
-            }
             return $this->matchesSharedKey($sharedKeys, $name, [$name]);
         }));
         return Response::json($data);
-    }
-
-    /**
-     * Named volumes referenced by containers the user can already see.
-     *
-     * @param array{id:int,username:string,role:int} $user
-     * @param list<string> $ownedStacks
-     * @param list<string> $sharedKeys
-     * @return array<string, true> lowercase volume name => true
-     */
-    private function volumeNamesFromAccessibleContainers(array $user, array $ownedStacks, array $sharedKeys): array
-    {
-        try {
-            $res = $this->docker->request('GET', '/containers/json', null, [], ['all' => 'true']);
-        } catch (\Throwable) {
-            return [];
-        }
-        if (($res['status'] ?? 500) >= 400) {
-            return [];
-        }
-        $list = json_decode((string) ($res['body'] ?? ''), true);
-        if (!is_array($list)) {
-            return [];
-        }
-        $out = [];
-        foreach ($list as $c) {
-            if (!is_array($c)) {
-                continue;
-            }
-            $labels = is_array($c['Labels'] ?? null) ? $c['Labels'] : [];
-            $names = is_array($c['Names'] ?? null) ? $c['Names'] : [];
-            $id = (string) ($c['Id'] ?? '');
-            $ok = Ownership::ownsDockerResource($labels, $user, $ownedStacks)
-                || $this->matchesSharedKey($sharedKeys, $id, $names);
-            if (!$ok) {
-                continue;
-            }
-            $mounts = is_array($c['Mounts'] ?? null) ? $c['Mounts'] : [];
-            foreach ($mounts as $m) {
-                if (!is_array($m)) {
-                    continue;
-                }
-                if (strtolower((string) ($m['Type'] ?? '')) !== 'volume') {
-                    continue;
-                }
-                $vn = trim((string) ($m['Name'] ?? ''));
-                if ($vn !== '') {
-                    $out[strtolower($vn)] = true;
-                }
-            }
-        }
-        return $out;
     }
 
     /** @param array{id:int,username:string,role:int} $user */
@@ -447,10 +391,6 @@ final class DockerScope
             return null;
         }
         if ($this->matchesSharedKey($sharedKeys, $name, [$name])) {
-            return null;
-        }
-        $mounted = $this->volumeNamesFromAccessibleContainers($user, $ownedStacks, $sharedKeys);
-        if ($name !== '' && isset($mounted[strtolower($name)])) {
             return null;
         }
         return Response::error('Accès refusé à ce volume', 403);

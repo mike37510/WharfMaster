@@ -5908,7 +5908,7 @@ ${tip}`;
           bag.dockerAll("/volumes", { pick: (d) => d?.Volumes || [] }),
           bag.dockerAll("/containers/json?all=true")
         ]);
-        volumes = bag.mergeVolumeLists(aggVol.items, bag.bindsFromContainers(aggCtr.items));
+        volumes = isAdmin ? bag.mergeVolumeLists(aggVol.items, bag.bindsFromContainers(aggCtr.items)) : aggVol.items || [];
         containers = aggCtr.items;
         partial = aggVol.failed > 0 || aggCtr.failed > 0;
       } else {
@@ -5918,10 +5918,7 @@ ${tip}`;
           bag.Api.bindVolumes().catch(() => ({ Volumes: [] }))
         ]);
         containers = ctrs || [];
-        const bindList = [
-          ...binds?.Volumes || [],
-          ...bag.bindsFromContainers(containers)
-        ];
+        const bindList = isAdmin ? [...binds?.Volumes || [], ...bag.bindsFromContainers(containers)] : (binds?.Volumes || []).filter((b) => String(b?.Source || "").toLowerCase() !== "runtime");
         volumes = bag.mergeVolumeLists(data.Volumes || [], bindList);
       }
       const usageByKey = /* @__PURE__ */ new Map();
