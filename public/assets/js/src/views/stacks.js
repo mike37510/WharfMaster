@@ -164,17 +164,22 @@ export function install() {
     return '—';
   }
 
-  /** One-line actuel → proposé (nom + n° de version). */
+  /** One-line actuel → proposé (nom + n° de version, ou explication « même tag »). */
   bag.formatImageUpdateVersions = function formatImageUpdateVersions(u) {
     if (!u || typeof u !== 'object') return '';
-    if (u.Detail && / : .+ → | : à jour| : épinglée/.test(String(u.Detail))) {
+    if (u.Detail && /même tag| : .+ → | : à jour| : épinglée/.test(String(u.Detail))) {
       return String(u.Detail);
     }
     const name = String(u.ImageName || '').trim() || String(u.Image || '').replace(/:.*$/, '');
     const cur = String(u.LocalVersion || '').trim() || '—';
     const next = String(u.RemoteVersion || '').trim() || '—';
     const st = u.Status || 'unknown';
-    if (st === 'update') return `${name || 'image'} : ${cur} → ${next}`;
+    if (st === 'update') {
+      if (/nouveau build/i.test(next) || /installé/i.test(cur)) {
+        return `${name || 'image'} : ${cur} → ${next}`;
+      }
+      return `${name || 'image'} : ${cur} → ${next}`;
+    }
     if (st === 'fresh') return `${name || 'image'} : à jour (${cur})`;
     if (st === 'pinned') return `${name || 'image'} : épinglée (${cur})`;
     if (u.Detail) return String(u.Detail);

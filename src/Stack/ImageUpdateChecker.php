@@ -467,30 +467,55 @@ final class ImageUpdateChecker
         if ($remoteVersionRaw === '' && ($parsed['tag'] ?? '') !== '' && strtolower((string) $parsed['tag']) !== 'latest') {
             $remoteVersionRaw = (string) $parsed['tag'];
         }
-        $localVersion = ManifestClient::versionWithDate($localVersionRaw, $localCreated);
-        $remoteVersion = ManifestClient::versionWithDate($remoteVersionRaw, $remoteCreated);
         if ($remote === null) {
+            $localVersion = ManifestClient::versionWithDate($localVersionRaw, $localCreated);
             return $this->item($service, $image, 'unknown', $local, null, $localVersion, '', 'Impossible de joindre le registre');
         }
 
         $status = hash_equals($local, $remote) ? 'fresh' : 'update';
-        // Floating tag (same label both sides) → ensure proposed still shows a distinct build date
-        if ($status === 'update') {
-            if ($remoteVersion === '' && $localVersion !== '') {
+        $tag = (string) ($parsed['tag'] ?? '');
+        $floating = $this->isSameFloatingVersion($localVersionRaw, $remoteVersionRaw, $tag);
+
+        if ($status === 'update' && $floating) {
+            // Same tag (ex. pg16 / latest) but newer digest on the registry — explain clearly
+            $localDate = ManifestClient::shortDate($localCreated);
+            $remoteDate = ManifestClient::shortDate($remoteCreated);
+            $tagLabel = $tag !== '' ? $tag : ($localVersionRaw !== '' ? $localVersionRaw : 'latest');
+            $localVersion = $localDate !== ''
+                ? $tagLabel . ' · installé le ' . $localDate
+                : $tagLabel . ' · installé';
+            $remoteVersion = $remoteDate !== ''
+                ? 'nouveau build · ' . $remoteDate
+                : 'nouveau build (même tag)';
+            $detail = $imageName . ' : même tag « ' . $tagLabel . ' » — un build plus récent est sur le registre'
+                . ($remoteDate !== '' ? ' (' . $remoteDate . ')' : '')
+                . ($localDate !== '' ? ', vous avez celui du ' . $localDate : '');
+            $item = $this->item($service, $image, $status, $local, $remote, $localVersion, $remoteVersion, $detail);
+        } else {
+            $localVersion = ManifestClient::versionWithDate($localVersionRaw, $localCreated);
+            $remoteVersion = ManifestClient::versionWithDate($remoteVersionRaw, $remoteCreated);
+            if ($status === 'update' && $remoteVersion === '' && $localVersion !== '') {
                 $remoteVersion = 'nouveau build';
-            } elseif ($remoteVersion !== '' && $remoteVersion === $localVersion) {
-                $remoteVersion = ManifestClient::versionWithDate(
-                    $remoteVersionRaw !== '' ? $remoteVersionRaw : (string) ($parsed['tag'] ?? 'latest'),
-                    $remoteCreated !== '' ? $remoteCreated : null,
-                );
-                if ($remoteVersion === $localVersion || $remoteCreated === '') {
-                    $remoteVersion = ($remoteVersionRaw !== '' ? $remoteVersionRaw : 'build') . ' (nouveau)';
-                }
             }
+            $item = $this->item($service, $image, $status, $local, $remote, $localVersion, $remoteVersion);
         }
-        $item = $this->item($service, $image, $status, $local, $remote, $localVersion, $remoteVersion);
         $this->writeImageStatusCache($image, $local, $item);
         return $item;
+    }
+
+    /** True when local/remote resolve to the same floating tag (no distinct semver). */
+    private function isSameFloatingVersion(string $localRaw, string $remoteRaw, string $tag): bool
+    {
+        $a = strtolower(trim($localRaw));
+        $b = strtolower(trim($remoteRaw));
+        $t = strtolower(trim($tag));
+        if ($a !== '' && $a === $b) {
+            return true;
+        }
+        if ($t !== '' && ($a === '' || $a === $t) && ($b === '' || $b === $t)) {
+            return true;
+        }
+        return false;
     }
 
     /**

@@ -7103,14 +7103,19 @@ ${tip}`;
     };
     bag.formatImageUpdateVersions = function formatImageUpdateVersions(u) {
       if (!u || typeof u !== "object") return "";
-      if (u.Detail && / : .+ → | : à jour| : épinglée/.test(String(u.Detail))) {
+      if (u.Detail && /même tag| : .+ → | : à jour| : épinglée/.test(String(u.Detail))) {
         return String(u.Detail);
       }
       const name = String(u.ImageName || "").trim() || String(u.Image || "").replace(/:.*$/, "");
       const cur = String(u.LocalVersion || "").trim() || "\u2014";
       const next = String(u.RemoteVersion || "").trim() || "\u2014";
       const st = u.Status || "unknown";
-      if (st === "update") return `${name || "image"} : ${cur} \u2192 ${next}`;
+      if (st === "update") {
+        if (/nouveau build/i.test(next) || /installé/i.test(cur)) {
+          return `${name || "image"} : ${cur} \u2192 ${next}`;
+        }
+        return `${name || "image"} : ${cur} \u2192 ${next}`;
+      }
       if (st === "fresh") return `${name || "image"} : \xE0 jour (${cur})`;
       if (st === "pinned") return `${name || "image"} : \xE9pingl\xE9e (${cur})`;
       if (u.Detail) return String(u.Detail);
