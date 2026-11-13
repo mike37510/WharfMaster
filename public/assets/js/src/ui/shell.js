@@ -191,10 +191,14 @@ export function install() {
 
   /**
    * Multi-select + mass delete for list tables.
+   * Continues after individual failures; optional second pass for deps (images).
    * @param {{
    *   enabled: boolean,
    *   confirmOne?: (id: string) => string,
    *   confirmMany?: (n: number) => string,
+   *   labelOne?: (id: string) => string,
+   *   formatError?: (id: string, label: string, err: Error) => string,
+   *   retryFailed?: boolean,
    *   deleteOne: (id: string) => Promise<void>,
    *   reload: () => (void|Promise<void>),
    * }} opts
@@ -215,6 +219,27 @@ export function install() {
     const selected = () => [...table.querySelectorAll('input.bulk-check:checked:not(:disabled)')]
       .map((c) => c.value)
       .filter(Boolean);
+
+    const labelFor = (id) => {
+      if (typeof opts.labelOne === 'function') {
+        const custom = opts.labelOne(id);
+        if (custom) return custom;
+      }
+      const row = table.querySelector(`tr[data-resource-id="${CSS.escape(id)}"]`);
+      const name = row?.dataset?.resourceName || '';
+      return name && name !== '<none>' ? name : (bag.shortId(id) || id);
+    };
+
+    const formatError = (id, err) => {
+      const label = labelFor(id);
+      if (typeof opts.formatError === 'function') {
+        return opts.formatError(id, label, err);
+      }
+      let msg = String(err?.message || err || 'échec');
+      // Prefer human label over raw sha256 in Docker messages
+      msg = msg.replace(/sha256:[a-f0-9]{12,}/gi, label);
+      return `${label} — ${msg}`;
+    };
 
     const sync = () => {
       const ids = selected();
@@ -254,16 +279,30 @@ export function install() {
       if (!window.confirm(msg)) return;
       const focus = { y: window.scrollY || window.pageYOffset || 0, id: '', name: '' };
       const errors = [];
-      for (const id of ids) {
-        try {
-          await opts.deleteOne(id);
-        } catch (err) {
-          errors.push(`${id}: ${err.message || err}`);
+      let ok = 0;
+      let pending = [...ids];
+      const passes = opts.retryFailed ? 2 : 1;
+      for (let pass = 0; pass < passes; pass++) {
+        const retry = [];
+        for (const id of pending) {
+          try {
+            await opts.deleteOne(id);
+            ok += 1;
+          } catch (err) {
+            // Skip failure and continue; optional second pass for deps (ex. parent image)
+            if (pass < passes - 1) retry.push(id);
+            else errors.push(formatError(id, err));
+          }
         }
+        pending = retry;
+        if (!pending.length) break;
       }
       if (errors.length) {
+        const head = ok > 0
+          ? `${ok} supprimé(s), ${errors.length} échec(s) (les autres ont été traités) :`
+          : `Aucune suppression — ${errors.length} échec(s) :`;
         window.alert(
-          `Certaines suppressions ont échoué :\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? '\n…' : ''}`,
+          `${head}\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? '\n…' : ''}`,
         );
       }
       bag.rememberListFocus(focus);

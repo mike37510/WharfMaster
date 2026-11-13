@@ -796,15 +796,22 @@ export function install() {
   }
 
   bag.loadContainerUpdateIndicators = async function loadContainerUpdateIndicators(refresh = false) {
+    if (!refresh) bag.paintCachedUpdateIndicators('containers', 'data-cupd');
     try {
       const data = await bag.Api.containerUpdates(!!refresh);
       const map = data?.Updates || {};
+      bag.writeImageUpdateCache('containers', map);
+      const fromCache = !!data?.FromCache;
+      const checkedAt = Number(data?.CheckedAt || 0);
       Object.keys(map).forEach((id) => {
         const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
         if (!slot) return;
         const u = map[id] || {};
         let title = u.Detail || u.Error || 'Aucun contrôle';
         if (u.Image) title = `${u.Image}\n${title}`;
+        if (fromCache && checkedAt) {
+          title += `\n(cache · vérifié ${new Date(checkedAt * 1000).toLocaleString()})`;
+        }
         slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
           action: 'container',
           id,

@@ -39,14 +39,18 @@ final class ContainersController extends BaseController
                 }
                 $filtered[] = $c;
             }
-            $updates = $this->imageUpdates->checkContainers(
+            $batch = $this->imageUpdates->checkContainers(
                 $filtered,
                 $docker,
                 $this->registriesWithPasswordsForUser($user),
                 $force,
+                $endpointId,
             );
             return Response::json([
-                'Updates' => $updates,
+                'Updates' => $batch['Updates'],
+                'FromCache' => !empty($batch['FromCache']),
+                'CheckedAt' => (int) ($batch['CheckedAt'] ?? 0),
+                'ExpiresAt' => (int) ($batch['ExpiresAt'] ?? 0),
                 'CacheTtl' => ImageUpdateChecker::STACK_CACHE_TTL,
                 'Forced' => $force,
             ]);
@@ -120,6 +124,7 @@ final class ContainersController extends BaseController
                 ? $this->imageUpdates->registryCredsForImage($image, $this->registriesWithPasswordsForUser($user))
                 : [];
             $result = (new ContainerRecreate($docker))->upgrade($containerId, $pull, $creds);
+            $this->imageUpdates->invalidateContainers($endpointId);
             $this->audit(
                 $user,
                 'container.update_image',

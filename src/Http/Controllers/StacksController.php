@@ -263,6 +263,7 @@ final class StacksController extends BaseController
                 (string) $user['username'],
             );
             $this->imageUpdates->invalidateStack((int) ($row['id'] ?? 0));
+            $this->imageUpdates->invalidateContainers($endpointId);
         } catch (\Throwable $e) {
             if ($deployedOnAgent && is_array($ep ?? null)) {
                 try {
@@ -349,6 +350,7 @@ final class StacksController extends BaseController
             $this->repo->setStackStatus($id, 1);
             $row = $this->repo->getStack($id) ?? $row;
             $this->imageUpdates->invalidateStack($id);
+            $this->imageUpdates->invalidateContainers((int) ($stack['endpoint_id'] ?? 0));
         } catch (\Throwable $e) {
             return Response::error($e->getMessage(), 500);
         }
@@ -393,6 +395,7 @@ final class StacksController extends BaseController
             $this->repo->pruneStackBindVolumes($id, []);
             $this->repo->deleteStack($id);
             $this->imageUpdates->invalidateStack($id);
+            $this->imageUpdates->invalidateContainers((int) ($stack['endpoint_id'] ?? 0));
         } catch (\Throwable $e) {
             return Response::error($e->getMessage(), 500);
         }

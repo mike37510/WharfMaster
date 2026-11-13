@@ -17,8 +17,11 @@ use App\Registry\ManifestClient;
  */
 final class ImageUpdateChecker
 {
-    /** Stack update-status cache TTL (seconds). */
+    /** Stack / image update-status cache TTL (seconds). */
     public const STACK_CACHE_TTL = 86400; // 24 h
+
+    /** Short TTL for failed registry probes (do not lock « unknown » for a full day). */
+    public const NEGATIVE_CACHE_TTL = 600; // 10 min
 
     private ManifestClient $manifests;
 
@@ -58,13 +61,16 @@ final class ImageUpdateChecker
                 && ($cached['fingerprint'] ?? '') === $fp
                 && isset($cached['t'], $cached['result'])
                 && is_array($cached['result'])
-                && (time() - (int) $cached['t']) < self::STACK_CACHE_TTL
             ) {
-                $result = $cached['result'];
-                $result['FromCache'] = true;
-                $result['CheckedAt'] = (int) $cached['t'];
-                $result['ExpiresAt'] = (int) $cached['t'] + self::STACK_CACHE_TTL;
-                return $result;
+                $cachedStatus = (string) ($cached['result']['Status'] ?? 'unknown');
+                $ttl = $cachedStatus === 'unknown' ? self::NEGATIVE_CACHE_TTL : self::STACK_CACHE_TTL;
+                if ((time() - (int) $cached['t']) < $ttl) {
+                    $result = $cached['result'];
+                    $result['FromCache'] = true;
+                    $result['CheckedAt'] = (int) $cached['t'];
+                    $result['ExpiresAt'] = (int) $cached['t'] + $ttl;
+                    return $result;
+                }
             }
         }
 
@@ -97,6 +103,7 @@ final class ImageUpdateChecker
         }
 
         $now = time();
+        $ttl = $status === 'unknown' ? self::NEGATIVE_CACHE_TTL : self::STACK_CACHE_TTL;
         $result = [
             'Status' => $status,
             'UpdateCount' => $updateCount,
@@ -104,8 +111,9 @@ final class ImageUpdateChecker
             'Images' => $results,
             'FromCache' => false,
             'CheckedAt' => $now,
-            'ExpiresAt' => $now + self::STACK_CACHE_TTL,
+            'ExpiresAt' => $now + $ttl,
         ];
+        // Always persist: fresh/update for 24 h, unknown only briefly (retry soon)
         @file_put_contents($cacheFile, json_encode([
             't' => $now,
             'fingerprint' => $fp,
@@ -129,6 +137,15 @@ final class ImageUpdateChecker
         }
     }
 
+    /** Drop cached container update batch for a node (after image upgrade / recreate). */
+    public function invalidateContainers(int $endpointId): void
+    {
+        $file = $this->containersCacheFile($endpointId);
+        if (is_file($file)) {
+            @unlink($file);
+        }
+    }
+
     /**
      * Check a single image reference (containers, ad-hoc).
      *
@@ -146,18 +163,47 @@ final class ImageUpdateChecker
     }
 
     /**
-     * Batch-check container image refs. Dedupes by image string.
+     * Batch-check container image refs (dedupe by image). Result cached 24 h per node.
      *
      * @param list<array{Id?:string,Names?:list<string>|string,Image?:string,Name?:string}> $containers
      * @param list<array<string, mixed>> $registries
-     * @return array<string, array{Status:string,UpdateCount:int,Checked:int,Image:string,Detail:string,LocalDigest:?string,RemoteDigest:?string}>
+     * @return array{
+     *   Updates: array<string, array{Status:string,UpdateCount:int,Checked:int,Image:string,Detail:string,LocalDigest:?string,RemoteDigest:?string}>,
+     *   FromCache: bool,
+     *   CheckedAt: int,
+     *   ExpiresAt: int
+     * }
      */
     public function checkContainers(
         array $containers,
         DockerClient $docker,
         array $registries,
         bool $forceRefresh = false,
+        int $endpointId = 0,
     ): array {
+        $fp = $this->containersFingerprint($containers);
+        $cacheFile = $endpointId > 0 ? $this->containersCacheFile($endpointId) : '';
+
+        if (!$forceRefresh && $cacheFile !== '' && is_file($cacheFile)) {
+            $raw = @file_get_contents($cacheFile);
+            $cached = is_string($raw) ? json_decode($raw, true) : null;
+            if (
+                is_array($cached)
+                && ($cached['fingerprint'] ?? '') === $fp
+                && isset($cached['t'], $cached['updates'])
+                && is_array($cached['updates'])
+                && (time() - (int) $cached['t']) < self::STACK_CACHE_TTL
+            ) {
+                $t = (int) $cached['t'];
+                return [
+                    'Updates' => $cached['updates'],
+                    'FromCache' => true,
+                    'CheckedAt' => $t,
+                    'ExpiresAt' => $t + self::STACK_CACHE_TTL,
+                ];
+            }
+        }
+
         $byImage = [];
         $out = [];
         foreach ($containers as $c) {
@@ -205,7 +251,47 @@ final class ImageUpdateChecker
                 'RemoteDigest' => $item['RemoteDigest'] ?? null,
             ];
         }
-        return $out;
+
+        $now = time();
+        if ($cacheFile !== '') {
+            @file_put_contents($cacheFile, json_encode([
+                't' => $now,
+                'fingerprint' => $fp,
+                'updates' => $out,
+            ], JSON_UNESCAPED_SLASHES));
+        }
+
+        return [
+            'Updates' => $out,
+            'FromCache' => false,
+            'CheckedAt' => $now,
+            'ExpiresAt' => $now + self::STACK_CACHE_TTL,
+        ];
+    }
+
+    private function containersCacheFile(int $endpointId): string
+    {
+        return rtrim($this->cacheDir, '/') . '/containers-ep' . max(0, $endpointId) . '.json';
+    }
+
+    /**
+     * @param list<array{Id?:string,Image?:string}> $containers
+     */
+    private function containersFingerprint(array $containers): string
+    {
+        $parts = [];
+        foreach ($containers as $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $id = (string) ($c['Id'] ?? '');
+            if ($id === '') {
+                continue;
+            }
+            $parts[] = $id . '|' . strtolower(trim((string) ($c['Image'] ?? '')));
+        }
+        sort($parts);
+        return hash('sha256', implode("\n", $parts));
     }
 
     /**
@@ -320,6 +406,15 @@ final class ImageUpdateChecker
             return $this->item($service, $image, 'unknown', null, null, 'Image absente localement (pull requis)');
         }
 
+        // Keep previous definitive result (fresh / update) while local digest unchanged
+        if (!$forceRefresh) {
+            $cachedStatus = $this->readImageStatusCache($image, $local);
+            if ($cachedStatus !== null) {
+                $cachedStatus['Service'] = $service;
+                return $cachedStatus;
+            }
+        }
+
         $creds = $this->matchRegistry($parsed, $registries);
         $cacheKey = strtolower($parsed['host'] . '/' . $parsed['repository'] . ':' . $parsed['tag']);
         $remote = $this->cachedRemote($cacheKey, function () use ($image, $creds): ?string {
@@ -330,9 +425,79 @@ final class ImageUpdateChecker
         }
 
         if (hash_equals($local, $remote)) {
-            return $this->item($service, $image, 'fresh', $local, $remote, 'À jour');
+            $item = $this->item($service, $image, 'fresh', $local, $remote, 'À jour');
+        } else {
+            $item = $this->item($service, $image, 'update', $local, $remote, 'Nouvelle image disponible sur le registre');
         }
-        return $this->item($service, $image, 'update', $local, $remote, 'Nouvelle image disponible sur le registre');
+        $this->writeImageStatusCache($image, $local, $item);
+        return $item;
+    }
+
+    /**
+     * Cached “à jour / mise à jour” for a given image + local digest (containers + stacks).
+     *
+     * @return array{Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,Detail:string}|null
+     */
+    private function readImageStatusCache(string $image, string $localDigest): ?array
+    {
+        $file = $this->imageStatusCacheFile($image, $localDigest);
+        if (!is_file($file)) {
+            return null;
+        }
+        $raw = @file_get_contents($file);
+        $data = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($data) || !isset($data['t'], $data['item']) || !is_array($data['item'])) {
+            return null;
+        }
+        if ((time() - (int) $data['t']) >= self::STACK_CACHE_TTL) {
+            return null;
+        }
+        $status = (string) ($data['item']['Status'] ?? '');
+        if (!in_array($status, ['fresh', 'update', 'pinned'], true)) {
+            return null;
+        }
+        if (strtolower((string) ($data['local'] ?? '')) !== strtolower($localDigest)) {
+            return null;
+        }
+        return [
+            'Service' => (string) ($data['item']['Service'] ?? ''),
+            'Image' => (string) ($data['item']['Image'] ?? $image),
+            'Status' => $status,
+            'LocalDigest' => $data['item']['LocalDigest'] ?? $localDigest,
+            'RemoteDigest' => $data['item']['RemoteDigest'] ?? null,
+            'Detail' => (string) ($data['item']['Detail'] ?? ''),
+        ];
+    }
+
+    /**
+     * @param array{Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,Detail:string} $item
+     */
+    private function writeImageStatusCache(string $image, string $localDigest, array $item): void
+    {
+        $status = (string) ($item['Status'] ?? '');
+        if (!in_array($status, ['fresh', 'update', 'pinned'], true)) {
+            return;
+        }
+        $file = $this->imageStatusCacheFile($image, $localDigest);
+        @file_put_contents($file, json_encode([
+            't' => time(),
+            'image' => $image,
+            'local' => $localDigest,
+            'item' => [
+                'Service' => $item['Service'],
+                'Image' => $item['Image'],
+                'Status' => $item['Status'],
+                'LocalDigest' => $item['LocalDigest'],
+                'RemoteDigest' => $item['RemoteDigest'],
+                'Detail' => $item['Detail'],
+            ],
+        ], JSON_UNESCAPED_SLASHES));
+    }
+
+    private function imageStatusCacheFile(string $image, string $localDigest): string
+    {
+        $key = strtolower(trim($image)) . '|' . strtolower(trim($localDigest));
+        return rtrim($this->cacheDir, '/') . '/status-' . hash('sha256', $key) . '.json';
     }
 
     /**
@@ -432,18 +597,30 @@ final class ImageUpdateChecker
     private function cachedRemote(string $key, callable $fetch, bool $forceRefresh = false): ?string
     {
         $file = rtrim($this->cacheDir, '/') . '/digest-' . hash('sha256', $key) . '.json';
-        $ttl = self::STACK_CACHE_TTL;
         if (!$forceRefresh && is_file($file)) {
             $raw = @file_get_contents($file);
             $data = is_string($raw) ? json_decode($raw, true) : null;
-            if (is_array($data) && isset($data['t'], $data['d']) && (time() - (int) $data['t']) < $ttl) {
-                $d = $data['d'];
-                return is_string($d) && $d !== '' ? $d : null;
+            if (is_array($data) && isset($data['t'])) {
+                $d = $data['d'] ?? null;
+                $positive = is_string($d) && $d !== '';
+                $ttl = $positive ? self::STACK_CACHE_TTL : self::NEGATIVE_CACHE_TTL;
+                if ((time() - (int) $data['t']) < $ttl) {
+                    return $positive ? $d : null;
+                }
             }
         }
         $digest = $fetch();
+        // Keep a previous good digest if the registry briefly fails
+        if (($digest === null || $digest === '') && !$forceRefresh && is_file($file)) {
+            $raw = @file_get_contents($file);
+            $prev = is_string($raw) ? json_decode($raw, true) : null;
+            $prevD = is_array($prev) ? ($prev['d'] ?? null) : null;
+            if (is_string($prevD) && $prevD !== '') {
+                return $prevD;
+            }
+        }
         @file_put_contents($file, json_encode(['t' => time(), 'd' => $digest], JSON_UNESCAPED_SLASHES));
-        return $digest;
+        return is_string($digest) && $digest !== '' ? $digest : null;
     }
 
     /**

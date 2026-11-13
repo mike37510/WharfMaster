@@ -4,6 +4,25 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.3] — 2026-11-13
+
+### Ajouté
+- **Cache MàJ conteneurs** : résultat « à jour / mise à jour » mémorisé 24 h par nœud (comme les stacks)
+- Pastilles MàJ : réaffichage immédiat depuis le cache session au rechargement
+
+### Amélioré
+- Suppression multiple d’images : continue après un échec (2ᵉ passe pour dépendances) ; messages avec **noms/tags**, pas les SHA
+- Cache digests : les échecs registre ne restent plus bloqués 24 h (TTL court 10 min)
+- Compose : `pull_policy: build`, scheduler sans bind-mount fichier hôte
+- Captures vitrine (`site/shots`) incluses dans l’image Docker
+
+### Corrigé
+- Init admin / changement MDP : import manquant `PasswordPolicy` (« Erreur interne »)
+- Onglet Diagnostics retiré du sous-menu Paramètres
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.3`**
+
 ## [2.3.2] — 2026-11-12
 
 ### Ajouté

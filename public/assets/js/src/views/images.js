@@ -611,23 +611,50 @@ export function install() {
           bag.ensureImagesCveColumn(bag.root, refs).catch(() => {});
         }
       }
+      const labelById = new Map(
+        list.map((img) => [img.Id, (img._tagsLabel && img._tagsLabel !== '<none>' ? img._tagsLabel : bag.shortId(img.Id))]),
+      );
+      const deleteRefById = new Map(
+        list.map((img) => {
+          // Prefer a tag so Docker errors mention the name; fall back to id
+          const tag = (img._primaryTag || '').trim();
+          return [img.Id, tag || img.Id];
+        }),
+      );
+      const deleteImage = async (id) => {
+        const ref = deleteRefById.get(id) || id;
+        try {
+          await bag.Api.docker(`/images/${encodeURIComponent(ref)}?force=true`, { method: 'DELETE' });
+        } catch (err) {
+          const label = labelById.get(id) || bag.shortId(id) || id;
+          let msg = String(err?.message || err || 'échec');
+          msg = msg.replace(/sha256:[a-f0-9]{12,}/gi, label);
+          const wrapped = new Error(msg);
+          wrapped.status = err?.status;
+          wrapped.data = err?.data;
+          throw wrapped;
+        }
+      };
       bag.root.querySelectorAll('.quick-actions button[data-id]').forEach((btn) => {
         const entry = [...usageByKey.values()].find((e) => e.img.Id === btn.dataset.id);
         const used = !!(entry && entry.users.length);
+        const label = labelById.get(btn.dataset.id) || bag.shortId(btn.dataset.id);
         bag.onBusyClick(btn, async (el) => {
-          await bag.Api.docker(`/images/${encodeURIComponent(el.dataset.id)}?force=true`, { method: 'DELETE' });
+          await deleteImage(el.dataset.id);
         }, {
           confirm: used
-            ? 'Cette image est utilisée par des conteneurs. Forcer la suppression ?'
-            : 'Supprimer cette image ?',
+            ? `L’image « ${label} » est utilisée par des conteneurs. Forcer la suppression ?`
+            : `Supprimer l’image « ${label} » ?`,
           reload: true,
         });
       });
       bag.bindBulkDelete({
         enabled: true,
-        confirmOne: () => 'Supprimer cette image ?',
-        confirmMany: (n) => `Supprimer ${n} images (force) ?`,
-        deleteOne: (id) => bag.Api.docker(`/images/${encodeURIComponent(id)}?force=true`, { method: 'DELETE' }),
+        confirmOne: (id) => `Supprimer l’image « ${labelById.get(id) || bag.shortId(id)} » ?`,
+        confirmMany: (n) => `Supprimer ${n} images (force) ? Les échecs seront ignorés pour continuer.`,
+        labelOne: (id) => labelById.get(id) || bag.shortId(id),
+        retryFailed: true,
+        deleteOne: (id) => deleteImage(id),
         reload: () => bag.viewImages(),
       });
     }

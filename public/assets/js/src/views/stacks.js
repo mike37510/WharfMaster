@@ -263,10 +263,56 @@ export function install() {
     });
   }
 
+  bag.imageUpdateCacheKey = function imageUpdateCacheKey(kind) {
+    return `wm_img_upd_${kind}_${bag.Api.getEndpointId()}`;
+  }
+
+  bag.readImageUpdateCache = function readImageUpdateCache(kind) {
+    try {
+      const raw = sessionStorage.getItem(bag.imageUpdateCacheKey(kind));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bag.writeImageUpdateCache = function writeImageUpdateCache(kind, map) {
+    try {
+      sessionStorage.setItem(bag.imageUpdateCacheKey(kind), JSON.stringify(map || {}));
+    } catch (_) { /* quota / private mode */ }
+  }
+
+  /** Paint last known badges immediately (session), then refresh from API. */
+  bag.paintCachedUpdateIndicators = function paintCachedUpdateIndicators(kind, slotAttr) {
+    const map = bag.readImageUpdateCache(kind);
+    if (!map) return;
+    Object.keys(map).forEach((id) => {
+      const slot = bag.root.querySelector(`[${slotAttr}="${CSS.escape(String(id))}"]`);
+      if (!slot) return;
+      const u = map[id] || {};
+      if (!u.Status || u.Status === 'unknown') return;
+      let title = u.Detail || 'Résultat en cache';
+      if (u.Image) title = `${u.Image}\n${title}`;
+      if (kind === 'stacks' && Array.isArray(u.Images)) {
+        title = u.Images.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`).join('\n') || title;
+      }
+      title += '\n(cache local · actualisation…)';
+      slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+        action: kind === 'stacks' ? 'stack' : 'container',
+        id,
+        dotOnly: true,
+      });
+    });
+  }
+
   bag.loadStackUpdateIndicators = async function loadStackUpdateIndicators(refresh = false) {
+    if (!refresh) bag.paintCachedUpdateIndicators('stacks', 'data-upd');
     try {
       const data = await bag.Api.stackUpdates(!!refresh);
       const map = data?.Updates || {};
+      bag.writeImageUpdateCache('stacks', map);
       Object.keys(map).forEach((id) => {
         const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
         const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);

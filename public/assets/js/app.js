@@ -2103,6 +2103,24 @@
       if (!table || !btn) return;
       const visibleChecks = () => [...table.querySelectorAll("tbody tr[data-search]")].filter((tr) => tr.style.display !== "none").map((tr) => tr.querySelector("input.bulk-check")).filter((c) => c && !c.disabled);
       const selected = () => [...table.querySelectorAll("input.bulk-check:checked:not(:disabled)")].map((c) => c.value).filter(Boolean);
+      const labelFor = (id) => {
+        if (typeof opts.labelOne === "function") {
+          const custom = opts.labelOne(id);
+          if (custom) return custom;
+        }
+        const row = table.querySelector(`tr[data-resource-id="${CSS.escape(id)}"]`);
+        const name = row?.dataset?.resourceName || "";
+        return name && name !== "<none>" ? name : bag.shortId(id) || id;
+      };
+      const formatError = (id, err) => {
+        const label = labelFor(id);
+        if (typeof opts.formatError === "function") {
+          return opts.formatError(id, label, err);
+        }
+        let msg = String(err?.message || err || "\xE9chec");
+        msg = msg.replace(/sha256:[a-f0-9]{12,}/gi, label);
+        return `${label} \u2014 ${msg}`;
+      };
       const sync = () => {
         const ids = selected();
         const n = ids.length;
@@ -2138,16 +2156,27 @@
         if (!window.confirm(msg)) return;
         const focus = { y: window.scrollY || window.pageYOffset || 0, id: "", name: "" };
         const errors = [];
-        for (const id of ids) {
-          try {
-            await opts.deleteOne(id);
-          } catch (err) {
-            errors.push(`${id}: ${err.message || err}`);
+        let ok = 0;
+        let pending = [...ids];
+        const passes = opts.retryFailed ? 2 : 1;
+        for (let pass = 0; pass < passes; pass++) {
+          const retry = [];
+          for (const id of pending) {
+            try {
+              await opts.deleteOne(id);
+              ok += 1;
+            } catch (err) {
+              if (pass < passes - 1) retry.push(id);
+              else errors.push(formatError(id, err));
+            }
           }
+          pending = retry;
+          if (!pending.length) break;
         }
         if (errors.length) {
+          const head = ok > 0 ? `${ok} supprim\xE9(s), ${errors.length} \xE9chec(s) (les autres ont \xE9t\xE9 trait\xE9s) :` : `Aucune suppression \u2014 ${errors.length} \xE9chec(s) :`;
           window.alert(
-            `Certaines suppressions ont \xE9chou\xE9 :
+            `${head}
 ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           );
         }
@@ -4573,9 +4602,13 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       bag.restoreListFocus();
     };
     bag.loadContainerUpdateIndicators = async function loadContainerUpdateIndicators(refresh = false) {
+      if (!refresh) bag.paintCachedUpdateIndicators("containers", "data-cupd");
       try {
         const data = await bag.Api.containerUpdates(!!refresh);
         const map = data?.Updates || {};
+        bag.writeImageUpdateCache("containers", map);
+        const fromCache = !!data?.FromCache;
+        const checkedAt = Number(data?.CheckedAt || 0);
         Object.keys(map).forEach((id) => {
           const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
           if (!slot) return;
@@ -4583,6 +4616,10 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           let title = u.Detail || u.Error || "Aucun contr\xF4le";
           if (u.Image) title = `${u.Image}
 ${title}`;
+          if (fromCache && checkedAt) {
+            title += `
+(cache \xB7 v\xE9rifi\xE9 ${new Date(checkedAt * 1e3).toLocaleString()})`;
+          }
           slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
             action: "container",
             id,
@@ -5627,21 +5664,47 @@ ${title}`;
             });
           }
         }
+        const labelById = new Map(
+          list.map((img) => [img.Id, img._tagsLabel && img._tagsLabel !== "<none>" ? img._tagsLabel : bag.shortId(img.Id)])
+        );
+        const deleteRefById = new Map(
+          list.map((img) => {
+            const tag = (img._primaryTag || "").trim();
+            return [img.Id, tag || img.Id];
+          })
+        );
+        const deleteImage = async (id) => {
+          const ref = deleteRefById.get(id) || id;
+          try {
+            await bag.Api.docker(`/images/${encodeURIComponent(ref)}?force=true`, { method: "DELETE" });
+          } catch (err) {
+            const label = labelById.get(id) || bag.shortId(id) || id;
+            let msg = String(err?.message || err || "\xE9chec");
+            msg = msg.replace(/sha256:[a-f0-9]{12,}/gi, label);
+            const wrapped = new Error(msg);
+            wrapped.status = err?.status;
+            wrapped.data = err?.data;
+            throw wrapped;
+          }
+        };
         bag.root.querySelectorAll(".quick-actions button[data-id]").forEach((btn) => {
           const entry = [...usageByKey.values()].find((e) => e.img.Id === btn.dataset.id);
           const used = !!(entry && entry.users.length);
+          const label = labelById.get(btn.dataset.id) || bag.shortId(btn.dataset.id);
           bag.onBusyClick(btn, async (el) => {
-            await bag.Api.docker(`/images/${encodeURIComponent(el.dataset.id)}?force=true`, { method: "DELETE" });
+            await deleteImage(el.dataset.id);
           }, {
-            confirm: used ? "Cette image est utilis\xE9e par des conteneurs. Forcer la suppression ?" : "Supprimer cette image ?",
+            confirm: used ? `L\u2019image \xAB ${label} \xBB est utilis\xE9e par des conteneurs. Forcer la suppression ?` : `Supprimer l\u2019image \xAB ${label} \xBB ?`,
             reload: true
           });
         });
         bag.bindBulkDelete({
           enabled: true,
-          confirmOne: () => "Supprimer cette image ?",
-          confirmMany: (n) => `Supprimer ${n} images (force) ?`,
-          deleteOne: (id) => bag.Api.docker(`/images/${encodeURIComponent(id)}?force=true`, { method: "DELETE" }),
+          confirmOne: (id) => `Supprimer l\u2019image \xAB ${labelById.get(id) || bag.shortId(id)} \xBB ?`,
+          confirmMany: (n) => `Supprimer ${n} images (force) ? Les \xE9checs seront ignor\xE9s pour continuer.`,
+          labelOne: (id) => labelById.get(id) || bag.shortId(id),
+          retryFailed: true,
+          deleteOne: (id) => deleteImage(id),
           reload: () => bag.viewImages()
         });
       }
@@ -7114,10 +7177,53 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         }, { confirm: confirmMsg, minMs: 400 });
       });
     };
+    bag.imageUpdateCacheKey = function imageUpdateCacheKey(kind) {
+      return `wm_img_upd_${kind}_${bag.Api.getEndpointId()}`;
+    };
+    bag.readImageUpdateCache = function readImageUpdateCache(kind) {
+      try {
+        const raw = sessionStorage.getItem(bag.imageUpdateCacheKey(kind));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch (_) {
+        return null;
+      }
+    };
+    bag.writeImageUpdateCache = function writeImageUpdateCache(kind, map) {
+      try {
+        sessionStorage.setItem(bag.imageUpdateCacheKey(kind), JSON.stringify(map || {}));
+      } catch (_) {
+      }
+    };
+    bag.paintCachedUpdateIndicators = function paintCachedUpdateIndicators(kind, slotAttr) {
+      const map = bag.readImageUpdateCache(kind);
+      if (!map) return;
+      Object.keys(map).forEach((id) => {
+        const slot = bag.root.querySelector(`[${slotAttr}="${CSS.escape(String(id))}"]`);
+        if (!slot) return;
+        const u = map[id] || {};
+        if (!u.Status || u.Status === "unknown") return;
+        let title = u.Detail || "R\xE9sultat en cache";
+        if (u.Image) title = `${u.Image}
+${title}`;
+        if (kind === "stacks" && Array.isArray(u.Images)) {
+          title = u.Images.map((i) => `${i.Service}: ${i.Detail || i.Status} (${i.Image})`).join("\n") || title;
+        }
+        title += "\n(cache local \xB7 actualisation\u2026)";
+        slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
+          action: kind === "stacks" ? "stack" : "container",
+          id,
+          dotOnly: true
+        });
+      });
+    };
     bag.loadStackUpdateIndicators = async function loadStackUpdateIndicators(refresh = false) {
+      if (!refresh) bag.paintCachedUpdateIndicators("stacks", "data-upd");
       try {
         const data = await bag.Api.stackUpdates(!!refresh);
         const map = data?.Updates || {};
+        bag.writeImageUpdateCache("stacks", map);
         Object.keys(map).forEach((id) => {
           const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
           const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);
