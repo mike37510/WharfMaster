@@ -10,6 +10,7 @@ services:
   wharfmaster:
     build: .
     image: wharfmaster:2.3.2
+    pull_policy: build
     container_name: wharfmaster
     restart: unless-stopped
     ports:
@@ -30,6 +31,8 @@ services:
     image: curlimages/curl:8.11.1
     container_name: wharfmaster-scheduler
     restart: unless-stopped
+    # var/ est chmod 700 www-data — root peut lire la clé API
+    user: "0"
     depends_on:
       - wharfmaster
     environment:
@@ -37,8 +40,36 @@ services:
       SCHEDULER_KEY_FILE: /data/scheduler.api_key
     volumes:
       - wharfmaster-data:/data:ro
-      - ./docker/scheduler-entrypoint.sh:/entrypoint.sh:ro
-    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    # Inline (pas de bind-mount fichier hôte) — évite les échecs DinD / chemins relatifs
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        BASE="$${WHARFMASTER_INTERNAL_URL:-http://wharfmaster}"
+        KEY_FILE="$${SCHEDULER_KEY_FILE:-/data/scheduler.api_key}"
+        echo "[scheduler] waiting for API key at $${KEY_FILE}"
+        i=0
+        while [ ! -f "$$KEY_FILE" ]; do
+          i=$$((i + 1))
+          if [ "$$i" -gt 120 ]; then
+            echo "[scheduler] timeout waiting for scheduler.api_key" >&2
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "[scheduler] ready — polling $${BASE}/api/schedules/run-due every 60s"
+        while true; do
+          KEY=$$(tr -d '\r\n' < "$$KEY_FILE")
+          if [ -n "$$KEY" ]; then
+            curl -sS -X POST \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
+              -H "X-API-Key: $${KEY}" \
+              -d '{}' \
+              "$${BASE}/api/schedules/run-due" || true
+          fi
+          sleep 60
+        done
 
 volumes:
   wharfmaster-data:

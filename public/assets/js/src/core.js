@@ -669,11 +669,8 @@ export function installCore() {
         await bag.viewDiagnosticsApi();
       }
       else if (bag.state.route === 'settings/diagnostics') {
-        if (Number(bag.state.user?.Role) !== 1) {
-          location.hash = '#settings';
-          return;
-        }
-        await bag.viewDiagnostics();
+        location.hash = '#settings';
+        return;
       }
       else if (bag.state.route === 'users') {
         if (Number(bag.state.user?.Role) !== 1) {

@@ -30,7 +30,6 @@ export function install() {
     ['#activity', 'Journaux'],
     ['#settings', 'Paramètres'],
     ['#settings/auth', 'Authentification'],
-    ['#settings/diagnostics', 'Diagnostics'],
     ['#settings/diagnostics/api', 'Tests API'],
     ['#registries', 'Registres'],
     ['#nodes', 'Nœuds'],

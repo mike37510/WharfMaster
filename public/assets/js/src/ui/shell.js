@@ -28,7 +28,6 @@ export function install() {
       ['nodes', 'Nœuds', isAdmin, '#nodes'],
       ['users', 'Utilisateurs', isAdmin, '#users'],
       ['teams', 'Équipes', isAdmin, '#teams'],
-      ['settings/diagnostics', 'Diagnostics', isAdmin, '#settings/diagnostics'],
       ['settings/diagnostics/api', 'Tests API', isAdmin, '#settings/diagnostics/api'],
     ].filter((row) => row[2]);
     return `<nav class="settings-subnav" aria-label="Sections paramètres">

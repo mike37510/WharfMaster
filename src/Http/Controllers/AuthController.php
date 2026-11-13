@@ -7,6 +7,7 @@ use App\Access\EndpointAcl;
 use App\Access\Ownership;
 use App\Http\Request;
 use App\Http\Response;
+use App\Security\PasswordPolicy;
 
 final class AuthController extends BaseController
 {

@@ -11,6 +11,5 @@ data/**
 *.log
 .env
 .env.*
-site/shots
 agent-transcripts
 terminals

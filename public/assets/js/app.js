@@ -1066,11 +1066,8 @@
           }
           await bag.viewDiagnosticsApi();
         } else if (bag.state.route === "settings/diagnostics") {
-          if (Number(bag.state.user?.Role) !== 1) {
-            location.hash = "#settings";
-            return;
-          }
-          await bag.viewDiagnostics();
+          location.hash = "#settings";
+          return;
         } else if (bag.state.route === "users") {
           if (Number(bag.state.user?.Role) !== 1) {
             location.hash = "#dashboard";
@@ -1959,7 +1956,6 @@
         ["nodes", "N\u0153uds", isAdmin, "#nodes"],
         ["users", "Utilisateurs", isAdmin, "#users"],
         ["teams", "\xC9quipes", isAdmin, "#teams"],
-        ["settings/diagnostics", "Diagnostics", isAdmin, "#settings/diagnostics"],
         ["settings/diagnostics/api", "Tests API", isAdmin, "#settings/diagnostics/api"]
       ].filter((row) => row[2]);
       return `<nav class="settings-subnav" aria-label="Sections param\xE8tres">
@@ -9123,7 +9119,6 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
       ["#activity", "Journaux"],
       ["#settings", "Param\xE8tres"],
       ["#settings/auth", "Authentification"],
-      ["#settings/diagnostics", "Diagnostics"],
       ["#settings/diagnostics/api", "Tests API"],
       ["#registries", "Registres"],
       ["#nodes", "N\u0153uds"],
