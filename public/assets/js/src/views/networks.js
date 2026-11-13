@@ -206,10 +206,10 @@ export function install() {
 
   bag.networkEndpointForContainer = function networkEndpointForContainer(net, container) {
     return bag.containerNetworkEntries(container).find((e) => {
-      if (e.name === net?.Name) return true;
-      const eid = bag.normalizeImageRef(e.id);
-      const nid = bag.normalizeImageRef(net?.Id);
-      return nid && eid && (nid === eid || nid.startsWith(eid) || eid.startsWith(nid));
+          if (e.name === net?.Name) return true;
+          const eid = bag.normalizeImageRef(e.id);
+          const nid = bag.normalizeImageRef(net?.Id);
+          return nid && eid && (nid === eid || nid.startsWith(eid) || eid.startsWith(nid));
     }) || null;
   };
 
@@ -241,26 +241,203 @@ export function install() {
     return chips.length ? chips.join('') : '<span class="muted">—</span>';
   };
 
-  bag.openNetworkUsersModal = function openNetworkUsersModal(net, users) {
-    bag.closeAppModal();
-    const host = bag.modalHost();
+  bag.containerIdMatches = function containerIdMatches(a, b) {
+    const x = bag.normalizeImageRef(a);
+    const y = bag.normalizeImageRef(b);
+    return !!(x && y && (x === y || x.startsWith(y) || y.startsWith(x)));
+  };
+
+  /** Mounts from list/inspect (`Mounts`). */
+  bag.containerMountEntries = function containerMountEntries(container) {
+    const mounts = Array.isArray(container?.Mounts) ? container.Mounts : [];
+    return mounts.map((m) => {
+      const type = String(m.Type || '').toLowerCase() || (m.Name ? 'volume' : 'bind');
+      const dest = String(m.Destination || m.Target || '');
+      const source = String(m.Source || '');
+      const name = String(m.Name || '');
+      const mode = String(m.Mode || '').toLowerCase();
+      const rw = m.RW !== false && !/(^|,)ro(,|$)/.test(mode);
+      return {
+        type,
+        name,
+        source,
+        destination: dest,
+        rw,
+        mode: mode || (rw ? 'rw' : 'ro'),
+        propagation: String(m.Propagation || ''),
+      };
+    }).filter((m) => m.destination || m.source || m.name);
+  };
+
+  /** Chips volumes/binds montés sur un conteneur (dans la carte schéma). */
+  bag.formatContainerMountChips = function formatContainerMountChips(container) {
+    const mounts = bag.containerMountEntries(container);
+    if (!mounts.length) {
+      return '<span class="muted" style="font-size:11px">aucun volume</span>';
+    }
+    return mounts.map((m) => {
+      const isVol = m.type === 'volume';
+      const src = isVol ? (m.name || m.source) : m.source;
+      const label = `${src} → ${m.destination || '—'} · ${m.rw ? 'rw' : 'ro'}`;
+      const typeCls = isVol ? 'is-volume' : 'is-bind';
+      if (isVol && m.name) {
+        return `<span class="mount-chip ${typeCls}" data-go-volume="${bag.esc(m.name)}" title="${bag.esc(label)}" role="link">${bag.esc(src)} <span class="mount-chip-path">→ ${bag.esc(m.destination || '—')}</span> <span class="mount-chip-mode">${m.rw ? 'rw' : 'ro'}</span></span>`;
+      }
+      return `<span class="mount-chip ${typeCls} is-static" title="${bag.esc(label)}">${bag.esc(src || 'bind')} <span class="mount-chip-path">→ ${bag.esc(m.destination || '—')}</span> <span class="mount-chip-mode">${m.rw ? 'rw' : 'ro'}</span></span>`;
+    }).join('');
+  };
+
+  /** HTML hub+nodes for one network (réutilisé modale / détail conteneur / stack). */
+  bag.renderNetworkSchemaHtml = function renderNetworkSchemaHtml(net, users, opts = {}) {
     const list = Array.isArray(users) ? users : [];
+    const highlightIds = [];
+    if (opts.highlightId) highlightIds.push(opts.highlightId);
+    if (Array.isArray(opts.highlightIds)) highlightIds.push(...opts.highlightIds);
     const ipam = bag.networkIpamSummary(net);
     const hubMeta = [net?.Driver, ipam].filter(Boolean).join(' · ');
+    const countLabel = `${list.length} conteneur${list.length > 1 ? 's' : ''}`;
+    const selfLabel = opts.selfLabel || 'vous';
+    const showMounts = opts.showMounts !== false;
 
     const nodes = list.map((c) => {
       const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : bag.shortId(c.Id));
       const entry = bag.networkEndpointForContainer(net, c);
       const ip = entry?.ip || '—';
-      const st = String(c.State || '').toLowerCase();
-      const running = st === 'running' || st === 'restarting';
-      return `<button type="button" class="net-schema-node ${running ? 'is-up' : 'is-down'}" data-go-container="${bag.esc(c.Id)}" title="${bag.esc(name)}">
+      const st = String(c.State || c.Status || '').toLowerCase();
+      const running = st === 'running' || st === 'restarting' || /\bup\b/.test(st);
+      const isSelf = highlightIds.some((hid) => bag.containerIdMatches(hid, c.Id));
+      const cls = [
+        'net-schema-node',
+        running ? 'is-up' : 'is-down',
+        isSelf ? 'is-self' : '',
+      ].filter(Boolean).join(' ');
+      const mountsHtml = showMounts
+        ? `<span class="net-schema-node-mounts">${bag.formatContainerMountChips(c)}</span>`
+        : '';
+      return `<button type="button" class="${cls}" data-go-container="${bag.esc(c.Id)}" title="${bag.esc(name)}${isSelf ? ` (${selfLabel})` : ''}" ${isSelf ? 'aria-current="true"' : ''}>
         <span class="net-schema-link" aria-hidden="true"></span>
         <span class="net-schema-node-name">${bag.esc(name)}</span>
+        ${isSelf ? `<span class="net-schema-self-tag">${bag.esc(selfLabel)}</span>` : ''}
         <span class="net-schema-node-ip mono">${bag.esc(ip)}</span>
         <span class="net-schema-node-ports">${bag.formatPortChips(c.Ports || [])}</span>
+        ${mountsHtml}
       </button>`;
     }).join('');
+
+    return `<div class="net-schema" aria-label="Schéma des conteneurs sur ${bag.esc(net?.Name || 'ce réseau')}">
+      <div class="net-schema-hub">
+        <div class="net-schema-hub-ico">${bag.ico('networks')}</div>
+        <div class="net-schema-hub-name">${bag.esc(net?.Name || 'réseau')}</div>
+        <div class="net-schema-hub-meta muted">${bag.esc(hubMeta || countLabel)}</div>
+      </div>
+      <div class="net-schema-nodes">
+        ${nodes || '<div class="muted" style="padding:12px">Aucun conteneur connecté</div>'}
+      </div>
+    </div>`;
+  };
+
+  bag.bindNetworkSchemaClicks = function bindNetworkSchemaClicks(root, opts = {}) {
+    const el = root || bag.root;
+    if (!el) return;
+    el.querySelectorAll('[data-go-container]').forEach((btn) => {
+      if (btn.dataset.schemaBound === '1') return;
+      btn.dataset.schemaBound = '1';
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.goContainer;
+        if (!id) return;
+        if (typeof opts.beforeNavigate === 'function') opts.beforeNavigate();
+        if (opts.closeModal) bag.closeAppModal();
+        location.hash = `#containers/${id}`;
+      });
+    });
+  };
+
+  /** Match Docker network objects attached to a container (inspect or list item). */
+  bag.networksAttachedToContainer = function networksAttachedToContainer(container, networks) {
+    const entries = bag.containerNetworkEntries(container);
+    if (!entries.length) return [];
+    return (networks || []).filter((net) => {
+      const netId = bag.normalizeImageRef(net?.Id);
+      const netName = String(net?.Name || '');
+      return entries.some((e) => {
+        if (netName && e.name === netName) return true;
+        const eid = bag.normalizeImageRef(e.id);
+        return netId && eid && (netId === eid || netId.startsWith(eid) || eid.startsWith(netId));
+      });
+    });
+  };
+
+  /** Networks used by any of the given containers. */
+  bag.networksUsedByContainers = function networksUsedByContainers(containers, networks) {
+    const seen = new Set();
+    const out = [];
+    (containers || []).forEach((c) => {
+      bag.networksAttachedToContainer(c, networks).forEach((net) => {
+        const key = String(net?.Id || net?.Name || '');
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        out.push(net);
+      });
+    });
+    out.sort((a, b) => String(a.Name || '').localeCompare(String(b.Name || '')));
+    return out;
+  };
+
+  /** Blocs schéma réseau pour détail conteneur / stack. */
+  bag.renderTopologySectionHtml = function renderTopologySectionHtml(networks, allContainers, opts = {}) {
+    const list = Array.isArray(networks) ? networks : [];
+    if (!list.length) {
+      return `<div class="muted" style="padding:8px 0">Aucun réseau attaché</div>`;
+    }
+    return list.map((net) => {
+      let users = bag.containersUsingNetwork(net, allContainers);
+      if (opts.onlyContainerIds instanceof Set || Array.isArray(opts.onlyContainerIds)) {
+        const ids = opts.onlyContainerIds instanceof Set
+          ? [...opts.onlyContainerIds]
+          : opts.onlyContainerIds;
+        users = users.filter((c) => ids.some((id) => bag.containerIdMatches(id, c.Id)));
+      }
+      // Enrichir Mounts depuis allContainers si un item n'en a pas
+      const byId = allContainers || [];
+      users = users.map((c) => {
+        if (Array.isArray(c.Mounts) && c.Mounts.length) return c;
+        const richer = byId.find((x) => bag.containerIdMatches(x.Id, c.Id) && Array.isArray(x.Mounts) && x.Mounts.length);
+        return richer ? { ...c, Mounts: richer.Mounts } : c;
+      });
+      return `<div class="net-schema-block">
+        ${bag.renderNetworkSchemaHtml(net, users, {
+          highlightId: opts.highlightId || '',
+          highlightIds: opts.highlightIds || [],
+          selfLabel: opts.selfLabel || 'vous',
+          showMounts: opts.showMounts !== false,
+        })}
+      </div>`;
+    }).join('');
+  };
+
+  bag.bindTopologyClicks = function bindTopologyClicks(root, opts = {}) {
+    bag.bindNetworkSchemaClicks(root, opts);
+    const el = root || bag.root;
+    if (!el) return;
+    el.querySelectorAll('[data-go-volume]').forEach((chip) => {
+      if (chip.dataset.volBound === '1') return;
+      chip.dataset.volBound = '1';
+      chip.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const name = chip.dataset.goVolume;
+        if (!name) return;
+        if (typeof opts.beforeNavigate === 'function') opts.beforeNavigate();
+        if (opts.closeModal) bag.closeAppModal();
+        location.hash = `#volumes/${encodeURIComponent(name)}`;
+      });
+    });
+  };
+
+  bag.openNetworkUsersModal = function openNetworkUsersModal(net, users) {
+    bag.closeAppModal();
+    const host = bag.modalHost();
+    const list = Array.isArray(users) ? users : [];
 
     const rows = list.map((c) => {
       const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : bag.shortId(c.Id));
@@ -283,16 +460,7 @@ export function install() {
             </div>
             <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">✕</button>
           </div>
-          <div class="net-schema" aria-label="Schéma des conteneurs sur ce réseau">
-            <div class="net-schema-hub">
-              <div class="net-schema-hub-ico">${bag.ico('networks')}</div>
-              <div class="net-schema-hub-name">${bag.esc(net?.Name || 'réseau')}</div>
-              <div class="net-schema-hub-meta muted">${bag.esc(hubMeta || `${list.length} conteneur${list.length > 1 ? 's' : ''}`)}</div>
-            </div>
-            <div class="net-schema-nodes">
-              ${nodes || '<div class="muted" style="padding:12px">Aucun conteneur connecté</div>'}
-            </div>
-          </div>
+          ${bag.renderNetworkSchemaHtml(net, list)}
           <div class="section-title" style="margin-top:16px">Détail</div>
           <div class="table-wrap" style="margin:0">
             <table class="data">
@@ -306,13 +474,7 @@ export function install() {
         </div>
       </div>`;
     bag.bindAppModalChrome();
-    const goContainer = (id) => {
-      bag.closeAppModal();
-      location.hash = `#containers/${id}`;
-    };
-    host.querySelectorAll('[data-go-container]').forEach((btn) => {
-      btn.addEventListener('click', () => goContainer(btn.dataset.goContainer));
-    });
+    bag.bindTopologyClicks(host, { closeModal: true });
     host.querySelectorAll('a.res-user-link').forEach((a) => {
       a.addEventListener('click', () => bag.closeAppModal());
     });

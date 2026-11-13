@@ -861,7 +861,10 @@ export function install() {
             <dt>Ports publiés</dt><dd>${bag.formatPorts(ports, bag.state.endpointId)}</dd>
             <dt>Commande</dt><dd class="mono">${bag.esc((info.Config?.Cmd || []).join(' '))}</dd>
           </dl>
-        </div>`;
+        </div>
+        <div class="section-title" style="margin-top:1rem">Topologie</div>
+        <p class="muted" style="margin:0 0 10px;font-size:12.5px">Réseaux partagés — volumes montés sur chaque conteneur</p>
+        <div id="container-topology"><div class="muted">Chargement du schéma…</div></div>`;
 
     bag.root.innerHTML = bag.shell(`Conteneur · ${name}`, `
       ${bag.pageHeader(name, false)}
@@ -948,6 +951,43 @@ export function install() {
       const sum = document.getElementById('container-upd-summary');
       if (sum) sum.innerHTML = bag.stackUpdatePill('unknown', 0, err.message || 'Erreur');
     }
+
+    // Schéma réseau (hub) + volumes montés sur chaque carte conteneur
+    (async () => {
+      const mount = document.getElementById('container-topology');
+      if (!mount || typeof bag.renderTopologySectionHtml !== 'function') return;
+      try {
+        const [netsData, ctrs] = await Promise.all([
+          bag.Api.docker('/networks'),
+          bag.Api.docker('/containers/json?all=true'),
+        ]);
+        const networks = Array.isArray(netsData?.Networks) ? netsData.Networks : (Array.isArray(netsData) ? netsData : []);
+        let containers = Array.isArray(ctrs) ? ctrs : [];
+        // Inject inspect Mounts on the current container
+        containers = containers.map((c) => {
+          if (!bag.containerIdMatches(c.Id, id)) return c;
+          return {
+            ...c,
+            Mounts: (Array.isArray(info.Mounts) && info.Mounts.length) ? info.Mounts : (c.Mounts || []),
+          };
+        });
+        const listSelf = containers.find((c) => bag.containerIdMatches(c.Id, id)) || info;
+        const attached = bag.networksAttachedToContainer(listSelf, networks)
+          .filter((n) => String(n.Name || '') !== 'none' && String(n.Driver || '') !== 'null');
+        if (!attached.length) {
+          mount.innerHTML = `<div class="muted">Aucun réseau Docker attaché</div>`;
+          return;
+        }
+        mount.innerHTML = bag.renderTopologySectionHtml(attached, containers, {
+          highlightId: id,
+          selfLabel: 'vous',
+          showMounts: true,
+        });
+        bag.bindTopologyClicks(mount);
+      } catch (err) {
+        mount.innerHTML = `<div class="error-box">${bag.esc(err.message || 'Schéma indisponible')}</div>`;
+      }
+    })();
 
     if (requested === 'logs') await bag.openLogsModal(id, name);
     else if (requested === 'console') await bag.openConsoleModal(id, name, running);

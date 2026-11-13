@@ -4667,7 +4667,10 @@ ${title}`;
             <dt>Ports publi\xE9s</dt><dd>${bag.formatPorts(ports, bag.state.endpointId)}</dd>
             <dt>Commande</dt><dd class="mono">${bag.esc((info.Config?.Cmd || []).join(" "))}</dd>
           </dl>
-        </div>`;
+        </div>
+        <div class="section-title" style="margin-top:1rem">Topologie</div>
+        <p class="muted" style="margin:0 0 10px;font-size:12.5px">R\xE9seaux partag\xE9s \u2014 volumes mont\xE9s sur chaque conteneur</p>
+        <div id="container-topology"><div class="muted">Chargement du sch\xE9ma\u2026</div></div>`;
       bag.root.innerHTML = bag.shell(`Conteneur \xB7 ${name}`, `
       ${bag.pageHeader(name, false)}
       <div class="toolbar">
@@ -4757,6 +4760,39 @@ ${tip}`;
         const sum = document.getElementById("container-upd-summary");
         if (sum) sum.innerHTML = bag.stackUpdatePill("unknown", 0, err.message || "Erreur");
       }
+      (async () => {
+        const mount = document.getElementById("container-topology");
+        if (!mount || typeof bag.renderTopologySectionHtml !== "function") return;
+        try {
+          const [netsData, ctrs] = await Promise.all([
+            bag.Api.docker("/networks"),
+            bag.Api.docker("/containers/json?all=true")
+          ]);
+          const networks = Array.isArray(netsData?.Networks) ? netsData.Networks : Array.isArray(netsData) ? netsData : [];
+          let containers = Array.isArray(ctrs) ? ctrs : [];
+          containers = containers.map((c) => {
+            if (!bag.containerIdMatches(c.Id, id)) return c;
+            return {
+              ...c,
+              Mounts: Array.isArray(info.Mounts) && info.Mounts.length ? info.Mounts : c.Mounts || []
+            };
+          });
+          const listSelf = containers.find((c) => bag.containerIdMatches(c.Id, id)) || info;
+          const attached = bag.networksAttachedToContainer(listSelf, networks).filter((n) => String(n.Name || "") !== "none" && String(n.Driver || "") !== "null");
+          if (!attached.length) {
+            mount.innerHTML = `<div class="muted">Aucun r\xE9seau Docker attach\xE9</div>`;
+            return;
+          }
+          mount.innerHTML = bag.renderTopologySectionHtml(attached, containers, {
+            highlightId: id,
+            selfLabel: "vous",
+            showMounts: true
+          });
+          bag.bindTopologyClicks(mount);
+        } catch (err) {
+          mount.innerHTML = `<div class="error-box">${bag.esc(err.message || "Sch\xE9ma indisponible")}</div>`;
+        }
+      })();
       if (requested === "logs") await bag.openLogsModal(id, name);
       else if (requested === "console") await bag.openConsoleModal(id, name, running);
       else if (requested === "inspect") await bag.openInspectModal(id, name);
@@ -6921,25 +6957,181 @@ ${tip}`;
       }
       return chips.length ? chips.join("") : '<span class="muted">\u2014</span>';
     };
-    bag.openNetworkUsersModal = function openNetworkUsersModal(net, users) {
-      bag.closeAppModal();
-      const host = bag.modalHost();
+    bag.containerIdMatches = function containerIdMatches(a, b) {
+      const x = bag.normalizeImageRef(a);
+      const y = bag.normalizeImageRef(b);
+      return !!(x && y && (x === y || x.startsWith(y) || y.startsWith(x)));
+    };
+    bag.containerMountEntries = function containerMountEntries(container) {
+      const mounts = Array.isArray(container?.Mounts) ? container.Mounts : [];
+      return mounts.map((m) => {
+        const type = String(m.Type || "").toLowerCase() || (m.Name ? "volume" : "bind");
+        const dest = String(m.Destination || m.Target || "");
+        const source = String(m.Source || "");
+        const name = String(m.Name || "");
+        const mode = String(m.Mode || "").toLowerCase();
+        const rw = m.RW !== false && !/(^|,)ro(,|$)/.test(mode);
+        return {
+          type,
+          name,
+          source,
+          destination: dest,
+          rw,
+          mode: mode || (rw ? "rw" : "ro"),
+          propagation: String(m.Propagation || "")
+        };
+      }).filter((m) => m.destination || m.source || m.name);
+    };
+    bag.formatContainerMountChips = function formatContainerMountChips(container) {
+      const mounts = bag.containerMountEntries(container);
+      if (!mounts.length) {
+        return '<span class="muted" style="font-size:11px">aucun volume</span>';
+      }
+      return mounts.map((m) => {
+        const isVol = m.type === "volume";
+        const src = isVol ? m.name || m.source : m.source;
+        const label = `${src} \u2192 ${m.destination || "\u2014"} \xB7 ${m.rw ? "rw" : "ro"}`;
+        const typeCls = isVol ? "is-volume" : "is-bind";
+        if (isVol && m.name) {
+          return `<span class="mount-chip ${typeCls}" data-go-volume="${bag.esc(m.name)}" title="${bag.esc(label)}" role="link">${bag.esc(src)} <span class="mount-chip-path">\u2192 ${bag.esc(m.destination || "\u2014")}</span> <span class="mount-chip-mode">${m.rw ? "rw" : "ro"}</span></span>`;
+        }
+        return `<span class="mount-chip ${typeCls} is-static" title="${bag.esc(label)}">${bag.esc(src || "bind")} <span class="mount-chip-path">\u2192 ${bag.esc(m.destination || "\u2014")}</span> <span class="mount-chip-mode">${m.rw ? "rw" : "ro"}</span></span>`;
+      }).join("");
+    };
+    bag.renderNetworkSchemaHtml = function renderNetworkSchemaHtml(net, users, opts = {}) {
       const list = Array.isArray(users) ? users : [];
+      const highlightIds = [];
+      if (opts.highlightId) highlightIds.push(opts.highlightId);
+      if (Array.isArray(opts.highlightIds)) highlightIds.push(...opts.highlightIds);
       const ipam = bag.networkIpamSummary(net);
       const hubMeta = [net?.Driver, ipam].filter(Boolean).join(" \xB7 ");
+      const countLabel = `${list.length} conteneur${list.length > 1 ? "s" : ""}`;
+      const selfLabel = opts.selfLabel || "vous";
+      const showMounts = opts.showMounts !== false;
       const nodes = list.map((c) => {
         const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : bag.shortId(c.Id);
         const entry = bag.networkEndpointForContainer(net, c);
         const ip = entry?.ip || "\u2014";
-        const st = String(c.State || "").toLowerCase();
-        const running = st === "running" || st === "restarting";
-        return `<button type="button" class="net-schema-node ${running ? "is-up" : "is-down"}" data-go-container="${bag.esc(c.Id)}" title="${bag.esc(name)}">
+        const st = String(c.State || c.Status || "").toLowerCase();
+        const running = st === "running" || st === "restarting" || /\bup\b/.test(st);
+        const isSelf = highlightIds.some((hid) => bag.containerIdMatches(hid, c.Id));
+        const cls = [
+          "net-schema-node",
+          running ? "is-up" : "is-down",
+          isSelf ? "is-self" : ""
+        ].filter(Boolean).join(" ");
+        const mountsHtml = showMounts ? `<span class="net-schema-node-mounts">${bag.formatContainerMountChips(c)}</span>` : "";
+        return `<button type="button" class="${cls}" data-go-container="${bag.esc(c.Id)}" title="${bag.esc(name)}${isSelf ? ` (${selfLabel})` : ""}" ${isSelf ? 'aria-current="true"' : ""}>
         <span class="net-schema-link" aria-hidden="true"></span>
         <span class="net-schema-node-name">${bag.esc(name)}</span>
+        ${isSelf ? `<span class="net-schema-self-tag">${bag.esc(selfLabel)}</span>` : ""}
         <span class="net-schema-node-ip mono">${bag.esc(ip)}</span>
         <span class="net-schema-node-ports">${bag.formatPortChips(c.Ports || [])}</span>
+        ${mountsHtml}
       </button>`;
       }).join("");
+      return `<div class="net-schema" aria-label="Sch\xE9ma des conteneurs sur ${bag.esc(net?.Name || "ce r\xE9seau")}">
+      <div class="net-schema-hub">
+        <div class="net-schema-hub-ico">${bag.ico("networks")}</div>
+        <div class="net-schema-hub-name">${bag.esc(net?.Name || "r\xE9seau")}</div>
+        <div class="net-schema-hub-meta muted">${bag.esc(hubMeta || countLabel)}</div>
+      </div>
+      <div class="net-schema-nodes">
+        ${nodes || '<div class="muted" style="padding:12px">Aucun conteneur connect\xE9</div>'}
+      </div>
+    </div>`;
+    };
+    bag.bindNetworkSchemaClicks = function bindNetworkSchemaClicks(root, opts = {}) {
+      const el = root || bag.root;
+      if (!el) return;
+      el.querySelectorAll("[data-go-container]").forEach((btn) => {
+        if (btn.dataset.schemaBound === "1") return;
+        btn.dataset.schemaBound = "1";
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.goContainer;
+          if (!id) return;
+          if (typeof opts.beforeNavigate === "function") opts.beforeNavigate();
+          if (opts.closeModal) bag.closeAppModal();
+          location.hash = `#containers/${id}`;
+        });
+      });
+    };
+    bag.networksAttachedToContainer = function networksAttachedToContainer(container, networks) {
+      const entries = bag.containerNetworkEntries(container);
+      if (!entries.length) return [];
+      return (networks || []).filter((net) => {
+        const netId = bag.normalizeImageRef(net?.Id);
+        const netName = String(net?.Name || "");
+        return entries.some((e) => {
+          if (netName && e.name === netName) return true;
+          const eid = bag.normalizeImageRef(e.id);
+          return netId && eid && (netId === eid || netId.startsWith(eid) || eid.startsWith(netId));
+        });
+      });
+    };
+    bag.networksUsedByContainers = function networksUsedByContainers(containers, networks) {
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      (containers || []).forEach((c) => {
+        bag.networksAttachedToContainer(c, networks).forEach((net) => {
+          const key = String(net?.Id || net?.Name || "");
+          if (!key || seen.has(key)) return;
+          seen.add(key);
+          out.push(net);
+        });
+      });
+      out.sort((a, b) => String(a.Name || "").localeCompare(String(b.Name || "")));
+      return out;
+    };
+    bag.renderTopologySectionHtml = function renderTopologySectionHtml(networks, allContainers, opts = {}) {
+      const list = Array.isArray(networks) ? networks : [];
+      if (!list.length) {
+        return `<div class="muted" style="padding:8px 0">Aucun r\xE9seau attach\xE9</div>`;
+      }
+      return list.map((net) => {
+        let users = bag.containersUsingNetwork(net, allContainers);
+        if (opts.onlyContainerIds instanceof Set || Array.isArray(opts.onlyContainerIds)) {
+          const ids = opts.onlyContainerIds instanceof Set ? [...opts.onlyContainerIds] : opts.onlyContainerIds;
+          users = users.filter((c) => ids.some((id) => bag.containerIdMatches(id, c.Id)));
+        }
+        const byId = allContainers || [];
+        users = users.map((c) => {
+          if (Array.isArray(c.Mounts) && c.Mounts.length) return c;
+          const richer = byId.find((x) => bag.containerIdMatches(x.Id, c.Id) && Array.isArray(x.Mounts) && x.Mounts.length);
+          return richer ? { ...c, Mounts: richer.Mounts } : c;
+        });
+        return `<div class="net-schema-block">
+        ${bag.renderNetworkSchemaHtml(net, users, {
+          highlightId: opts.highlightId || "",
+          highlightIds: opts.highlightIds || [],
+          selfLabel: opts.selfLabel || "vous",
+          showMounts: opts.showMounts !== false
+        })}
+      </div>`;
+      }).join("");
+    };
+    bag.bindTopologyClicks = function bindTopologyClicks(root, opts = {}) {
+      bag.bindNetworkSchemaClicks(root, opts);
+      const el = root || bag.root;
+      if (!el) return;
+      el.querySelectorAll("[data-go-volume]").forEach((chip) => {
+        if (chip.dataset.volBound === "1") return;
+        chip.dataset.volBound = "1";
+        chip.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const name = chip.dataset.goVolume;
+          if (!name) return;
+          if (typeof opts.beforeNavigate === "function") opts.beforeNavigate();
+          if (opts.closeModal) bag.closeAppModal();
+          location.hash = `#volumes/${encodeURIComponent(name)}`;
+        });
+      });
+    };
+    bag.openNetworkUsersModal = function openNetworkUsersModal(net, users) {
+      bag.closeAppModal();
+      const host = bag.modalHost();
+      const list = Array.isArray(users) ? users : [];
       const rows = list.map((c) => {
         const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : bag.shortId(c.Id);
         const entry = bag.networkEndpointForContainer(net, c);
@@ -6960,16 +7152,7 @@ ${tip}`;
             </div>
             <button type="button" class="icon-btn" data-close-modal title="Fermer" aria-label="Fermer">\u2715</button>
           </div>
-          <div class="net-schema" aria-label="Sch\xE9ma des conteneurs sur ce r\xE9seau">
-            <div class="net-schema-hub">
-              <div class="net-schema-hub-ico">${bag.ico("networks")}</div>
-              <div class="net-schema-hub-name">${bag.esc(net?.Name || "r\xE9seau")}</div>
-              <div class="net-schema-hub-meta muted">${bag.esc(hubMeta || `${list.length} conteneur${list.length > 1 ? "s" : ""}`)}</div>
-            </div>
-            <div class="net-schema-nodes">
-              ${nodes || '<div class="muted" style="padding:12px">Aucun conteneur connect\xE9</div>'}
-            </div>
-          </div>
+          ${bag.renderNetworkSchemaHtml(net, list)}
           <div class="section-title" style="margin-top:16px">D\xE9tail</div>
           <div class="table-wrap" style="margin:0">
             <table class="data">
@@ -6983,13 +7166,7 @@ ${tip}`;
         </div>
       </div>`;
       bag.bindAppModalChrome();
-      const goContainer = (id) => {
-        bag.closeAppModal();
-        location.hash = `#containers/${id}`;
-      };
-      host.querySelectorAll("[data-go-container]").forEach((btn) => {
-        btn.addEventListener("click", () => goContainer(btn.dataset.goContainer));
-      });
+      bag.bindTopologyClicks(host, { closeModal: true });
       host.querySelectorAll("a.res-user-link").forEach((a) => {
         a.addEventListener("click", () => bag.closeAppModal());
       });
@@ -7960,6 +8137,9 @@ ${title}`;
           <tbody><tr><td colspan="6" class="muted">Chargement\u2026</td></tr></tbody>
         </table>
       </div>
+      <div class="section-title">Topologie</div>
+      <p class="muted" style="margin:0 0 10px;font-size:12.5px">R\xE9seaux partag\xE9s \u2014 volumes mont\xE9s sur chaque service</p>
+      <div id="stack-topology" style="margin-bottom:1rem"><div class="muted">Chargement du sch\xE9ma\u2026</div></div>
       <div class="section-title">Images des services</div>
       <div class="table-wrap" style="margin-bottom:1rem">
         <table class="data" id="stack-upd-table">
@@ -8112,8 +8292,42 @@ ${title}`;
           });
           if (!list.length) {
             tb.innerHTML = `<tr><td colspan="6" class="muted">Aucun conteneur pour le projet Compose \xAB ${bag.esc(project)} \xBB</td></tr>`;
+            const topoEmpty = document.getElementById("stack-topology");
+            if (topoEmpty) topoEmpty.innerHTML = `<div class="muted">Aucun conteneur \u2014 sch\xE9ma indisponible</div>`;
             return;
           }
+          void (async () => {
+            const mount = document.getElementById("stack-topology");
+            if (!mount || typeof bag.renderTopologySectionHtml !== "function") return;
+            try {
+              const [netsData, allCtrs] = await Promise.all([
+                bag.Api.dockerOn(ep, "/networks"),
+                bag.Api.dockerOn(ep, "/containers/json?all=true")
+              ]);
+              const networks = Array.isArray(netsData?.Networks) ? netsData.Networks : Array.isArray(netsData) ? netsData : [];
+              const allContainers = Array.isArray(allCtrs) ? allCtrs : [];
+              const used = bag.networksUsedByContainers(list, networks).filter((n) => String(n.Name || "") !== "none" && String(n.Driver || "") !== "null");
+              if (!used.length) {
+                mount.innerHTML = `<div class="muted">Aucun r\xE9seau partag\xE9 entre les services</div>`;
+                return;
+              }
+              const stackIds = list.map((c) => c.Id).filter(Boolean);
+              const merged = allContainers.map((c) => {
+                const fromStack = list.find((s) => bag.containerIdMatches(s.Id, c.Id));
+                if (!fromStack) return c;
+                const mounts = Array.isArray(fromStack.Mounts) && fromStack.Mounts.length ? fromStack.Mounts : c.Mounts || [];
+                return { ...c, ...fromStack, Mounts: mounts };
+              });
+              mount.innerHTML = bag.renderTopologySectionHtml(used, merged, {
+                highlightIds: stackIds,
+                selfLabel: "stack",
+                showMounts: true
+              });
+              bag.bindTopologyClicks(mount);
+            } catch (err) {
+              mount.innerHTML = `<div class="error-box">${bag.esc(err.message || "Sch\xE9ma indisponible")}</div>`;
+            }
+          })();
           tb.innerHTML = list.map((c) => {
             const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : bag.shortId(c.Id);
             const labels = c.Labels || {};
@@ -8176,6 +8390,8 @@ ${title}`;
           });
         } catch (err) {
           tb.innerHTML = `<tr><td colspan="6" class="error-box">${bag.esc(err.message || "Impossible de lister les conteneurs")}</td></tr>`;
+          const topoErr = document.getElementById("stack-topology");
+          if (topoErr) topoErr.innerHTML = `<div class="muted">Sch\xE9ma indisponible</div>`;
         }
       };
       void renderStackContainers();

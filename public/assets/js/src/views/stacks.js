@@ -1036,6 +1036,9 @@ export function install() {
           <tbody><tr><td colspan="6" class="muted">Chargement…</td></tr></tbody>
         </table>
       </div>
+      <div class="section-title">Topologie</div>
+      <p class="muted" style="margin:0 0 10px;font-size:12.5px">Réseaux partagés — volumes montés sur chaque service</p>
+      <div id="stack-topology" style="margin-bottom:1rem"><div class="muted">Chargement du schéma…</div></div>
       <div class="section-title">Images des services</div>
       <div class="table-wrap" style="margin-bottom:1rem">
         <table class="data" id="stack-upd-table">
@@ -1189,8 +1192,47 @@ export function install() {
         });
         if (!list.length) {
           tb.innerHTML = `<tr><td colspan="6" class="muted">Aucun conteneur pour le projet Compose « ${bag.esc(project)} »</td></tr>`;
+          const topoEmpty = document.getElementById('stack-topology');
+          if (topoEmpty) topoEmpty.innerHTML = `<div class="muted">Aucun conteneur — schéma indisponible</div>`;
           return;
         }
+        // Schéma réseau + volumes sur chaque carte service
+        void (async () => {
+          const mount = document.getElementById('stack-topology');
+          if (!mount || typeof bag.renderTopologySectionHtml !== 'function') return;
+          try {
+            const [netsData, allCtrs] = await Promise.all([
+              bag.Api.dockerOn(ep, '/networks'),
+              bag.Api.dockerOn(ep, '/containers/json?all=true'),
+            ]);
+            const networks = Array.isArray(netsData?.Networks) ? netsData.Networks : (Array.isArray(netsData) ? netsData : []);
+            const allContainers = Array.isArray(allCtrs) ? allCtrs : [];
+            const used = bag.networksUsedByContainers(list, networks)
+              .filter((n) => String(n.Name || '') !== 'none' && String(n.Driver || '') !== 'null');
+            if (!used.length) {
+              mount.innerHTML = `<div class="muted">Aucun réseau partagé entre les services</div>`;
+              return;
+            }
+            const stackIds = list.map((c) => c.Id).filter(Boolean);
+            // Prefer stack list Mounts when merging into full list
+            const merged = allContainers.map((c) => {
+              const fromStack = list.find((s) => bag.containerIdMatches(s.Id, c.Id));
+              if (!fromStack) return c;
+              const mounts = (Array.isArray(fromStack.Mounts) && fromStack.Mounts.length)
+                ? fromStack.Mounts
+                : (c.Mounts || []);
+              return { ...c, ...fromStack, Mounts: mounts };
+            });
+            mount.innerHTML = bag.renderTopologySectionHtml(used, merged, {
+              highlightIds: stackIds,
+              selfLabel: 'stack',
+              showMounts: true,
+            });
+            bag.bindTopologyClicks(mount);
+          } catch (err) {
+            mount.innerHTML = `<div class="error-box">${bag.esc(err.message || 'Schéma indisponible')}</div>`;
+          }
+        })();
         tb.innerHTML = list.map((c) => {
           const name = (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : bag.shortId(c.Id));
           const labels = c.Labels || {};
@@ -1249,6 +1291,8 @@ export function install() {
         });
       } catch (err) {
         tb.innerHTML = `<tr><td colspan="6" class="error-box">${bag.esc(err.message || 'Impossible de lister les conteneurs')}</td></tr>`;
+        const topoErr = document.getElementById('stack-topology');
+        if (topoErr) topoErr.innerHTML = `<div class="muted">Schéma indisponible</div>`;
       }
     };
     void renderStackContainers();

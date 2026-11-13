@@ -60,7 +60,7 @@ final class ManifestClient
             if ($token !== null) {
                 $headers = [
                     'Accept: ' . self::ACCEPT,
-                    'User-Agent: WharfMaster/2.3.5',
+                    'User-Agent: WharfMaster/2.3.6',
                     'Authorization: Bearer ' . $token,
                 ];
                 $res = $this->httpHeadOrGet($manifestUrl, $headers, 8);
@@ -235,7 +235,7 @@ final class ManifestClient
         $pass = (string) ($registryCreds['password'] ?? '');
         $headers = [
             'Accept: ' . self::ACCEPT,
-            'User-Agent: WharfMaster/2.3.5',
+            'User-Agent: WharfMaster/2.3.6',
         ];
         if ($user !== '' || $pass !== '') {
             $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
@@ -341,7 +341,7 @@ final class ManifestClient
         $url = 'https://hub.docker.com/v2/repositories/' . $repo . '/tags/' . rawurlencode($tag);
         $res = $this->http('GET', $url, [
             'Accept: application/json',
-            'User-Agent: WharfMaster/2.3.5',
+            'User-Agent: WharfMaster/2.3.6',
         ], 8);
         if ($res['status'] < 200 || $res['status'] >= 300) {
             return ['created' => '', 'version' => ''];
@@ -546,7 +546,7 @@ final class ManifestClient
             $query['scope'] = $params['scope'] ?? ('repository:' . $repository . ':pull');
         }
         $url = $realm . (str_contains($realm, '?') ? '&' : '?') . http_build_query($query);
-        $headers = ['Accept: application/json', 'User-Agent: WharfMaster/2.3.5'];
+        $headers = ['Accept: application/json', 'User-Agent: WharfMaster/2.3.6'];
         if ($user !== '' || $pass !== '') {
             $headers[] = 'Authorization: Basic ' . base64_encode($user . ':' . $pass);
         }

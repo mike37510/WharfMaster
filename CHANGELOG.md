@@ -4,8 +4,20 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.6] — 2026-11-13
+
+### Ajouté
+- **Topologie** (détail conteneur / stack) : schéma réseau (hub = réseau, cartes = conteneurs) avec **volumes / binds montés** sur chaque carte (`source → chemin · rw|ro`)
+- Clic sur un volume nommé depuis la carte → page Volumes
+
+### Amélioré
+- **Topologie mode clair** : contraste du hub, des IP et des pastilles de montage (chemins lisibles)
+
 ### Corrigé
 - **Volumes** : la découverte automatique (binds / volumes des conteneurs hors app) est réservée aux **administrateurs**
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.6`**
 
 ## [2.3.5] — 2026-11-13
 

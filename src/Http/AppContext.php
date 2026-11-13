@@ -616,7 +616,7 @@ final class AppContext
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_HTTPHEADER => [
                 'Accept: application/json',
-                'User-Agent: WharfMaster/2.3.5',
+                'User-Agent: WharfMaster/2.3.6',
             ],
         ]);
         $body = curl_exec($ch);
@@ -1210,7 +1210,7 @@ YAML;
         $advertise = $this->buildAdvertiseUrl($nodeHost, $nodePort);
         $name = $nodeName !== '' ? $nodeName : 'mon-serveur';
         // Single-line, ready to paste — uses configured Public URL / host
-        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.5');
+        $image = (string) ($this->config['agent_image'] ?? 'ghcr.io/mike37510/wharfmaster-agent:2.3.6');
         return 'curl -fsSL ' . escapeshellarg($base . '/agent/install.sh')
             . ' | sh -s --'
             . ' --url ' . escapeshellarg($base)
