@@ -175,13 +175,53 @@ SH;
     /** Max tar size when exporting a whole volume (streamed to a temp file). */
     public const MAX_EXPORT_BYTES = 1_500_000_000;
 
+    /** Human-readable max export size (e.g. "1,5 Go"). */
+    public static function maxExportLabel(): string
+    {
+        $bytes = self::MAX_EXPORT_BYTES;
+        if ($bytes >= 1_000_000_000) {
+            $go = $bytes / 1_000_000_000;
+            return rtrim(rtrim(number_format($go, 1, ',', ''), '0'), ',') . ' Go';
+        }
+        return (int) round($bytes / 1_000_000) . ' Mo';
+    }
+
+    /**
+     * Approximate on-disk size of the volume/bind root (bytes), via du in browse container.
+     */
+    public function measureExportBytes(string $volumeName): int
+    {
+        $this->assertVolume($volumeName);
+        $out = $this->runInVolume($volumeName, [
+            'sh', '-c',
+            'du -sb /volume 2>/dev/null | cut -f1',
+            'du',
+        ], true);
+        if ($out['ExitCode'] !== 0) {
+            return -1;
+        }
+        $n = (int) trim($out['Stdout']);
+        return $n > 0 ? $n : 0;
+    }
+
     /**
      * Export the whole volume (or bind mount) as a Docker archive tar.
+     * Pre-checks size (max MAX_EXPORT_BYTES) before downloading.
      * Writes to $destPath (caller deletes). Returns bytes written.
      */
     public function exportTarToFile(string $volumeName, string $destPath): int
     {
         $this->assertVolume($volumeName);
+        $measured = $this->measureExportBytes($volumeName);
+        if ($measured > self::MAX_EXPORT_BYTES) {
+            $have = $measured >= 1_000_000_000
+                ? rtrim(rtrim(number_format($measured / 1_000_000_000, 1, ',', ''), '0'), ',') . ' Go'
+                : (int) round($measured / 1_000_000) . ' Mo';
+            throw new \RuntimeException(
+                'Trop volumineux pour l\'export (' . $have . ' > max ' . self::maxExportLabel() . ')',
+                413,
+            );
+        }
         $this->ensureBrowseImage();
         $containerId = $this->startBrowseContainer($volumeName, true);
         try {
@@ -201,9 +241,7 @@ SH;
             $len = strlen($tar);
             if ($len > self::MAX_EXPORT_BYTES) {
                 throw new \RuntimeException(
-                    'Volume trop volumineux pour l’export (max '
-                    . (int) (self::MAX_EXPORT_BYTES / 1_000_000)
-                    . ' Mo)',
+                    'Trop volumineux pour l\'export (archive > max ' . self::maxExportLabel() . ')',
                     413,
                 );
             }

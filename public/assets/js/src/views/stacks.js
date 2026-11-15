@@ -1061,7 +1061,7 @@ export function install() {
       <div class="section-title">Export</div>
       <div class="toolbar" style="margin-bottom:8px; flex-wrap:wrap; gap:10px; align-items:center">
         <button type="button" class="btn btn-primary" id="stack-export">Exporter compose + volumes</button>
-        <span class="muted" style="font-size:12.5px">ZIP : docker-compose, .env, données des volumes et binds</span>
+        <span class="muted" style="font-size:12.5px">ZIP : docker-compose, .env, données des volumes et binds (max 1,5 Go par volume — au-delà : omis avec avertissement)</span>
       </div>
       <div id="stack-export-status" style="margin-bottom:1rem"></div>
       <div id="sched-modal"></div>`);
@@ -1086,7 +1086,13 @@ export function install() {
       try {
         const res = await bag.Api.downloadStackExport(stack.Id);
         const sizeMo = res?.size ? ` (${(res.size / (1000 * 1000)).toFixed(1)} Mo)` : '';
-        setStatus(`<div class="info-box">Export téléchargé${res?.filename ? ` : <span class="mono">${bag.esc(res.filename)}</span>` : ''}${sizeMo}.</div>`);
+        const skipped = Array.isArray(res?.skipped) ? res.skipped : [];
+        let html = `<div class="info-box">Export téléchargé${res?.filename ? ` : <span class="mono">${bag.esc(res.filename)}</span>` : ''}${sizeMo}.</div>`;
+        if (skipped.length) {
+          const items = skipped.map((s) => `<li>${bag.esc(s)}</li>`).join('');
+          html += `<div class="error-box" style="margin-top:8px"><strong>Volumes / binds non inclus</strong> (limite 1,5 Go) :<ul style="margin:6px 0 0;padding-left:1.2em">${items}</ul></div>`;
+        }
+        setStatus(html);
       } catch (err) {
         setStatus(`<div class="error-box">${bag.esc(err.message || String(err))}</div>`);
         throw err;

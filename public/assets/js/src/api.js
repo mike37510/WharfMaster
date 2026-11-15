@@ -333,13 +333,27 @@ export const Api = (() => {
         } catch (_) { /* ignore */ }
         throw new Error(msg);
       }
+      const skippedRaw = probe.headers.get('X-WharfMaster-Export-Skipped') || '';
+      let skipped = [];
+      if (skippedRaw) {
+        try {
+          const bin = atob(skippedRaw);
+          const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+          const decoded = new TextDecoder('utf-8').decode(bytes);
+          const parsed = JSON.parse(decoded);
+          if (Array.isArray(parsed)) skipped = parsed.map((s) => String(s));
+        } catch (_) {
+          // Ancien format texte brut (pipe)
+          skipped = skippedRaw.split(' | ').map((s) => s.trim()).filter(Boolean);
+        }
+      }
       const blob = await probe.blob();
       if (!blob || blob.size < 22) {
         throw new Error('Archive vide ou invalide');
       }
       if (window.navigator && typeof window.navigator.msSaveOrOpenBlob === 'function') {
         window.navigator.msSaveOrOpenBlob(blob, filename);
-        return { filename, size: blob.size };
+        return { filename, size: blob.size, skipped };
       }
       const obj = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -353,7 +367,7 @@ export const Api = (() => {
         a.remove();
         URL.revokeObjectURL(obj);
       }, 1500);
-      return { filename, size: blob.size };
+      return { filename, size: blob.size, skipped };
     },
     createStack: (Name, StackFileContent, Env = [], PullImages = false) =>
       request(`/api/stacks/create/standalone/string?endpointId=${getEndpointId()}`, {

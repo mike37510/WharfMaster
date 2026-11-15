@@ -178,19 +178,34 @@ final class StacksController extends BaseController
             if (!$zipPath || !is_file($zipPath) || !$downloadName) {
                 return Response::error('Export impossible', 500);
             }
+            $metaPath = $zipPath . '.meta.json';
+            $skippedList = [];
+            if (is_file($metaPath)) {
+                $meta = json_decode((string) file_get_contents($metaPath), true);
+                @unlink($metaPath);
+                $skippedList = is_array($meta['skippedVolumes'] ?? null) ? array_values($meta['skippedVolumes']) : [];
+            }
             $blob = (string) file_get_contents($zipPath);
             @unlink($zipPath);
             $this->audit($user, 'stack.export', 'Export ZIP de la stack « ' . ($stack['name'] ?? '') . ' »', $request, [
                 'stackId' => $id,
                 'name' => $stack['name'] ?? '',
                 'bytes' => strlen($blob),
+                'skipped' => $skippedList,
             ]);
-            return new Response(200, $blob, [
+            $headers = [
                 'Content-Type' => 'application/zip',
                 'Content-Disposition' => 'attachment; filename="' . $downloadName . '"',
                 'Cache-Control' => 'no-store',
                 'Content-Security-Policy' => "default-src 'none'",
-            ]);
+            ];
+            if ($skippedList !== []) {
+                // Base64 JSON — les en-têtes HTTP ne transportent pas correctement l'UTF-8
+                $headers['X-WharfMaster-Export-Skipped'] = base64_encode(
+                    json_encode($skippedList, JSON_UNESCAPED_UNICODE) ?: '[]'
+                );
+            }
+            return new Response(200, $blob, $headers);
         } catch (\Throwable $e) {
             $code = (int) $e->getCode();
             return Response::error(

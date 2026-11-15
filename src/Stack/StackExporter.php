@@ -77,6 +77,7 @@ final class StackExporter
             }
 
             $volumeMeta = [];
+            $skippedVolumes = [];
             $named = $this->resolveNamedVolumes($docker, $stackName, $composeContent);
             foreach ($named as $vol) {
                 $dockerName = (string) ($vol['Name'] ?? '');
@@ -85,9 +86,23 @@ final class StackExporter
                 }
                 $label = (string) ($vol['Label'] ?? $dockerName);
                 $tmp = sys_get_temp_dir() . '/wm-vol-' . bin2hex(random_bytes(6)) . '.tar';
-                $tmpVolFiles[] = $tmp;
                 $browser = new VolumeBrowser($docker);
-                $bytes = $browser->exportTarToFile($dockerName, $tmp);
+                try {
+                    $bytes = $browser->exportTarToFile($dockerName, $tmp);
+                } catch (\Throwable $e) {
+                    @unlink($tmp);
+                    $err = $e->getMessage() !== '' ? $e->getMessage() : 'Export volume impossible';
+                    $skippedVolumes[] = $label . ' : ' . $err;
+                    $volumeMeta[] = [
+                        'kind' => 'named',
+                        'name' => $dockerName,
+                        'label' => $label,
+                        'archive' => null,
+                        'error' => $err,
+                    ];
+                    continue;
+                }
+                $tmpVolFiles[] = $tmp;
                 $zipName = 'volumes/' . $this->safeFilePart($label) . '.tar';
                 $zip->addFile($tmp, $rootName . '/' . $zipName);
                 $files[] = $zipName;
@@ -108,20 +123,23 @@ final class StackExporter
                     continue;
                 }
                 $tmp = sys_get_temp_dir() . '/wm-bind-' . bin2hex(random_bytes(6)) . '.tar';
-                $tmpVolFiles[] = $tmp;
                 $browser = new VolumeBrowser($docker, $hostPath);
                 try {
                     $bytes = $browser->exportTarToFile($label, $tmp);
                 } catch (\Throwable $e) {
+                    @unlink($tmp);
+                    $err = $e->getMessage() !== '' ? $e->getMessage() : 'Export bind impossible';
+                    $skippedVolumes[] = $label . ' : ' . $err;
                     $volumeMeta[] = [
                         'kind' => 'bind',
                         'name' => $label,
                         'hostPath' => $hostPath,
                         'archive' => null,
-                        'error' => $e->getMessage(),
+                        'error' => $err,
                     ];
                     continue;
                 }
+                $tmpVolFiles[] = $tmp;
                 $zipName = 'binds/' . $this->safeFilePart($label) . '.tar';
                 $zip->addFile($tmp, $rootName . '/' . $zipName);
                 $files[] = $zipName;
@@ -150,17 +168,23 @@ final class StackExporter
                 ],
                 'files' => $files,
                 'volumes' => $volumeMeta,
+                'skippedVolumes' => $skippedVolumes,
+                'maxVolumeBytes' => VolumeBrowser::MAX_EXPORT_BYTES,
                 'notes' => [
                     'Restore compose with docker compose -p <name> -f ' . $composeFileName . ' up -d',
                     'Named volume tars are Docker GET /archive of /volume (top folder often named "volume").',
                     'Extract into the target volume or bind path before starting services.',
+                    'Volumes larger than ' . VolumeBrowser::maxExportLabel() . ' are skipped (see skippedVolumes).',
                 ],
             ];
             $zip->addFromString(
                 $rootName . '/MANIFEST.json',
                 json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}'
             );
-            $zip->addFromString($rootName . '/RESTORE.md', $this->restoreGuide($stackName, $composeFileName, $envIncluded));
+            $zip->addFromString(
+                $rootName . '/RESTORE.md',
+                $this->restoreGuide($stackName, $composeFileName, $envIncluded, $skippedVolumes)
+            );
             if ($zip->close() !== true) {
                 throw new \RuntimeException('Impossible de finaliser l’archive ZIP', 500);
             }
@@ -175,6 +199,15 @@ final class StackExporter
             }
 
             $downloadName = $rootName . '.zip';
+            // Encode skip hints in a response header via a sidecar marker file name is awkward;
+            // controller reads MANIFEST from zip or we return hints via downloadName suffix.
+            // Store skip summary next to zip for the controller (optional .meta.json).
+            if ($skippedVolumes !== []) {
+                @file_put_contents(
+                    $zipPath . '.meta.json',
+                    json_encode(['skippedVolumes' => $skippedVolumes], JSON_UNESCAPED_UNICODE) ?: '{}'
+                );
+            }
             return [null, $zipPath, $downloadName];
         } catch (\Throwable $e) {
             foreach ($tmpVolFiles as $f) {
@@ -331,11 +364,26 @@ final class StackExporter
         return substr($value, 0, 80);
     }
 
-    private function restoreGuide(string $stackName, string $composeFile, bool $envIncluded): string
+    /**
+     * @param list<string> $skippedVolumes
+     */
+    private function restoreGuide(string $stackName, string $composeFile, bool $envIncluded, array $skippedVolumes = []): string
     {
         $envLine = $envIncluded
             ? "- Le fichier `.env` est inclus (variables Compose).\n"
             : "- Pas de `.env` dans l’export.\n";
+        $skipBlock = '';
+        if ($skippedVolumes !== []) {
+            $max = VolumeBrowser::maxExportLabel();
+            $lines = implode("\n", array_map(static fn (string $s): string => '- ' . $s, $skippedVolumes));
+            $skipBlock = <<<MD
+
+
+## Volumes non inclus
+Limite d’export : **{$max}** par volume / bind. Non exportés :
+{$lines}
+MD;
+        }
         return <<<MD
 # Restauration — stack « {$stackName} »
 
@@ -344,6 +392,7 @@ final class StackExporter
 {$envLine}- `volumes/*.tar` — données des volumes nommés Docker
 - `binds/*.tar` — données des bind mounts
 - `MANIFEST.json` — inventaire
+{$skipBlock}
 
 ## Compose
 ```bash

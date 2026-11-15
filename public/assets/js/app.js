@@ -317,13 +317,26 @@
           }
           throw new Error(msg);
         }
+        const skippedRaw = probe.headers.get("X-WharfMaster-Export-Skipped") || "";
+        let skipped = [];
+        if (skippedRaw) {
+          try {
+            const bin = atob(skippedRaw);
+            const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+            const decoded = new TextDecoder("utf-8").decode(bytes);
+            const parsed = JSON.parse(decoded);
+            if (Array.isArray(parsed)) skipped = parsed.map((s) => String(s));
+          } catch (_) {
+            skipped = skippedRaw.split(" | ").map((s) => s.trim()).filter(Boolean);
+          }
+        }
         const blob = await probe.blob();
         if (!blob || blob.size < 22) {
           throw new Error("Archive vide ou invalide");
         }
         if (window.navigator && typeof window.navigator.msSaveOrOpenBlob === "function") {
           window.navigator.msSaveOrOpenBlob(blob, filename);
-          return { filename, size: blob.size };
+          return { filename, size: blob.size, skipped };
         }
         const obj = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -337,7 +350,7 @@
           a.remove();
           URL.revokeObjectURL(obj);
         }, 1500);
-        return { filename, size: blob.size };
+        return { filename, size: blob.size, skipped };
       },
       createStack: (Name, StackFileContent, Env = [], PullImages = false) => request(`/api/stacks/create/standalone/string?endpointId=${getEndpointId()}`, {
         method: "POST",
@@ -8412,7 +8425,7 @@ ${title}`;
       <div class="section-title">Export</div>
       <div class="toolbar" style="margin-bottom:8px; flex-wrap:wrap; gap:10px; align-items:center">
         <button type="button" class="btn btn-primary" id="stack-export">Exporter compose + volumes</button>
-        <span class="muted" style="font-size:12.5px">ZIP : docker-compose, .env, donn\xE9es des volumes et binds</span>
+        <span class="muted" style="font-size:12.5px">ZIP : docker-compose, .env, donn\xE9es des volumes et binds (max 1,5 Go par volume \u2014 au-del\xE0 : omis avec avertissement)</span>
       </div>
       <div id="stack-export-status" style="margin-bottom:1rem"></div>
       <div id="sched-modal"></div>`);
@@ -8438,7 +8451,13 @@ ${title}`;
         try {
           const res = await bag.Api.downloadStackExport(stack.Id);
           const sizeMo = res?.size ? ` (${(res.size / (1e3 * 1e3)).toFixed(1)} Mo)` : "";
-          setStatus(`<div class="info-box">Export t\xE9l\xE9charg\xE9${res?.filename ? ` : <span class="mono">${bag.esc(res.filename)}</span>` : ""}${sizeMo}.</div>`);
+          const skipped = Array.isArray(res?.skipped) ? res.skipped : [];
+          let html = `<div class="info-box">Export t\xE9l\xE9charg\xE9${res?.filename ? ` : <span class="mono">${bag.esc(res.filename)}</span>` : ""}${sizeMo}.</div>`;
+          if (skipped.length) {
+            const items = skipped.map((s) => `<li>${bag.esc(s)}</li>`).join("");
+            html += `<div class="error-box" style="margin-top:8px"><strong>Volumes / binds non inclus</strong> (limite 1,5 Go) :<ul style="margin:6px 0 0;padding-left:1.2em">${items}</ul></div>`;
+          }
+          setStatus(html);
         } catch (err) {
           setStatus(`<div class="error-box">${bag.esc(err.message || String(err))}</div>`);
           throw err;

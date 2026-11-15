@@ -4,6 +4,9 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+### Amélioré
+- **Export stack** : pré-contrôle de taille des volumes/binds (max 1,5 Go) — omis avec message clair au lieu de faire échouer tout le ZIP ; encodage UTF-8 correct des avertissements
+
 ## [2.3.7] — 2026-11-13
 
 ### Ajouté
