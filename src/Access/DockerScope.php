@@ -264,6 +264,17 @@ final class DockerScope
                     unset($hc[$mapKey]);
                 }
             }
+            // LogConfig.Config is map[string]string — empty {} must not become []
+            if (isset($hc['LogConfig'])) {
+                if (!is_array($hc['LogConfig']) || array_is_list($hc['LogConfig'])) {
+                    unset($hc['LogConfig']);
+                } else {
+                    $cfg = $hc['LogConfig']['Config'] ?? null;
+                    if ($cfg === null || $cfg === [] || !is_array($cfg) || array_is_list($cfg)) {
+                        $hc['LogConfig']['Config'] = new \stdClass();
+                    }
+                }
+            }
             unset($hc);
         }
 

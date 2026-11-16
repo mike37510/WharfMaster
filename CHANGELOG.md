@@ -4,6 +4,9 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+### Corrigé
+- Mise à jour image conteneur : `HostConfig.LogConfig.Config` vide (`{}` → `[]` en PHP) n’est plus rejeté par Docker
+
 ## [2.3.8] — 2026-11-16
 
 ### Ajouté
