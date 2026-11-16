@@ -159,14 +159,21 @@ final class ImageUpdateChecker
      * @param list<array<string, mixed>> $registries
      * @return array{Service:string,Image:string,Status:string,LocalDigest:?string,RemoteDigest:?string,Detail:string}
      */
+    /**
+     * @param list<array<string, mixed>> $registries
+     * @param ?string $localImageId  Image ID actually used by the container (inspect.Image / ImageID).
+     *                               When the floating tag was retagged locally, this must be used for
+     *                               the local digest — not a lookup of Config.Image which may point at a newer build.
+     */
     public function checkImageRef(
         string $image,
         DockerClient $docker,
         array $registries,
         bool $forceRefresh = false,
         string $label = 'container',
+        ?string $localImageId = null,
     ): array {
-        return $this->checkImage($label, $image, $docker, $registries, $forceRefresh);
+        return $this->checkImage($label, $image, $docker, $registries, $forceRefresh, $localImageId);
     }
 
     /**
@@ -223,7 +230,7 @@ final class ImageUpdateChecker
             }
         }
 
-        $byImage = [];
+        $byKey = [];
         $out = [];
         foreach ($containers as $c) {
             if (!is_array($c)) {
@@ -234,6 +241,7 @@ final class ImageUpdateChecker
                 continue;
             }
             $image = trim((string) ($c['Image'] ?? ''));
+            $imageId = trim((string) ($c['ImageID'] ?? ''));
             $name = '';
             if (!empty($c['Name']) && is_string($c['Name'])) {
                 $name = ltrim($c['Name'], '/');
@@ -242,26 +250,65 @@ final class ImageUpdateChecker
             } elseif (!empty($c['Names']) && is_string($c['Names'])) {
                 $name = ltrim($c['Names'], '/');
             }
-            if ($image === '' || str_starts_with($image, 'sha256:')) {
+            // List "Image" becomes sha256:… when the floating tag moved — recover Config.Image.
+            if ($image === '' || $this->isBareImageId($image)) {
+                try {
+                    $info = $docker->json('GET', '/containers/' . rawurlencode($id) . '/json');
+                    $cfgImg = trim((string) ($info['Config']['Image'] ?? ''));
+                    if ($cfgImg !== '') {
+                        $image = $cfgImg;
+                    }
+                    if ($imageId === '') {
+                        $imageId = trim((string) ($info['Image'] ?? ''));
+                    }
+                } catch (\Throwable) {
+                    // fall through
+                }
+            }
+            if ($image === '') {
                 $out[$id] = [
                     'Status' => 'unknown',
                     'UpdateCount' => 0,
                     'Checked' => 0,
-                    'Image' => $image,
-                    'ImageName' => $image,
-                    'Detail' => $image === '' ? 'Image absente' : 'Référence par digest local (tag indisponible)',
-                    'LocalDigest' => str_starts_with($image, 'sha256:') ? strtolower($image) : null,
+                    'Image' => $imageId,
+                    'ImageName' => $imageId,
+                    'Detail' => 'Image absente',
+                    'LocalDigest' => $this->isBareImageId($imageId) ? strtolower($imageId) : null,
                     'RemoteDigest' => null,
                     'LocalVersion' => '',
                     'RemoteVersion' => '',
                 ];
                 continue;
             }
-            $key = strtolower($image);
-            if (!isset($byImage[$key])) {
-                $byImage[$key] = $this->checkImage($name !== '' ? $name : 'container', $image, $docker, $registries, $forceRefresh);
+            if ($this->isBareImageId($image) && ($imageId === '' || $this->isBareImageId($imageId))) {
+                $out[$id] = [
+                    'Status' => 'unknown',
+                    'UpdateCount' => 0,
+                    'Checked' => 0,
+                    'Image' => $image,
+                    'ImageName' => $image,
+                    'Detail' => 'Référence par digest local (tag indisponible)',
+                    'LocalDigest' => strtolower($imageId !== '' ? $imageId : $image),
+                    'RemoteDigest' => null,
+                    'LocalVersion' => '',
+                    'RemoteVersion' => '',
+                ];
+                continue;
             }
-            $item = $byImage[$key];
+            // Dedupe by floating ref + actual content id (same tag can back different digests)
+            $localId = $imageId !== '' ? $imageId : null;
+            $key = strtolower($image) . '|' . strtolower((string) $localId);
+            if (!isset($byKey[$key])) {
+                $byKey[$key] = $this->checkImage(
+                    $name !== '' ? $name : 'container',
+                    $image,
+                    $docker,
+                    $registries,
+                    $forceRefresh,
+                    $localId,
+                );
+            }
+            $item = $byKey[$key];
             $status = (string) ($item['Status'] ?? 'unknown');
             $out[$id] = [
                 'Status' => $status,
@@ -420,6 +467,7 @@ final class ImageUpdateChecker
         DockerClient $docker,
         array $registries,
         bool $forceRefresh = false,
+        ?string $localImageId = null,
     ): array {
         $parsed = ManifestClient::parse($image);
         if ($parsed === null) {
@@ -438,7 +486,11 @@ final class ImageUpdateChecker
             );
         }
 
-        $localInfo = $this->localImageInfo($docker, $image, $parsed);
+        // Prefer the image ID the container actually runs (tag may already point at a newer build).
+        $localLookup = ($localImageId !== null && trim($localImageId) !== '')
+            ? trim($localImageId)
+            : $image;
+        $localInfo = $this->localImageInfo($docker, $localLookup, $parsed);
         $local = $localInfo['digest'];
         $localVersionRaw = $localInfo['version'];
         $localCreated = $localInfo['created'];
@@ -651,6 +703,18 @@ final class ImageUpdateChecker
             return trim($m[1]);
         }
         return $s;
+    }
+
+    private function isBareImageId(string $ref): bool
+    {
+        $ref = trim($ref);
+        if ($ref === '') {
+            return false;
+        }
+        if (preg_match('#^sha256:[a-f0-9]{12,}$#i', $ref)) {
+            return true;
+        }
+        return (bool) preg_match('#^[a-f0-9]{64}$#i', $ref);
     }
 
     /**

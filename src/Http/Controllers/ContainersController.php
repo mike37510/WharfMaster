@@ -77,6 +77,7 @@ final class ContainersController extends BaseController
             $docker = $this->dockerForEndpoint($ep);
             $info = $docker->json('GET', '/containers/' . rawurlencode($containerId) . '/json');
             $image = trim((string) ($info['Config']['Image'] ?? ''));
+            $localImageId = trim((string) ($info['Image'] ?? ''));
             $name = ltrim((string) ($info['Name'] ?? ''), '/');
             $item = $this->imageUpdates->checkImageRef(
                 $image,
@@ -84,6 +85,7 @@ final class ContainersController extends BaseController
                 $this->registriesWithPasswordsForUser($user),
                 $force,
                 $name !== '' ? $name : 'container',
+                $localImageId !== '' ? $localImageId : null,
             );
             return Response::json([
                 'Status' => $item['Status'],

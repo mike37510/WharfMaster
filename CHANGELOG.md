@@ -4,6 +4,14 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.4.0] — 2026-11-16
+
+### Corrigé
+- Détection MàJ images : compare le **digest réellement monté** par le conteneur (`Image` / `ImageID`), pas seulement le tag local `*:latest` (qui pouvait déjà pointer vers un build plus récent → faux « à jour »)
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.4.0`**
+
 ## [2.3.9] — 2026-11-16
 
 ### Corrigé
