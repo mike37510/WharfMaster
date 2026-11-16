@@ -6,6 +6,7 @@ Toutes les dates sont en UTC+1.
 
 ### Corrigé
 - Mise à jour image conteneur : `HostConfig.LogConfig.Config` vide (`{}` → `[]` en PHP) n’est plus rejeté par Docker
+- Après MàJ image : rechargement de la liste avec le **nouvel** ID (plus de « No such container » sur l’ancien)
 
 ## [2.3.8] — 2026-11-16
 

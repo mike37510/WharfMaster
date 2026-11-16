@@ -2937,7 +2937,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
         fromEl?.dataset?.id || fromEl?.dataset?.name || fromEl?.dataset?.updId || tr?.dataset?.stackId || tr?.dataset?.containerId || tr?.dataset?.resourceId || ""
       );
       const name = String(
-        fromEl?.dataset?.name || tr?.dataset?.resourceName || ""
+        fromEl?.dataset?.name || tr?.dataset?.resourceName || tr?.querySelector?.(".name-cell a, .name-cell strong")?.textContent?.trim() || ""
       );
       return {
         y: window.scrollY || window.pageYOffset || 0,
@@ -4801,7 +4801,7 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           ${bag.iconBtn({ title: "Partager", icon: "users", info: true, shareType: "container", shareKey: name || c.Id })}
           ${bag.iconBtn({ act: "remove", id: c.Id, title: "Supprimer", icon: "remove", danger: true })}
         </div>`;
-        return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}">
+        return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}" data-resource-name="${bag.esc(name)}">
         ${all ? "" : bag.bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${bag.esc(c._nodeName || "\u2014")}</td>` : ""}
         <td class="name-cell">
@@ -7702,6 +7702,17 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         return null;
       }
     };
+    bag.scrubContainerUpdateCache = function scrubContainerUpdateCache(oldIds) {
+      const map = bag.readImageUpdateCache("containers") || {};
+      let changed = false;
+      (Array.isArray(oldIds) ? oldIds : [oldIds]).forEach((id) => {
+        const key = String(id || "");
+        if (!key || !(key in map)) return;
+        delete map[key];
+        changed = true;
+      });
+      if (changed) bag.writeImageUpdateCache("containers", map);
+    };
     bag.upgradeImageUpdateTarget = async function upgradeImageUpdateTarget(action, id) {
       if (action === "stack") {
         await bag.upgradeStackImages(id);
@@ -7711,10 +7722,15 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
         const stack = await bag.findStackForContainer(id);
         if (stack?.Id != null) {
           await bag.upgradeStackImages(stack.Id);
-          return { kind: "stack", id: stack.Id, via: "container", name: stack.Name };
+          bag.scrubContainerUpdateCache(id);
+          return { kind: "stack", id: stack.Id, via: "container", name: stack.Name, previousContainerId: id };
         }
-        await bag.Api.updateContainerImage(id, true);
-        return { kind: "container", id };
+        const res = await bag.Api.updateContainerImage(id, true);
+        const newId = String(res?.Id || "");
+        const previousId = String(res?.PreviousId || id);
+        bag.scrubContainerUpdateCache([id, previousId]);
+        if (!newId) throw new Error("Mise \xE0 jour OK mais nouvel ID conteneur manquant");
+        return { kind: "container", id: newId, previousId, name: res?.Name || "" };
       }
       throw new Error("Action de mise \xE0 jour inconnue");
     };
@@ -7729,7 +7745,11 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
           const kind = el.dataset.updAction;
           const targetId = el.dataset.updId;
           const focus = bag.captureListFocus(el);
-          await bag.upgradeImageUpdateTarget(kind, targetId);
+          const result = await bag.upgradeImageUpdateTarget(kind, targetId);
+          if (result?.name && focus) focus.name = String(result.name);
+          else if (result?.previousId && focus?.id === String(result.previousId) && result.id) {
+            focus.id = String(result.id);
+          }
           const route = String(bag.state.route || "");
           if (route.startsWith("stacks/") && route !== "stacks/new") {
             const sid = route.split("/")[1];
@@ -7745,13 +7765,19 @@ Cliquer pour tirer les images et red\xE9ployer` : title || label;
             return;
           }
           if (route.startsWith("containers/") && route !== "containers/new") {
-            bag.rememberListFocus(focus);
-            await bag.route();
+            if (result?.kind === "container" && result.id) {
+              location.hash = `#containers/${encodeURIComponent(result.id)}`;
+              await bag.route();
+            } else {
+              location.hash = "#containers";
+              await bag.route();
+            }
             bag.restoreListFocus(focus);
             return;
           }
           if (route === "containers") {
-            await bag.loadContainerUpdateIndicators(true);
+            bag.rememberListFocus(focus);
+            await bag.viewContainers();
             bag.restoreListFocus(focus);
           }
         }, { confirm: confirmMsg, minMs: 400 });

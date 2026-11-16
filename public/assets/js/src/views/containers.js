@@ -769,7 +769,7 @@ export function install() {
           ${bag.iconBtn({ title: 'Partager', icon: 'users', info: true, shareType: 'container', shareKey: name || c.Id })}
           ${bag.iconBtn({ act: 'remove', id: c.Id, title: 'Supprimer', icon: 'remove', danger: true })}
         </div>`;
-      return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}">
+      return `<tr class="${rowCls}" data-search="${bag.esc(search)}" data-container-id="${bag.esc(c.Id)}" data-resource-name="${bag.esc(name)}">
         ${all ? '' : bag.bulkSelectTd(c.Id)}
         ${all ? `<td class="muted">${bag.esc(c._nodeName || '—')}</td>` : ''}
         <td class="name-cell">

@@ -917,6 +917,7 @@ export function install() {
     const name = String(
       fromEl?.dataset?.name
       || tr?.dataset?.resourceName
+      || tr?.querySelector?.('.name-cell a, .name-cell strong')?.textContent?.trim()
       || '',
     );
     return {

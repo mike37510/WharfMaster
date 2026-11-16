@@ -236,6 +236,18 @@ export function install() {
    * - stack → pull + redeploy Compose
    * - container → upgrade parent stack if Compose, else pull + recreate
    */
+  bag.scrubContainerUpdateCache = function scrubContainerUpdateCache(oldIds) {
+    const map = bag.readImageUpdateCache('containers') || {};
+    let changed = false;
+    (Array.isArray(oldIds) ? oldIds : [oldIds]).forEach((id) => {
+      const key = String(id || '');
+      if (!key || !(key in map)) return;
+      delete map[key];
+      changed = true;
+    });
+    if (changed) bag.writeImageUpdateCache('containers', map);
+  }
+
   bag.upgradeImageUpdateTarget = async function upgradeImageUpdateTarget(action, id) {
     if (action === 'stack') {
       await bag.upgradeStackImages(id);
@@ -245,10 +257,16 @@ export function install() {
       const stack = await bag.findStackForContainer(id);
       if (stack?.Id != null) {
         await bag.upgradeStackImages(stack.Id);
-        return { kind: 'stack', id: stack.Id, via: 'container', name: stack.Name };
+        // Compose recreates services → old container IDs are gone
+        bag.scrubContainerUpdateCache(id);
+        return { kind: 'stack', id: stack.Id, via: 'container', name: stack.Name, previousContainerId: id };
       }
-      await bag.Api.updateContainerImage(id, true);
-      return { kind: 'container', id };
+      const res = await bag.Api.updateContainerImage(id, true);
+      const newId = String(res?.Id || '');
+      const previousId = String(res?.PreviousId || id);
+      bag.scrubContainerUpdateCache([id, previousId]);
+      if (!newId) throw new Error('Mise à jour OK mais nouvel ID conteneur manquant');
+      return { kind: 'container', id: newId, previousId, name: res?.Name || '' };
     }
     throw new Error('Action de mise à jour inconnue');
   }
@@ -266,7 +284,12 @@ export function install() {
         const kind = el.dataset.updAction;
         const targetId = el.dataset.updId;
         const focus = bag.captureListFocus(el);
-        await bag.upgradeImageUpdateTarget(kind, targetId);
+        const result = await bag.upgradeImageUpdateTarget(kind, targetId);
+        // Prefer stable name after recreate (container ID changes)
+        if (result?.name && focus) focus.name = String(result.name);
+        else if (result?.previousId && focus?.id === String(result.previousId) && result.id) {
+          focus.id = String(result.id);
+        }
         const route = String(bag.state.route || '');
         if (route.startsWith('stacks/') && route !== 'stacks/new') {
           const sid = route.split('/')[1];
@@ -282,13 +305,21 @@ export function install() {
           return;
         }
         if (route.startsWith('containers/') && route !== 'containers/new') {
-          bag.rememberListFocus(focus);
-          await bag.route();
+          if (result?.kind === 'container' && result.id) {
+            location.hash = `#containers/${encodeURIComponent(result.id)}`;
+            await bag.route();
+          } else {
+            // Stack redeploy from a container detail → back to list (old ID is gone)
+            location.hash = '#containers';
+            await bag.route();
+          }
           bag.restoreListFocus(focus);
           return;
         }
         if (route === 'containers') {
-          await bag.loadContainerUpdateIndicators(true);
+          // Must reload rows: recreate/compose replaces container IDs
+          bag.rememberListFocus(focus);
+          await bag.viewContainers();
           bag.restoreListFocus(focus);
         }
       }, { confirm: confirmMsg, minMs: 400 });
