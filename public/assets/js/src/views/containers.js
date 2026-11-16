@@ -719,25 +719,37 @@ export function install() {
   bag.viewContainers = async function viewContainers() {
     const all = bag.isAllNodes();
     let list = [];
+    let images = [];
     let partial = false;
     let perNodeHint = '';
     let failMsg = '';
     if (all) {
-      const agg = await bag.dockerAll('/containers/json?all=true');
+      const [agg, aggImg] = await Promise.all([
+        bag.dockerAll('/containers/json?all=true'),
+        bag.dockerAll('/images/json').catch(() => ({ items: [] })),
+      ]);
       list = agg.items;
+      images = aggImg.items || [];
       partial = agg.failed > 0;
       perNodeHint = (agg.perNode || []).map((n) => `${n.name}: ${n.count}`).join(' · ');
       failMsg = (agg.failedNames || []).length
         ? ` Nœuds sans réponse : ${(agg.failedNames || []).join(', ')}.`
         : '';
     } else {
-      list = (await bag.Api.docker('/containers/json?all=true')) || [];
+      const [ctrs, imgs] = await Promise.all([
+        bag.Api.docker('/containers/json?all=true'),
+        bag.Api.docker('/images/json').catch(() => []),
+      ]);
+      list = ctrs || [];
+      images = imgs || [];
     }
+    const imageIndex = bag.buildImageNameIndex(images);
 
     const containerName = (c) => (c.Names && c.Names[0] ? c.Names[0].replace(/^\//, '') : bag.shortId(c.Id));
+    const imageLabel = (c) => bag.containerImageLabel(c, imageIndex);
     list = bag.sortItems(list, 'containers', {
       name: containerName,
-      image: (c) => c.Image || '',
+      image: imageLabel,
       state: (c) => String(c.State || ''),
       node: (c) => c._nodeName || '',
       ports: (c) => bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId),
@@ -746,10 +758,11 @@ export function install() {
 
     const rows = list.map((c) => {
       const name = containerName(c);
+      const imgLabel = imageLabel(c);
       const st = String(c.State || '').toLowerCase();
       const isRunning = st === 'running' || st === 'restarting';
       const rowCls = isRunning ? '' : 'row-stopped';
-      const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ''}`.toLowerCase();
+      const search = `${name} ${imgLabel} ${c.Image || ''} ${c.Id} ${c.State} ${c._nodeName || ''}`.toLowerCase();
       const actions = all
         ? `<span class="muted">—</span>`
         : `<div class="quick-actions">
@@ -777,12 +790,12 @@ export function install() {
           <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
         </td>
         <td>${bag.badge(c.State)}</td>
-        <td class="mono cell-clip cell-image" title="${bag.esc(c.Image || '')}">
+        <td class="mono cell-clip cell-image" title="${bag.esc(imgLabel)}">
           <span class="img-with-upd">
             ${all ? '' : `<span class="img-upd-slot" data-cupd="${bag.esc(c.Id)}">
               <span class="img-upd is-loading img-upd-dot-only" title="Vérification de l’image…"><span class="img-upd-dot"></span></span>
             </span>`}
-            <span class="img-name">${bag.esc(c.Image || '')}</span>
+            <span class="img-name">${bag.esc(imgLabel)}</span>
           </span>
         </td>
         <td>${bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId)}</td>

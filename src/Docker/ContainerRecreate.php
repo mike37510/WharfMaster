@@ -21,7 +21,8 @@ final class ContainerRecreate
     public function upgrade(string $containerId, bool $pull = true, array $registryCreds = []): array
     {
         $inspect = $this->docker->json('GET', '/containers/' . rawurlencode($containerId) . '/json');
-        $image = trim((string) ($inspect['Config']['Image'] ?? ''));
+        // Prefer a named ref (repo:tag). Bare sha256 IDs make the list show "sha256:…" after recreate.
+        $image = $this->resolveNamedImage($inspect);
         if ($image === '') {
             throw new \RuntimeException('Image du conteneur introuvable');
         }
@@ -53,7 +54,7 @@ final class ContainerRecreate
         );
 
         try {
-            $createBody = $this->buildCreateBody($inspect);
+            $createBody = $this->buildCreateBody($inspect, $image);
             $created = $this->docker->json('POST', '/containers/create', $createBody, ['name' => $name]);
             $newId = (string) ($created['Id'] ?? '');
             if ($newId === '') {
@@ -168,8 +169,94 @@ final class ContainerRecreate
         return $host . '/' . $repo;
     }
 
+    /**
+     * Named image for pull/create. Avoid bare content IDs so the container list
+     * keeps showing repo:tag instead of sha256:….
+     *
+     * @param array<string, mixed> $inspect
+     */
+    private function resolveNamedImage(array $inspect): string
+    {
+        $configImage = trim((string) ($inspect['Config']['Image'] ?? ''));
+        $candidates = [];
+        if ($configImage !== '') {
+            $candidates[] = $configImage;
+        }
+        $labels = is_array($inspect['Config']['Labels'] ?? null) ? $inspect['Config']['Labels'] : [];
+        foreach ([
+            'com.docker.compose.image',
+            'org.opencontainers.image.ref.name',
+            'org.opencontainers.image.source',
+        ] as $labelKey) {
+            $v = trim((string) ($labels[$labelKey] ?? ''));
+            if ($v !== '') {
+                $candidates[] = $v;
+            }
+        }
+
+        $imageId = trim((string) ($inspect['Image'] ?? ''));
+        if ($imageId !== '') {
+            try {
+                $img = $this->docker->json('GET', '/images/' . rawurlencode($imageId) . '/json');
+                foreach (['RepoTags', 'RepoDigests'] as $field) {
+                    $list = $img[$field] ?? null;
+                    if (!is_array($list)) {
+                        continue;
+                    }
+                    foreach ($list as $ref) {
+                        $ref = trim((string) $ref);
+                        if ($ref !== '' && $ref !== '<none>:<none>' && $ref !== '<none>@<none>') {
+                            $candidates[] = $ref;
+                        }
+                    }
+                }
+            } catch (\Throwable) {
+                // keep Config.Image fallback
+            }
+        }
+
+        foreach ($candidates as $ref) {
+            $named = $this->toFloatingImageRef($ref);
+            if ($named !== '') {
+                return $named;
+            }
+        }
+        return $configImage;
+    }
+
+    /** True when ref is a content/image id, not a repository name. */
+    private function isImageIdRef(string $ref): bool
+    {
+        $ref = trim($ref);
+        if ($ref === '') {
+            return false;
+        }
+        if (preg_match('#^sha256:[a-f0-9]{12,}$#i', $ref)) {
+            return true;
+        }
+        return (bool) preg_match('#^[a-f0-9]{64}$#i', $ref);
+    }
+
+    /**
+     * repo@sha256:… → repo (floating); keep repo:tag; reject bare ids.
+     */
+    private function toFloatingImageRef(string $ref): string
+    {
+        $ref = trim($ref);
+        if ($ref === '' || $this->isImageIdRef($ref)) {
+            return '';
+        }
+        if (preg_match('#^(.+?)@(sha256:[a-f0-9]+)$#i', $ref, $m)) {
+            $ref = trim($m[1]);
+            if ($ref === '' || $this->isImageIdRef($ref)) {
+                return '';
+            }
+        }
+        return $ref;
+    }
+
     /** @param array<string, mixed> $inspect */
-    private function buildCreateBody(array $inspect): array
+    private function buildCreateBody(array $inspect, ?string $imageOverride = null): array
     {
         $config = is_array($inspect['Config'] ?? null) ? $inspect['Config'] : [];
         $hostConfig = is_array($inspect['HostConfig'] ?? null) ? $inspect['HostConfig'] : [];
@@ -190,7 +277,7 @@ final class ContainerRecreate
             $networks[(string) $netName] = $endpoint;
         }
 
-        $image = (string) ($inspect['Config']['Image'] ?? '');
+        $image = trim((string) ($imageOverride ?? $inspect['Config']['Image'] ?? ''));
         $body = $config;
         // Inspect-only / read-only fields must not be replayed on create
         foreach (['Hostname', 'Domainname'] as $keepEmptyOk) {

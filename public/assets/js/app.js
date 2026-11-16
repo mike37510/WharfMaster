@@ -745,6 +745,48 @@
     bag.shortId = function shortId(id) {
       return String(id || "").replace(/^sha256:/, "").slice(0, 12);
     };
+    bag.isImageIdRef = function isImageIdRef(ref) {
+      const s = String(ref || "").trim();
+      return /^sha256:[a-f0-9]{12,}$/i.test(s) || /^[a-f0-9]{64}$/i.test(s);
+    };
+    bag.buildImageNameIndex = function buildImageNameIndex(images) {
+      const map = /* @__PURE__ */ new Map();
+      const add = (key, name) => {
+        if (!key || !name) return;
+        const k = String(key);
+        if (!map.has(k)) map.set(k, name);
+        const bare = k.replace(/^sha256:/i, "");
+        if (bare !== k && !map.has(bare)) map.set(bare, name);
+        if (bare.length >= 12) {
+          const short = bare.slice(0, 12);
+          if (!map.has(short)) map.set(short, name);
+        }
+      };
+      (images || []).forEach((img) => {
+        const tags = (img.RepoTags || []).filter((t) => t && t !== "<none>:<none>");
+        const digests = (img.RepoDigests || []).filter((d) => d && !String(d).includes("<none>"));
+        let name = tags[0] || "";
+        if (!name && digests[0]) {
+          name = String(digests[0]).replace(/@sha256:[a-f0-9]+$/i, "");
+        }
+        if (!name) return;
+        add(img.Id, name);
+        digests.forEach((d) => {
+          const m = String(d).match(/@(sha256:[a-f0-9]+)/i);
+          if (m) add(m[1], name);
+        });
+      });
+      return map;
+    };
+    bag.containerImageLabel = function containerImageLabel(c, index) {
+      const raw = String(c?.Image || "").trim();
+      if (!raw) return "\u2014";
+      if (!bag.isImageIdRef(raw)) return raw;
+      const idx = index || null;
+      if (!idx) return raw;
+      const id = String(c.ImageID || c.Image || "");
+      return idx.get(raw) || idx.get(raw.replace(/^sha256:/i, "")) || idx.get(id) || idx.get(id.replace(/^sha256:/i, "")) || idx.get(bag.shortId(raw)) || idx.get(bag.shortId(id)) || raw;
+    };
     bag.openResourceUsersModal = function openResourceUsersModal({ title, subtitle, users, extraCol }) {
       bag.closeAppModal();
       const host = bag.modalHost();
@@ -4753,22 +4795,34 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
     bag.viewContainers = async function viewContainers() {
       const all = bag.isAllNodes();
       let list = [];
+      let images = [];
       let partial = false;
       let perNodeHint = "";
       let failMsg = "";
       if (all) {
-        const agg = await bag.dockerAll("/containers/json?all=true");
+        const [agg, aggImg] = await Promise.all([
+          bag.dockerAll("/containers/json?all=true"),
+          bag.dockerAll("/images/json").catch(() => ({ items: [] }))
+        ]);
         list = agg.items;
+        images = aggImg.items || [];
         partial = agg.failed > 0;
         perNodeHint = (agg.perNode || []).map((n) => `${n.name}: ${n.count}`).join(" \xB7 ");
         failMsg = (agg.failedNames || []).length ? ` N\u0153uds sans r\xE9ponse : ${(agg.failedNames || []).join(", ")}.` : "";
       } else {
-        list = await bag.Api.docker("/containers/json?all=true") || [];
+        const [ctrs, imgs] = await Promise.all([
+          bag.Api.docker("/containers/json?all=true"),
+          bag.Api.docker("/images/json").catch(() => [])
+        ]);
+        list = ctrs || [];
+        images = imgs || [];
       }
+      const imageIndex = bag.buildImageNameIndex(images);
       const containerName = (c) => c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : bag.shortId(c.Id);
+      const imageLabel = (c) => bag.containerImageLabel(c, imageIndex);
       list = bag.sortItems(list, "containers", {
         name: containerName,
-        image: (c) => c.Image || "",
+        image: imageLabel,
         state: (c) => String(c.State || ""),
         node: (c) => c._nodeName || "",
         ports: (c) => bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId),
@@ -4776,10 +4830,11 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       });
       const rows = list.map((c) => {
         const name = containerName(c);
+        const imgLabel = imageLabel(c);
         const st = String(c.State || "").toLowerCase();
         const isRunning = st === "running" || st === "restarting";
         const rowCls = isRunning ? "" : "row-stopped";
-        const search = `${name} ${c.Image} ${c.Id} ${c.State} ${c._nodeName || ""}`.toLowerCase();
+        const search = `${name} ${imgLabel} ${c.Image || ""} ${c.Id} ${c.State} ${c._nodeName || ""}`.toLowerCase();
         const actions = all ? `<span class="muted">\u2014</span>` : `<div class="quick-actions">
           ${bag.iconBtn({ act: "start", id: c.Id, title: isRunning ? "D\xE9j\xE0 d\xE9marr\xE9" : "D\xE9marrer", icon: "start", success: !isRunning, disabled: isRunning })}
           ${bag.iconBtn({ act: "stop", id: c.Id, title: isRunning ? "Arr\xEAter" : "D\xE9j\xE0 arr\xEAt\xE9", icon: "stop", danger: isRunning, disabled: !isRunning })}
@@ -4809,12 +4864,12 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
           <span class="id">${bag.esc(bag.shortId(c.Id))}</span>
         </td>
         <td>${bag.badge(c.State)}</td>
-        <td class="mono cell-clip cell-image" title="${bag.esc(c.Image || "")}">
+        <td class="mono cell-clip cell-image" title="${bag.esc(imgLabel)}">
           <span class="img-with-upd">
             ${all ? "" : `<span class="img-upd-slot" data-cupd="${bag.esc(c.Id)}">
               <span class="img-upd is-loading img-upd-dot-only" title="V\xE9rification de l\u2019image\u2026"><span class="img-upd-dot"></span></span>
             </span>`}
-            <span class="img-name">${bag.esc(c.Image || "")}</span>
+            <span class="img-name">${bag.esc(imgLabel)}</span>
           </span>
         </td>
         <td>${bag.formatPorts(c.Ports || [], c._nodeId || c.EndpointId)}</td>
@@ -11563,7 +11618,7 @@ ${title}`;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.8", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.9", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");

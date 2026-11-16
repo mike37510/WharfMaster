@@ -4,9 +4,15 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.9] — 2026-11-16
+
 ### Corrigé
 - Mise à jour image conteneur : `HostConfig.LogConfig.Config` vide (`{}` → `[]` en PHP) n’est plus rejeté par Docker
 - Après MàJ image : rechargement de la liste avec le **nouvel** ID (plus de « No such container » sur l’ancien)
+- Après MàJ / liste conteneurs : plus d’affichage `sha256:…` à la place du nom — recreation avec ref nommée (RepoTags / labels) + résolution d’affichage
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.9`**
 
 ## [2.3.8] — 2026-11-16
 

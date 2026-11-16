@@ -304,6 +304,60 @@ export function installCore() {
     return String(id || '').replace(/^sha256:/, '').slice(0, 12);
   }
 
+  /** Bare image/content id (not a repository name). */
+  bag.isImageIdRef = function isImageIdRef(ref) {
+    const s = String(ref || '').trim();
+    return /^sha256:[a-f0-9]{12,}$/i.test(s) || /^[a-f0-9]{64}$/i.test(s);
+  }
+
+  /** Map image Id / short id / digest → first RepoTag (or repo from RepoDigest). */
+  bag.buildImageNameIndex = function buildImageNameIndex(images) {
+    const map = new Map();
+    const add = (key, name) => {
+      if (!key || !name) return;
+      const k = String(key);
+      if (!map.has(k)) map.set(k, name);
+      const bare = k.replace(/^sha256:/i, '');
+      if (bare !== k && !map.has(bare)) map.set(bare, name);
+      if (bare.length >= 12) {
+        const short = bare.slice(0, 12);
+        if (!map.has(short)) map.set(short, name);
+      }
+    };
+    (images || []).forEach((img) => {
+      const tags = (img.RepoTags || []).filter((t) => t && t !== '<none>:<none>');
+      const digests = (img.RepoDigests || []).filter((d) => d && !String(d).includes('<none>'));
+      let name = tags[0] || '';
+      if (!name && digests[0]) {
+        name = String(digests[0]).replace(/@sha256:[a-f0-9]+$/i, '');
+      }
+      if (!name) return;
+      add(img.Id, name);
+      digests.forEach((d) => {
+        const m = String(d).match(/@(sha256:[a-f0-9]+)/i);
+        if (m) add(m[1], name);
+      });
+    });
+    return map;
+  }
+
+  /** Prefer repo:tag when Docker list returns sha256:… for Image. */
+  bag.containerImageLabel = function containerImageLabel(c, index) {
+    const raw = String(c?.Image || '').trim();
+    if (!raw) return '—';
+    if (!bag.isImageIdRef(raw)) return raw;
+    const idx = index || null;
+    if (!idx) return raw;
+    const id = String(c.ImageID || c.Image || '');
+    return idx.get(raw)
+      || idx.get(raw.replace(/^sha256:/i, ''))
+      || idx.get(id)
+      || idx.get(id.replace(/^sha256:/i, ''))
+      || idx.get(bag.shortId(raw))
+      || idx.get(bag.shortId(id))
+      || raw;
+  }
+
   bag.openResourceUsersModal = function openResourceUsersModal({ title, subtitle, users, extraCol }) {
     bag.closeAppModal();
     const host = bag.modalHost();
