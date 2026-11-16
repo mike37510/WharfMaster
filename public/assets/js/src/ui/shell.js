@@ -28,6 +28,7 @@ export function install() {
       ['nodes', 'Nœuds', isAdmin, '#nodes'],
       ['users', 'Utilisateurs', isAdmin, '#users'],
       ['teams', 'Équipes', isAdmin, '#teams'],
+      ['settings/tests', 'Tests', isAdmin, '#settings/tests'],
     ].filter((row) => row[2]);
     return `<nav class="settings-subnav" aria-label="Sections paramètres">
       ${tabs.map(([id, label, , href]) => {
@@ -325,12 +326,18 @@ export function install() {
 
   bag.renderTablePager = function renderTablePager(pager, { page, pageCount, matched, pageSize }) {
     if (!pager) return;
-    if (matched <= pageSize) {
-      pager.hidden = true;
-      pager.innerHTML = '';
+    const sizes = bag.PAGE_SIZES || [10, 20, 50, 100, 200];
+    const sizeOpts = sizes.map((n) =>
+      `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n}</option>`
+    ).join('');
+    const sizeSelect = `<label class="table-pager-size"><span class="muted">Par page</span>
+      <select class="table-pager-size-select" data-page-size aria-label="Lignes par page">${sizeOpts}</select>
+    </label>`;
+    pager.hidden = false;
+    if (matched <= pageSize || pageCount <= 1) {
+      pager.innerHTML = `${sizeSelect}<span class="muted table-pager-meta">${matched} élément${matched !== 1 ? 's' : ''}</span>`;
       return;
     }
-    pager.hidden = false;
     const prevDisabled = page <= 1 ? ' disabled' : '';
     const nextDisabled = page >= pageCount ? ' disabled' : '';
     // Compact page buttons: window around current
@@ -356,7 +363,7 @@ export function install() {
       <button type="button" class="btn btn-sm" data-page-nav="prev"${prevDisabled} title="Page précédente" aria-label="Page précédente">←</button>
       <div class="table-pager-pages">${buttons.join('')}</div>
       <button type="button" class="btn btn-sm" data-page-nav="next"${nextDisabled} title="Page suivante" aria-label="Page suivante">→</button>
-      <span class="muted table-pager-meta">${bag.esc(String(pageSize))} / page</span>`;
+      ${sizeSelect}`;
   }
 
   /**
@@ -369,12 +376,18 @@ export function install() {
     const input = document.getElementById('filter');
     const table = bag.root.querySelector('table.data tbody');
     if (!input || !table) return;
-    const pageSize = Number(opts.pageSize) > 0 ? Number(opts.pageSize) : 0;
-    const pager = pageSize > 0 ? bag.ensureTablePager() : null;
+    const paged = Number(opts.pageSize) > 0;
+    const pager = paged ? bag.ensureTablePager() : null;
     const allRows = () => [...table.querySelectorAll('tr[data-search]')];
     const allTotal = allRows().length;
+    const currentPageSize = () => {
+      if (!paged) return 0;
+      const n = Number(bag.state.pageSize) || 0;
+      return n > 0 ? n : 20;
+    };
 
     const run = ({ resetPage = false } = {}) => {
+      const pageSize = currentPageSize();
       const q = input.value.trim().toLowerCase();
       bag.state.filters[key] = input.value;
       if (resetPage && pageSize > 0) bag.state.pages[key] = 1;
@@ -447,6 +460,13 @@ export function install() {
           bag.state.pages[key] = parseInt(num.getAttribute('data-page'), 10) || 1;
         }
         run();
+      };
+      pager.onchange = (e) => {
+        const sel = e.target.closest('[data-page-size]');
+        if (!sel) return;
+        bag.setPageSize(sel.value);
+        bag.state.pages[key] = 1;
+        run({ resetPage: true });
       };
     }
 

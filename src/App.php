@@ -150,7 +150,7 @@ final class App
         $R->get('/api/users', fn ($r, $p) => $users->listUsers($u($p)));
         $R->post('/api/users', fn ($r, $p) => $users->createUser($r, $u($p)));
         $R->put('/api/users/{id}/passwd', fn ($r, $p) => $users->changeUserPassword((int) $p['id'], $r, $u($p)));
-        $R->delete('/api/users/{id}', fn ($r, $p) => $users->deleteUser((int) $p['id'], $u($p)));
+        $R->delete('/api/users/{id}', fn ($r, $p) => $users->deleteUser((int) $p['id'], $r, $u($p)));
         $R->get('/api/users/{id}/tokens', fn ($r, $p) => $users->listTokens((int) $p['id'], $u($p)));
         $R->post('/api/users/{id}/tokens', fn ($r, $p) => $users->createToken((int) $p['id'], $r, $u($p)));
         $R->delete('/api/users/{id}/tokens/{tid}', fn ($r, $p) => $users->revokeToken((int) $p['id'], (int) $p['tid'], $r, $u($p)));
@@ -166,9 +166,9 @@ final class App
         $R->post('/api/teams', fn ($r, $p) => $teams->createTeam($r, $u($p)));
         $R->get('/api/teams/{id}', fn ($r, $p) => $teams->getTeam((int) $p['id'], $u($p)));
         $R->put('/api/teams/{id}', fn ($r, $p) => $teams->updateTeam((int) $p['id'], $r, $u($p)));
-        $R->delete('/api/teams/{id}', fn ($r, $p) => $teams->deleteTeam((int) $p['id'], $u($p)));
+        $R->delete('/api/teams/{id}', fn ($r, $p) => $teams->deleteTeam((int) $p['id'], $r, $u($p)));
         $R->post('/api/teams/{id}/members', fn ($r, $p) => $teams->addTeamMember((int) $p['id'], $r, $u($p)));
-        $R->delete('/api/teams/{id}/members/{uid}', fn ($r, $p) => $teams->removeTeamMember((int) $p['id'], (int) $p['uid'], $u($p)));
+        $R->delete('/api/teams/{id}/members/{uid}', fn ($r, $p) => $teams->removeTeamMember((int) $p['id'], (int) $p['uid'], $r, $u($p)));
         $R->get('/api/teams/{id}/memberships', fn ($r, $p) => $teams->listTeamMembershipsForTeam((int) $p['id'], $u($p)));
         $R->get('/api/team_memberships', fn ($r, $p) => $teams->listTeamMembershipsPortainer($u($p)));
         $R->post('/api/team_memberships', fn ($r, $p) => $teams->createTeamMembershipPortainer($r, $u($p)));

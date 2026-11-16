@@ -1,6 +1,6 @@
 # WharfMaster — Documentation
 
-Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.7**.
+Guide d’utilisation de la console et de l’**API HTTP**. Version applicative : **2.3.8**.
 
 | | |
 |---|---|
@@ -27,7 +27,7 @@ Guide d’utilisation de la console et de l’**API HTTP**. Version applicative 
 - **indicateurs de mise à jour** d’images (stacks & conteneurs) avec **mise à jour en un clic** ;
 - **métriques** CPU / RAM / disque·réseau (jauges + courbes) avec **navigation sur toute la rétention** ;
 - **topologie** réseau (détail conteneur / stack) avec volumes montés sur chaque carte ;
-- diagnostics admin + tests API Docker ;
+- suite **Tests** admin (`#settings/tests`) : smoke exhaustif (users, équipes, registres, Docker/stack sur tous les nœuds, schedules, CVE, backup) ;
 - API compatible **Portainer CE** + extensions WharfMaster.
 
 Licence : **MIT**.
@@ -77,7 +77,7 @@ DocumentRoot = **`public/`** uniquement (`src/`, `config/`, `var/`, `agent/` hor
 | Images | Liste, pull, build, pastilles CVE + usage |
 | Réseaux | Liste, création, schéma d’usage |
 | Journaux | Audit applicatif |
-| Paramètres | Général, Auth LDAP, Registres, Nœuds, Users, Équipes, Diagnostics |
+| Paramètres | Général, Auth LDAP, Registres, Nœuds, Users, Équipes, Tests |
 | Documentation | Ce guide |
 
 La version affichée dans la barre latérale est lue dynamiquement via `/api/status`.
@@ -92,6 +92,7 @@ La version affichée dans la barre latérale est lue dynamiquement via `/api/sta
 | Nœuds | Agents : commande / pack ZIP, ping, ACL, pin TLS |
 | Utilisateurs | Comptes locaux |
 | Équipes | Groupes + membres (+ mapping AD) |
+| Tests | Suite smoke exhaustive (`#settings/tests`) + export JSON / KO (.md) / copie presse-papiers pour correction |
 
 ### Sélecteur de nœud
 
@@ -188,7 +189,7 @@ Variables utiles :
 ```bash
 export DOCKER_SOCKET=/var/run/docker.sock
 export WM_MASTER_KEY='…'          # chiffrement mots de passe registres
-export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.7
+export WHARFMASTER_AGENT_IMAGE=ghcr.io/mike37510/wharfmaster-agent:2.3.8
 ```
 
 Backup admin :
@@ -404,7 +405,7 @@ Si `TrivyEnabled=false` : advise → `Worst=disabled` ; scan manuel → 403.
 
 ## 13. Agent distant
 
-Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.7` (ou `WHARFMASTER_AGENT_IMAGE`).
+Image : `ghcr.io/mike37510/wharfmaster-agent:2.3.8` (ou `WHARFMASTER_AGENT_IMAGE`).
 
 | Chemin agent | Description |
 |--------------|-------------|
@@ -420,7 +421,7 @@ curl -fsSL https://SERVEUR/agent/install.sh | sh -s -- \
   --token wmj_… \
   --advertise https://IP:9001 \
   --name mon-noeud \
-  --image ghcr.io/mike37510/wharfmaster-agent:2.3.7
+  --image ghcr.io/mike37510/wharfmaster-agent:2.3.8
 ```
 
 Pack ZIP : Paramètres → Nœuds → bundle (Dockerfile, sources, `deploy.sh`, `.env`).

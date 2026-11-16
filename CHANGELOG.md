@@ -4,8 +4,27 @@ Toutes les dates sont en UTC+1.
 
 ## Unreleased
 
+## [2.3.8] — 2026-11-16
+
+### Ajouté
+- **Paramètres → Tests** (`#settings/tests`) : suite smoke exhaustive — liens, APIs publiques/lecture, users+tokens, équipes+ACL, registres, Dockerfile/build, et **par nœud** : image, volume (browse/write), réseau, bind-volume, conteneur (logs/exec/stop/restart), partages, stack (update/restart/export/schedule), CVE soft, backup
+- Tests : **Exporter JSON** / **Exporter KO (.md)** / **Copier les KO** pour partage et correction
+
+### Corrigé
+- Routes `DELETE /api/users/{id}`, `DELETE /api/teams/{id}` et `DELETE /api/teams/{id}/members/{uid}` : argument `Request` manquant → « Erreur interne »
+- Création / ping registres : import manquant `App\Registry\Client` (`RegistryClient not found`)
+- Ping nœud / join agent : import manquant `App\Security\AgentTls`
+- Proxy Docker create : `NetworkingConfig.EndpointsConfig` — `{}` ne devient plus `[]` (rejet Go/Docker)
+- Suite Tests : Aliases réseau + skip cascade si create conteneur échoue
+
 ### Amélioré
+- Suite Tests : skip automatique des nœuds hors ligne (`Status ≠ 1`)
 - **Export stack** : pré-contrôle de taille des volumes/binds (max 1,5 Go) — omis avec message clair au lieu de faire échouer tout le ZIP ; encodage UTF-8 correct des avertissements
+- **Pagination** : sélecteur « Par page » (10 / 20 / 50 / 100 / 200) sous les listes paginées — préférence mémorisée (`dm_page_size`)
+- **MàJ images** : pastilles conteneurs / stacks mises à jour au fur et à mesure (contrôles unitaires en parallèle, page visible en priorité) au lieu d’attendre tout le lot
+
+### Compatibilité
+- Image / tag agent par défaut : **`wharfmaster-agent:2.3.8`**
 
 ## [2.3.7] — 2026-11-13
 

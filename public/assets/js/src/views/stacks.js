@@ -342,53 +342,110 @@ export function install() {
     });
   }
 
+  /** Visible rows first, then the rest (client-side pagination hides with display:none). */
+  bag.collectUpdateSlotIds = function collectUpdateSlotIds(attr) {
+    const slots = [...(bag.root?.querySelectorAll(`[${attr}]`) || [])];
+    const visible = [];
+    const hidden = [];
+    slots.forEach((el) => {
+      const id = el.getAttribute(attr);
+      if (!id) return;
+      const tr = el.closest('tr');
+      const isHidden = !!(tr && (tr.hidden || tr.style.display === 'none'));
+      (isHidden ? hidden : visible).push(id);
+    });
+    return [...new Set([...visible, ...hidden])];
+  }
+
+  bag.runPool = async function runPool(items, limit, worker) {
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return;
+    let cursor = 0;
+    const n = Math.max(1, Math.min(Number(limit) || 4, list.length));
+    await Promise.all(Array.from({ length: n }, async () => {
+      while (cursor < list.length) {
+        const idx = cursor++;
+        await worker(list[idx], idx);
+      }
+    }));
+  }
+
+  bag.beginUpdateIndicatorsPass = function beginUpdateIndicatorsPass() {
+    bag.state._updPass = (bag.state._updPass || 0) + 1;
+    return bag.state._updPass;
+  }
+
+  bag.isUpdateIndicatorsPass = function isUpdateIndicatorsPass(pass) {
+    return pass === bag.state._updPass;
+  }
+
+  bag.paintStackUpdateSlot = function paintStackUpdateSlot(id, u) {
+    const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
+    const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);
+    if (!slot) return;
+    const row = u || {};
+    const imgs = row.Images || [];
+    const imgLabel = bag.formatImageListLabel(imgs);
+    const lines = imgs.map((i) => {
+      const ver = bag.formatImageUpdateVersions(i);
+      return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
+    });
+    let title = lines.length ? lines.join('\n') : (row.Error || 'Aucun contrôle');
+    if (row.FromCache && row.CheckedAt) {
+      title += `\n(cache · vérifié ${new Date(row.CheckedAt * 1000).toLocaleString()})`;
+    }
+    if (nameEl) {
+      nameEl.textContent = imgLabel;
+      nameEl.title = lines.length
+        ? imgs.map((i) => `${i.Service}: ${i.Image}`).join('\n')
+        : imgLabel;
+      const cell = nameEl.closest('td');
+      if (cell) cell.title = nameEl.title || imgLabel;
+    }
+    slot.innerHTML = bag.stackUpdatePill(row.Status, row.UpdateCount || 0, title, {
+      action: 'stack',
+      id,
+      dotOnly: true,
+    });
+    bag.bindImageUpdateActions(slot);
+  }
+
   bag.loadStackUpdateIndicators = async function loadStackUpdateIndicators(refresh = false) {
+    const pass = bag.beginUpdateIndicatorsPass();
     if (!refresh) bag.paintCachedUpdateIndicators('stacks', 'data-upd');
+    const ids = bag.collectUpdateSlotIds('data-upd');
+    if (!ids.length) return;
+    const map = { ...(bag.readImageUpdateCache('stacks') || {}) };
     try {
-      const data = await bag.Api.stackUpdates(!!refresh);
-      const map = data?.Updates || {};
-      bag.writeImageUpdateCache('stacks', map);
-      Object.keys(map).forEach((id) => {
-        const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
-        const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);
-        if (!slot) return;
-        const u = map[id] || {};
-        const imgs = u.Images || [];
-        const imgLabel = bag.formatImageListLabel(imgs);
-        const lines = imgs.map((i) => {
-          const ver = bag.formatImageUpdateVersions(i);
-          return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
-        });
-        let title = lines.length ? lines.join('\n') : (u.Error || 'Aucun contrôle');
-        if (u.FromCache && u.CheckedAt) {
-          title += `\n(cache · vérifié ${new Date(u.CheckedAt * 1000).toLocaleString()})`;
+      await bag.runPool(ids, 3, async (id) => {
+        if (!bag.isUpdateIndicatorsPass(pass)) return;
+        try {
+          const u = await bag.Api.stackUpdate(id, !!refresh);
+          if (!bag.isUpdateIndicatorsPass(pass)) return;
+          map[id] = u || {};
+          bag.writeImageUpdateCache('stacks', map);
+          bag.paintStackUpdateSlot(id, map[id]);
+        } catch (err) {
+          if (!bag.isUpdateIndicatorsPass(pass)) return;
+          map[id] = {
+            Status: 'unknown',
+            UpdateCount: 0,
+            Checked: 0,
+            Images: [],
+            Error: err?.message || 'Contrôle indisponible',
+          };
+          bag.paintStackUpdateSlot(id, map[id]);
         }
-        if (nameEl) {
-          nameEl.textContent = imgLabel;
-          nameEl.title = lines.length
-            ? imgs.map((i) => `${i.Service}: ${i.Image}`).join('\n')
-            : imgLabel;
-          const cell = nameEl.closest('td');
-          if (cell) cell.title = nameEl.title || imgLabel;
-        }
-        slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
-          action: 'stack',
-          id,
-          dotOnly: true,
-        });
       });
+    } finally {
+      if (!bag.isUpdateIndicatorsPass(pass)) return;
+      bag.writeImageUpdateCache('stacks', map);
       bag.root.querySelectorAll('[data-upd] .img-upd.is-loading').forEach((el) => {
         el.className = 'img-upd is-unknown img-upd-dot-only';
         el.title = 'Contrôle indisponible';
       });
       bag.root.querySelectorAll('[data-upd-imgs]').forEach((el) => {
         if (el.textContent === '…') el.textContent = '—';
-      });
-      bag.bindImageUpdateActions(bag.root);
-    } catch {
-      bag.root.querySelectorAll('[data-upd-imgs]').forEach((el) => { el.textContent = '—'; });
-      bag.root.querySelectorAll('[data-upd]').forEach((slot) => {
-        slot.innerHTML = bag.stackUpdatePill('unknown', 0, 'Contrôle indisponible', { dotOnly: true });
       });
     }
   }

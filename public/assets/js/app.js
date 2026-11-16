@@ -479,7 +479,21 @@
     bag.root = document.getElementById("app");
     bag.THEME_KEY = "dm_theme";
     bag.SIDEBAR_KEY = "wm_sidebar_collapsed";
+    bag.PAGE_SIZE_KEY = "dm_page_size";
+    bag.PAGE_SIZES = [10, 20, 50, 100, 200];
     bag.THEMES = ["dark", "aurora", "beacon", "light"];
+    bag.readPageSize = function readPageSize() {
+      const n = parseInt(localStorage.getItem(bag.PAGE_SIZE_KEY) || "", 10);
+      if (bag.PAGE_SIZES.includes(n)) return n;
+      return 20;
+    };
+    bag.setPageSize = function setPageSize(size) {
+      const n = parseInt(size, 10);
+      const v = bag.PAGE_SIZES.includes(n) ? n : 20;
+      bag.state.pageSize = v;
+      localStorage.setItem(bag.PAGE_SIZE_KEY, String(v));
+      return v;
+    };
     bag.readTheme = function readTheme() {
       const saved = localStorage.getItem(bag.THEME_KEY);
       if (bag.THEMES.includes(saved)) return saved;
@@ -543,7 +557,7 @@
         networks: { key: "name", dir: "asc" },
         stacks: { key: "name", dir: "asc" }
       },
-      pageSize: 20,
+      pageSize: bag.readPageSize(),
       theme: bag.readTheme(),
       sidebarCollapsed: bag.readSidebarCollapsed(),
       containerTab: "overview",
@@ -1072,9 +1086,8 @@
         } else if (bag.state.route === "profile") await bag.viewProfile();
         else if (bag.state.route === "settings" || bag.state.route === "settings/") await bag.viewSettings();
         else if (bag.state.route === "settings/auth") await bag.viewSettingsAuth();
-        else if (bag.state.route === "settings/diagnostics/api" || bag.state.route === "settings/diagnostics") {
-          location.hash = "#settings";
-          return;
+        else if (bag.state.route === "settings/tests" || bag.state.route === "settings/diagnostics" || bag.state.route === "settings/diagnostics/api") {
+          await bag.viewTests();
         } else if (bag.state.route === "users") {
           if (Number(bag.state.user?.Role) !== 1) {
             location.hash = "#dashboard";
@@ -2145,7 +2158,8 @@
         ["registries", "Registres", true, "#registries"],
         ["nodes", "N\u0153uds", isAdmin, "#nodes"],
         ["users", "Utilisateurs", isAdmin, "#users"],
-        ["teams", "\xC9quipes", isAdmin, "#teams"]
+        ["teams", "\xC9quipes", isAdmin, "#teams"],
+        ["settings/tests", "Tests", isAdmin, "#settings/tests"]
       ].filter((row) => row[2]);
       return `<nav class="settings-subnav" aria-label="Sections param\xE8tres">
       ${tabs.map(([id, label, , href]) => {
@@ -2389,12 +2403,18 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
     };
     bag.renderTablePager = function renderTablePager(pager, { page, pageCount, matched, pageSize }) {
       if (!pager) return;
-      if (matched <= pageSize) {
-        pager.hidden = true;
-        pager.innerHTML = "";
+      const sizes = bag.PAGE_SIZES || [10, 20, 50, 100, 200];
+      const sizeOpts = sizes.map(
+        (n) => `<option value="${n}"${n === pageSize ? " selected" : ""}>${n}</option>`
+      ).join("");
+      const sizeSelect = `<label class="table-pager-size"><span class="muted">Par page</span>
+      <select class="table-pager-size-select" data-page-size aria-label="Lignes par page">${sizeOpts}</select>
+    </label>`;
+      pager.hidden = false;
+      if (matched <= pageSize || pageCount <= 1) {
+        pager.innerHTML = `${sizeSelect}<span class="muted table-pager-meta">${matched} \xE9l\xE9ment${matched !== 1 ? "s" : ""}</span>`;
         return;
       }
-      pager.hidden = false;
       const prevDisabled = page <= 1 ? " disabled" : "";
       const nextDisabled = page >= pageCount ? " disabled" : "";
       const buttons = [];
@@ -2419,17 +2439,23 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       <button type="button" class="btn btn-sm" data-page-nav="prev"${prevDisabled} title="Page pr\xE9c\xE9dente" aria-label="Page pr\xE9c\xE9dente">\u2190</button>
       <div class="table-pager-pages">${buttons.join("")}</div>
       <button type="button" class="btn btn-sm" data-page-nav="next"${nextDisabled} title="Page suivante" aria-label="Page suivante">\u2192</button>
-      <span class="muted table-pager-meta">${bag.esc(String(pageSize))} / page</span>`;
+      ${sizeSelect}`;
     };
     bag.bindSearch = function bindSearch(key, opts = {}) {
       const input = document.getElementById("filter");
       const table = bag.root.querySelector("table.data tbody");
       if (!input || !table) return;
-      const pageSize = Number(opts.pageSize) > 0 ? Number(opts.pageSize) : 0;
-      const pager = pageSize > 0 ? bag.ensureTablePager() : null;
+      const paged = Number(opts.pageSize) > 0;
+      const pager = paged ? bag.ensureTablePager() : null;
       const allRows = () => [...table.querySelectorAll("tr[data-search]")];
       const allTotal = allRows().length;
+      const currentPageSize = () => {
+        if (!paged) return 0;
+        const n = Number(bag.state.pageSize) || 0;
+        return n > 0 ? n : 20;
+      };
       const run = ({ resetPage = false } = {}) => {
+        const pageSize = currentPageSize();
         const q = input.value.trim().toLowerCase();
         bag.state.filters[key] = input.value;
         if (resetPage && pageSize > 0) bag.state.pages[key] = 1;
@@ -2499,6 +2525,13 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
             bag.state.pages[key] = parseInt(num.getAttribute("data-page"), 10) || 1;
           }
           run();
+        };
+        pager.onchange = (e) => {
+          const sel = e.target.closest("[data-page-size]");
+          if (!sel) return;
+          bag.setPageSize(sel.value);
+          bag.state.pages[key] = 1;
+          run({ resetPage: true });
         };
       }
       run({ resetPage: false });
@@ -4863,40 +4896,58 @@ ${errors.slice(0, 10).join("\n")}${errors.length > 10 ? "\n\u2026" : ""}`
       }
       bag.restoreListFocus();
     };
-    bag.loadContainerUpdateIndicators = async function loadContainerUpdateIndicators(refresh = false) {
-      if (!refresh) bag.paintCachedUpdateIndicators("containers", "data-cupd");
-      try {
-        const data = await bag.Api.containerUpdates(!!refresh);
-        const map = data?.Updates || {};
-        bag.writeImageUpdateCache("containers", map);
-        const fromCache = !!data?.FromCache;
-        const checkedAt = Number(data?.CheckedAt || 0);
-        Object.keys(map).forEach((id) => {
-          const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
-          if (!slot) return;
-          const u = map[id] || {};
-          const ver = bag.formatImageUpdateVersions(u);
-          let title = ver || u.Detail || u.Error || "Aucun contr\xF4le";
-          if (u.Image) title = `${u.Image}
+    bag.paintContainerUpdateSlot = function paintContainerUpdateSlot(id, u, meta = {}) {
+      const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
+      if (!slot) return;
+      const row = u || {};
+      const ver = bag.formatImageUpdateVersions(row);
+      let title = ver || row.Detail || row.Error || "Aucun contr\xF4le";
+      if (row.Image) title = `${row.Image}
 ${title}`;
-          if (fromCache && checkedAt) {
-            title += `
-(cache \xB7 v\xE9rifi\xE9 ${new Date(checkedAt * 1e3).toLocaleString()})`;
+      if (meta.fromCache && meta.checkedAt) {
+        title += `
+(cache \xB7 v\xE9rifi\xE9 ${new Date(meta.checkedAt * 1e3).toLocaleString()})`;
+      }
+      slot.innerHTML = bag.stackUpdatePill(row.Status, row.UpdateCount || 0, title, {
+        action: "container",
+        id,
+        dotOnly: true
+      });
+      bag.bindImageUpdateActions(slot);
+    };
+    bag.loadContainerUpdateIndicators = async function loadContainerUpdateIndicators(refresh = false) {
+      const pass = bag.beginUpdateIndicatorsPass();
+      if (!refresh) bag.paintCachedUpdateIndicators("containers", "data-cupd");
+      const ids = bag.collectUpdateSlotIds("data-cupd");
+      if (!ids.length) return;
+      const map = { ...bag.readImageUpdateCache("containers") || {} };
+      try {
+        await bag.runPool(ids, 5, async (id) => {
+          if (!bag.isUpdateIndicatorsPass(pass)) return;
+          try {
+            const u = await bag.Api.containerUpdateStatus(id, !!refresh);
+            if (!bag.isUpdateIndicatorsPass(pass)) return;
+            map[id] = u || {};
+            bag.writeImageUpdateCache("containers", map);
+            bag.paintContainerUpdateSlot(id, map[id]);
+          } catch (err) {
+            if (!bag.isUpdateIndicatorsPass(pass)) return;
+            map[id] = {
+              Status: "unknown",
+              UpdateCount: 0,
+              Checked: 0,
+              Detail: err?.message || "Contr\xF4le indisponible",
+              Error: err?.message || "Contr\xF4le indisponible"
+            };
+            bag.paintContainerUpdateSlot(id, map[id]);
           }
-          slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
-            action: "container",
-            id,
-            dotOnly: true
-          });
         });
+      } finally {
+        if (!bag.isUpdateIndicatorsPass(pass)) return;
+        bag.writeImageUpdateCache("containers", map);
         bag.root.querySelectorAll("[data-cupd] .img-upd.is-loading").forEach((el) => {
           el.className = "img-upd is-unknown img-upd-dot-only";
           el.title = "Contr\xF4le indisponible";
-        });
-        bag.bindImageUpdateActions(bag.root);
-      } catch {
-        bag.root.querySelectorAll("[data-cupd]").forEach((slot) => {
-          slot.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible", { dotOnly: true });
         });
       }
     };
@@ -7750,54 +7801,103 @@ ${title}`;
         });
       });
     };
+    bag.collectUpdateSlotIds = function collectUpdateSlotIds(attr) {
+      const slots = [...bag.root?.querySelectorAll(`[${attr}]`) || []];
+      const visible = [];
+      const hidden = [];
+      slots.forEach((el) => {
+        const id = el.getAttribute(attr);
+        if (!id) return;
+        const tr = el.closest("tr");
+        const isHidden = !!(tr && (tr.hidden || tr.style.display === "none"));
+        (isHidden ? hidden : visible).push(id);
+      });
+      return [.../* @__PURE__ */ new Set([...visible, ...hidden])];
+    };
+    bag.runPool = async function runPool(items, limit, worker) {
+      const list = Array.isArray(items) ? items : [];
+      if (!list.length) return;
+      let cursor = 0;
+      const n = Math.max(1, Math.min(Number(limit) || 4, list.length));
+      await Promise.all(Array.from({ length: n }, async () => {
+        while (cursor < list.length) {
+          const idx = cursor++;
+          await worker(list[idx], idx);
+        }
+      }));
+    };
+    bag.beginUpdateIndicatorsPass = function beginUpdateIndicatorsPass() {
+      bag.state._updPass = (bag.state._updPass || 0) + 1;
+      return bag.state._updPass;
+    };
+    bag.isUpdateIndicatorsPass = function isUpdateIndicatorsPass(pass) {
+      return pass === bag.state._updPass;
+    };
+    bag.paintStackUpdateSlot = function paintStackUpdateSlot(id, u) {
+      const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
+      const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);
+      if (!slot) return;
+      const row = u || {};
+      const imgs = row.Images || [];
+      const imgLabel = bag.formatImageListLabel(imgs);
+      const lines = imgs.map((i) => {
+        const ver = bag.formatImageUpdateVersions(i);
+        return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
+      });
+      let title = lines.length ? lines.join("\n") : row.Error || "Aucun contr\xF4le";
+      if (row.FromCache && row.CheckedAt) {
+        title += `
+(cache \xB7 v\xE9rifi\xE9 ${new Date(row.CheckedAt * 1e3).toLocaleString()})`;
+      }
+      if (nameEl) {
+        nameEl.textContent = imgLabel;
+        nameEl.title = lines.length ? imgs.map((i) => `${i.Service}: ${i.Image}`).join("\n") : imgLabel;
+        const cell = nameEl.closest("td");
+        if (cell) cell.title = nameEl.title || imgLabel;
+      }
+      slot.innerHTML = bag.stackUpdatePill(row.Status, row.UpdateCount || 0, title, {
+        action: "stack",
+        id,
+        dotOnly: true
+      });
+      bag.bindImageUpdateActions(slot);
+    };
     bag.loadStackUpdateIndicators = async function loadStackUpdateIndicators(refresh = false) {
+      const pass = bag.beginUpdateIndicatorsPass();
       if (!refresh) bag.paintCachedUpdateIndicators("stacks", "data-upd");
+      const ids = bag.collectUpdateSlotIds("data-upd");
+      if (!ids.length) return;
+      const map = { ...bag.readImageUpdateCache("stacks") || {} };
       try {
-        const data = await bag.Api.stackUpdates(!!refresh);
-        const map = data?.Updates || {};
-        bag.writeImageUpdateCache("stacks", map);
-        Object.keys(map).forEach((id) => {
-          const slot = bag.root.querySelector(`[data-upd="${CSS.escape(String(id))}"]`);
-          const nameEl = bag.root.querySelector(`[data-upd-imgs="${CSS.escape(String(id))}"]`);
-          if (!slot) return;
-          const u = map[id] || {};
-          const imgs = u.Images || [];
-          const imgLabel = bag.formatImageListLabel(imgs);
-          const lines = imgs.map((i) => {
-            const ver = bag.formatImageUpdateVersions(i);
-            return `${i.Service}: ${ver || i.Detail || i.Status} (${i.Image})`;
-          });
-          let title = lines.length ? lines.join("\n") : u.Error || "Aucun contr\xF4le";
-          if (u.FromCache && u.CheckedAt) {
-            title += `
-(cache \xB7 v\xE9rifi\xE9 ${new Date(u.CheckedAt * 1e3).toLocaleString()})`;
+        await bag.runPool(ids, 3, async (id) => {
+          if (!bag.isUpdateIndicatorsPass(pass)) return;
+          try {
+            const u = await bag.Api.stackUpdate(id, !!refresh);
+            if (!bag.isUpdateIndicatorsPass(pass)) return;
+            map[id] = u || {};
+            bag.writeImageUpdateCache("stacks", map);
+            bag.paintStackUpdateSlot(id, map[id]);
+          } catch (err) {
+            if (!bag.isUpdateIndicatorsPass(pass)) return;
+            map[id] = {
+              Status: "unknown",
+              UpdateCount: 0,
+              Checked: 0,
+              Images: [],
+              Error: err?.message || "Contr\xF4le indisponible"
+            };
+            bag.paintStackUpdateSlot(id, map[id]);
           }
-          if (nameEl) {
-            nameEl.textContent = imgLabel;
-            nameEl.title = lines.length ? imgs.map((i) => `${i.Service}: ${i.Image}`).join("\n") : imgLabel;
-            const cell = nameEl.closest("td");
-            if (cell) cell.title = nameEl.title || imgLabel;
-          }
-          slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
-            action: "stack",
-            id,
-            dotOnly: true
-          });
         });
+      } finally {
+        if (!bag.isUpdateIndicatorsPass(pass)) return;
+        bag.writeImageUpdateCache("stacks", map);
         bag.root.querySelectorAll("[data-upd] .img-upd.is-loading").forEach((el) => {
           el.className = "img-upd is-unknown img-upd-dot-only";
           el.title = "Contr\xF4le indisponible";
         });
         bag.root.querySelectorAll("[data-upd-imgs]").forEach((el) => {
           if (el.textContent === "\u2026") el.textContent = "\u2014";
-        });
-        bag.bindImageUpdateActions(bag.root);
-      } catch {
-        bag.root.querySelectorAll("[data-upd-imgs]").forEach((el) => {
-          el.textContent = "\u2014";
-        });
-        bag.root.querySelectorAll("[data-upd]").forEach((slot) => {
-          slot.innerHTML = bag.stackUpdatePill("unknown", 0, "Contr\xF4le indisponible", { dotOnly: true });
         });
       }
     };
@@ -9784,7 +9884,7 @@ ${title}`;
     };
   }
 
-  // public/assets/js/src/views/diagnostics.js
+  // public/assets/js/src/views/tests.js
   function install14() {
     const SPA_HANDLERS = [
       "viewDashboard",
@@ -9795,8 +9895,7 @@ ${title}`;
       "viewStacks",
       "viewSettings",
       "viewSettingsAuth",
-      "viewDiagnostics",
-      "viewDiagnosticsApi",
+      "viewTests",
       "viewUsers",
       "viewTeams",
       "viewNodes",
@@ -9814,196 +9913,14 @@ ${title}`;
       ["#activity", "Journaux"],
       ["#settings", "Param\xE8tres"],
       ["#settings/auth", "Authentification"],
+      ["#settings/tests", "Tests"],
       ["#registries", "Registres"],
       ["#nodes", "N\u0153uds"],
       ["#users", "Utilisateurs"],
       ["#teams", "\xC9quipes"],
       ["#docs", "Documentation"]
     ];
-    function levelBadge(level, ok) {
-      const lv = level || (ok ? "ok" : "fail");
-      if (lv === "ok") return '<span class="badge badge-success">OK</span>';
-      if (lv === "warn") return '<span class="badge badge-warn">WARN</span>';
-      return '<span class="badge badge-danger">KO</span>';
-    }
-    function groupChecks(checks) {
-      const map = /* @__PURE__ */ new Map();
-      for (const c of checks) {
-        const g = c.group || "Autre";
-        if (!map.has(g)) map.set(g, []);
-        map.get(g).push(c);
-      }
-      return map;
-    }
-    function renderReport(checks, summary) {
-      const groups = groupChecks(checks);
-      const failed = summary?.failed ?? checks.filter((c) => !c.ok || c.level === "fail").length;
-      const warns = summary?.warnings ?? checks.filter((c) => c.level === "warn").length;
-      const total = summary?.total ?? checks.length;
-      const okCount = total - failed - warns;
-      let html = `
-      <div class="panel" style="margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">R\xE9sum\xE9</div>
-        <p style="margin:0">
-          <span class="badge badge-success">${okCount} OK</span>
-          <span class="badge badge-warn" style="margin-left:6px">${warns} warn</span>
-          <span class="badge badge-danger" style="margin-left:6px">${failed} KO</span>
-          <span class="muted" style="margin-left:10px">${total} checks</span>
-        </p>
-      </div>`;
-      for (const [group, items] of groups) {
-        html += `<div class="panel" style="margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">${bag.esc(group)}</div>
-        <table class="data-table"><thead><tr>
-          <th style="width:90px">Statut</th><th>Check</th><th>D\xE9tail</th>
-        </tr></thead><tbody>`;
-        for (const c of items) {
-          html += `<tr>
-          <td>${levelBadge(c.level, c.ok)}</td>
-          <td class="mono">${bag.esc(c.id)}</td>
-          <td>${c.html ? c.detail : bag.esc(c.detail || "")}</td>
-        </tr>`;
-        }
-        html += "</tbody></table></div>";
-      }
-      return html;
-    }
-    async function runClientApiSmoke() {
-      const checks = [];
-      const add = (id, ok, detail, level) => {
-        checks.push({ id, group: "API client", ok, level: level || (ok ? "ok" : "fail"), detail });
-      };
-      const tryCall = async (id, fn, okDetail) => {
-        try {
-          const data = await fn();
-          add(id, true, okDetail(data));
-        } catch (err) {
-          add(id, false, err.message || String(err));
-        }
-      };
-      await tryCall("api.me", () => bag.Api.me(), (d) => `Connect\xE9 : ${d.Username || d.username || "?"}`);
-      await tryCall("api.settings", () => bag.Api.settings(), () => "Param\xE8tres lisibles");
-      await tryCall("api.endpoints", () => bag.Api.endpoints(), (d) => {
-        const n = Array.isArray(d) ? d.length : d?.length ?? 0;
-        return `${n} endpoint(s)`;
-      });
-      await tryCall("api.nodes", () => bag.Api.nodes(), (d) => {
-        const n = Array.isArray(d) ? d.length : Array.isArray(d?.Nodes) ? d.Nodes.length : "?";
-        return `N\u0153uds : ${n}`;
-      });
-      if (!bag.Api.isAllEndpoints()) {
-        await tryCall(
-          "api.docker.containers",
-          () => bag.Api.docker("/containers/json?all=true"),
-          (d) => `${Array.isArray(d) ? d.length : 0} conteneur(s)`
-        );
-      } else {
-        add("api.docker.containers", true, "Mode \xAB tous les n\u0153uds \xBB \u2014 skip docker local", "warn");
-      }
-      await tryCall(
-        "api.stacks",
-        () => bag.Api.stacks(),
-        (d) => `${Array.isArray(d) ? d.length : d?.Stacks?.length ?? "?"} stack(s)`
-      );
-      return checks;
-    }
-    function runSpaHandlerChecks() {
-      return SPA_HANDLERS.map((name) => {
-        const ok = typeof bag[name] === "function";
-        return {
-          id: `spa.${name}`,
-          group: "Handlers SPA",
-          ok,
-          level: ok ? "ok" : "fail",
-          detail: ok ? "fonction pr\xE9sente" : "manquante"
-        };
-      });
-    }
-    function runHashLinkChecks() {
-      return HASH_LINKS.map(([href, label]) => ({
-        id: `link.${href.slice(1).replace(/\//g, ".")}`,
-        group: "Liens console",
-        ok: true,
-        level: "ok",
-        html: true,
-        detail: `<a href="${bag.esc(href)}">${bag.esc(label)}</a> <span class="mono muted">${bag.esc(href)}</span>`
-      }));
-    }
-    bag.viewDiagnostics = async function viewDiagnostics() {
-      if (Number(bag.state.user?.Role) !== 1) {
-        location.hash = "#settings";
-        return;
-      }
-      bag.root.innerHTML = bag.shell("Diagnostics", `
-      ${bag.pageHeader("Diagnostics", false)}
-      ${bag.settingsSubnav("settings/diagnostics")}
-      <div class="panel" style="max-width:820px;margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">Contr\xF4le post-migration</div>
-        <p class="muted" style="margin:0 0 14px">
-          V\xE9rifie runtime, Docker, assets, API et handlers SPA (lecture seule \u2014 aucune action destructive).
-        </p>
-        <button type="button" class="btn btn-primary" id="diag-run">Lancer les tests</button>
-        <span class="muted" id="diag-status" style="margin-left:12px"></span>
-      </div>
-      <div id="diag-report"><div class="info-box">Cliquez sur <strong>Lancer les tests</strong> pour g\xE9n\xE9rer le rapport.</div></div>
-    `, { subtitle: "V\xE9rification de l\u2019instance" });
-      const btn = document.getElementById("diag-run");
-      const status = document.getElementById("diag-status");
-      const report = document.getElementById("diag-report");
-      btn.onclick = async () => {
-        btn.disabled = true;
-        status.textContent = "Ex\xE9cution\u2026";
-        report.innerHTML = '<div class="info-box">Collecte des checks\u2026</div>';
-        const all = [];
-        let summary = null;
-        try {
-          const server = await bag.Api.diagnostics();
-          all.push(...server.checks || []);
-          summary = server.summary || null;
-        } catch (err) {
-          all.push({
-            id: "api.diagnostics",
-            group: "Serveur",
-            ok: false,
-            level: "fail",
-            detail: err.message || String(err)
-          });
-        }
-        try {
-          all.push(...await runClientApiSmoke());
-        } catch (err) {
-          all.push({
-            id: "api.smoke",
-            group: "API client",
-            ok: false,
-            level: "fail",
-            detail: err.message || String(err)
-          });
-        }
-        all.push(...runSpaHandlerChecks());
-        all.push(...runHashLinkChecks());
-        if (!summary) {
-          const failed2 = all.filter((c) => !c.ok || c.level === "fail").length;
-          const warnings = all.filter((c) => c.level === "warn").length;
-          summary = { total: all.length, failed: failed2, warnings };
-        } else {
-          const clientExtra = all.length - (summary.total || 0);
-          if (clientExtra > 0) {
-            const failed2 = all.filter((c) => !c.ok || c.level === "fail").length;
-            const warnings = all.filter((c) => c.level === "warn").length;
-            summary = { total: all.length, failed: failed2, warnings };
-          }
-        }
-        report.innerHTML = renderReport(all, summary);
-        const failed = summary.failed || 0;
-        status.textContent = failed === 0 ? `Termin\xE9 \u2014 ${summary.total} checks` : `Termin\xE9 \u2014 ${failed} \xE9chec(s)`;
-        btn.disabled = false;
-      };
-    };
-  }
-
-  // public/assets/js/src/views/diagnostics-api.js
-  function install15() {
+    const TEST_USER_PASSWORD = "WmTestPass1x";
     function levelBadge(level, ok) {
       const lv = level || (ok ? "ok" : "fail");
       if (lv === "ok") return '<span class="badge badge-success">OK</span>';
@@ -10011,9 +9928,18 @@ ${title}`;
       if (lv === "skip") return '<span class="badge">SKIP</span>';
       return '<span class="badge badge-danger">KO</span>';
     }
+    function groupSteps(steps) {
+      const map = /* @__PURE__ */ new Map();
+      for (const s of steps) {
+        const g = s.group || "Autre";
+        if (!map.has(g)) map.set(g, []);
+        map.get(g).push(s);
+      }
+      return map;
+    }
     function renderSteps(steps) {
       if (!steps.length) {
-        return '<div class="info-box">Lancez la suite pour tester cr\xE9ation + suppression via l\u2019API.</div>';
+        return '<div class="info-box">Lancez la suite compl\xE8te (toutes les options s\xFBres, tous les n\u0153uds).</div>';
       }
       const failed = steps.filter((s) => s.level === "fail").length;
       const ok = steps.filter((s) => s.level === "ok").length;
@@ -10027,35 +9953,38 @@ ${title}`;
           <span class="badge badge-danger" style="margin-left:6px">${failed} KO</span>
           <span class="muted" style="margin-left:10px">${steps.length} \xE9tapes</span>
         </p>
-      </div>
-      <div class="panel">
-        <div class="section-title" style="margin-top:0">Journal</div>
+      </div>`;
+      for (const [group, items] of groupSteps(steps)) {
+        html += `<div class="panel" style="margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">${bag.esc(group)}</div>
         <table class="data-table"><thead><tr>
           <th style="width:90px">Statut</th><th>\xC9tape</th><th>D\xE9tail</th><th style="width:90px">ms</th>
         </tr></thead><tbody>`;
-      for (const s of steps) {
-        html += `<tr>
-        <td>${levelBadge(s.level, s.ok)}</td>
-        <td class="mono">${bag.esc(s.id)}</td>
-        <td>${bag.esc(s.detail || "")}</td>
-        <td class="mono muted">${s.ms != null ? s.ms : "\u2014"}</td>
-      </tr>`;
+        for (const s of items) {
+          html += `<tr>
+          <td>${levelBadge(s.level, s.ok)}</td>
+          <td class="mono">${bag.esc(s.id)}</td>
+          <td>${s.html ? s.detail : bag.esc(s.detail || "")}</td>
+          <td class="mono muted">${s.ms != null ? s.ms : "\u2014"}</td>
+        </tr>`;
+        }
+        html += "</tbody></table></div>";
       }
-      html += "</tbody></table></div>";
       return html;
     }
-    async function runApiLifecycleSmoke(onStep) {
+    function makeRunner(onStep) {
       const steps = [];
       const push = (step) => {
         steps.push(step);
         if (onStep) onStep(steps.slice());
       };
-      const run = async (id, fn) => {
+      const run = async (id, group, fn) => {
         const t0 = performance.now();
         try {
           const detail = await fn();
           push({
             id,
+            group,
             ok: true,
             level: "ok",
             detail: detail == null ? "OK" : String(detail),
@@ -10065,6 +9994,7 @@ ${title}`;
         } catch (err) {
           push({
             id,
+            group,
             ok: false,
             level: "fail",
             detail: err.message || String(err),
@@ -10073,52 +10003,611 @@ ${title}`;
           return false;
         }
       };
-      const skip = (id, detail) => {
-        push({ id, ok: true, level: "skip", detail, ms: 0 });
+      const skip = (id, group, detail) => push({ id, group, ok: true, level: "skip", detail, ms: 0 });
+      const warn = (id, group, detail) => push({ id, group, ok: true, level: "warn", detail, ms: 0 });
+      const addHtml = (id, group, detail) => push({ id, group, ok: true, level: "ok", detail, html: true, ms: 0 });
+      const markSkipIf = (id, prefix = "SKIP:") => {
+        const last = [...steps].reverse().find((s) => s.id === id);
+        if (last && String(last.detail || "").startsWith(prefix)) {
+          last.level = "skip";
+          last.ok = true;
+        }
       };
+      return { steps, run, skip, warn, addHtml, push, markSkipIf };
+    }
+    function epIdOf(ep) {
+      return Number(ep?.Id ?? ep?.id ?? 0);
+    }
+    function epNameOf(ep) {
+      return String(ep?.NodeName || ep?.Name || ep?.name || `ep#${epIdOf(ep)}`);
+    }
+    function epOnline(ep) {
+      const st = Number(ep?.Status ?? ep?.status ?? 1);
+      return st === 1 && !ep?.Disabled;
+    }
+    async function listEndpoints() {
+      const eps = await bag.Api.endpoints();
+      return (Array.isArray(eps) ? eps : []).filter((ep) => epIdOf(ep) > 0);
+    }
+    function withEndpoint(epId, fn) {
+      const prev = bag.Api.getEndpointId();
+      const prevState = bag.state.endpointId;
+      bag.Api.setEndpointId(epId);
+      if (bag.state) bag.state.endpointId = epId;
+      return Promise.resolve().then(fn).finally(() => {
+        bag.Api.setEndpointId(prev);
+        if (bag.state) bag.state.endpointId = prevState;
+      });
+    }
+    function idOf(obj) {
+      return obj?.Id ?? obj?.id ?? null;
+    }
+    function makeDockerfileTar(dockerfileText) {
+      const enc = new TextEncoder();
+      const text = dockerfileText.endsWith("\n") ? dockerfileText : `${dockerfileText}
+`;
+      const content = enc.encode(text);
+      const header = new Uint8Array(512);
+      const name = "Dockerfile";
+      for (let i = 0; i < name.length && i < 100; i++) header[i] = name.charCodeAt(i);
+      const writeOctal = (offset, length, value) => {
+        const s = `${Number(value).toString(8).padStart(length - 1, "0")}\0`;
+        for (let i = 0; i < length; i++) header[offset + i] = s.charCodeAt(i) || 0;
+      };
+      writeOctal(100, 8, 420);
+      writeOctal(108, 8, 0);
+      writeOctal(116, 8, 0);
+      writeOctal(124, 12, content.length);
+      writeOctal(136, 12, Math.floor(Date.now() / 1e3));
+      for (let i = 148; i < 156; i++) header[i] = 32;
+      header[156] = "0".charCodeAt(0);
+      const magic = "ustar\0";
+      for (let i = 0; i < magic.length; i++) header[257 + i] = magic.charCodeAt(i);
+      header[263] = "0".charCodeAt(0);
+      header[264] = "0".charCodeAt(0);
+      let sum = 0;
+      for (let i = 0; i < 512; i++) sum += header[i];
+      const chk = `${sum.toString(8).padStart(6, "0")}\0 `;
+      for (let i = 0; i < 8; i++) header[148 + i] = chk.charCodeAt(i);
+      const dataLen = Math.ceil(content.length / 512) * 512 || 512;
+      const out = new Uint8Array(512 + dataLen + 1024);
+      out.set(header, 0);
+      out.set(content, 512);
+      return out;
+    }
+    function parseBuildLog(body) {
+      let error = null;
+      for (const line of String(body || "").split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const json = JSON.parse(t);
+          if (json?.error) error = String(json.error);
+          else if (json?.errorDetail?.message) error = String(json.errorDetail.message);
+        } catch (_) {
+        }
+      }
+      return error;
+    }
+    async function softProbeDownload(url, accept) {
+      const token = bag.Api.getToken?.();
+      if (!token) throw new Error("Session expir\xE9e");
+      const res = await fetch(url, {
+        headers: { Accept: accept, Authorization: "Bearer " + token }
+      });
+      if (!res.ok) {
+        let msg = res.statusText;
+        try {
+          const d = await res.json();
+          if (d?.message) msg = d.message;
+        } catch (_) {
+        }
+        throw new Error(msg || `HTTP ${res.status}`);
+      }
+      const ct = (res.headers.get("Content-Type") || "").toLowerCase();
+      const reader = res.body?.getReader?.();
+      if (reader) {
+        const { value } = await reader.read();
+        await reader.cancel();
+        const n = value?.byteLength || 0;
+        if (n < 2) throw new Error("Flux vide");
+        return `OK ct=${ct || "?"} sample=${n}o`;
+      }
+      const blob = await res.blob();
+      if (!blob || blob.size < 8) throw new Error("R\xE9ponse vide");
+      return `OK ct=${ct || "?"} size=${blob.size}`;
+    }
+    async function runSpaChecks(R) {
+      for (const name of SPA_HANDLERS) {
+        const ok = typeof bag[name] === "function";
+        if (ok) await R.run(`spa.${name}`, "SPA", async () => "pr\xE9sent");
+        else await R.run(`spa.${name}`, "SPA", async () => {
+          throw new Error("manquante");
+        });
+      }
+      for (const [href, label] of HASH_LINKS) {
+        R.addHtml(
+          `link.${href.slice(1).replace(/\//g, ".")}`,
+          "Liens console",
+          `<a href="${bag.esc(href)}">${bag.esc(label)}</a> <span class="mono muted">${bag.esc(href)}</span>`
+        );
+      }
+    }
+    async function runServerDiagnostics(R) {
+      const t0 = performance.now();
+      try {
+        const server = await bag.Api.diagnostics();
+        const checks = Array.isArray(server.checks) ? server.checks : [];
+        for (const c of checks) {
+          const level = c.level || (c.ok ? "ok" : "fail");
+          R.push({
+            id: c.id || "server.check",
+            group: c.group || "Serveur",
+            ok: level !== "fail",
+            level,
+            detail: c.detail || "",
+            ms: 0
+          });
+        }
+        const failed = checks.filter((c) => (c.level || (c.ok ? "ok" : "fail")) === "fail").length;
+        R.push({
+          id: "server.diagnostics",
+          group: "Serveur",
+          ok: failed === 0,
+          level: failed === 0 ? "ok" : "fail",
+          detail: failed === 0 ? `${checks.length} checks` : `${failed} \xE9chec(s)`,
+          ms: Math.round(performance.now() - t0)
+        });
+      } catch (err) {
+        R.push({
+          id: "server.diagnostics",
+          group: "Serveur",
+          ok: false,
+          level: "fail",
+          detail: err.message || String(err),
+          ms: Math.round(performance.now() - t0)
+        });
+      }
+    }
+    async function runPublicAndReadApis(R, endpoints) {
+      const G = "Lecture API";
+      await R.run("public.status", G, async () => {
+        const d = await bag.Api.status();
+        return `v=${d?.Version || d?.version || "?"}`;
+      });
+      await R.run("public.system.version", G, async () => {
+        const res = await fetch("/api/system/version", { headers: { Accept: "application/json" } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json();
+        return `agent=${d?.AgentImage || d?.agentImage || "?"}`;
+      });
+      await R.run("public.system.status", G, async () => {
+        const res = await fetch("/api/system/status", { headers: { Accept: "application/json" } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return `HTTP ${res.status}`;
+      });
+      await R.run("public.health", G, async () => {
+        const res = await fetch("/api/health", { headers: { Accept: "application/json" } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return `HTTP ${res.status}`;
+      });
+      await R.run("public.admin.check", G, async () => {
+        const d = await bag.Api.adminCheck();
+        return `adminInit=${d?.adminInit ?? d?.AdminInit ?? "?"}`;
+      });
+      await R.run("api.me", G, async () => {
+        const me = await bag.Api.me();
+        return `user=${me.Username || me.username} role=${me.Role ?? me.role}`;
+      });
+      await R.run("api.host", G, async () => {
+        const d = await bag.Api.host();
+        return d ? "OK" : "vide";
+      });
+      await R.run("api.settings", G, async () => {
+        await bag.Api.settings();
+        return "OK";
+      });
+      await R.run("api.users.directory", G, async () => {
+        const d = await bag.Api.usersDirectory();
+        const n = Array.isArray(d) ? d.length : d?.Users?.length ?? "?";
+        return `${n} entr\xE9e(s)`;
+      });
+      await R.run("api.teams", G, async () => {
+        const d = await bag.Api.teams(true);
+        return `${Array.isArray(d) ? d.length : 0} \xE9quipe(s)`;
+      });
+      await R.run("api.acls", G, async () => {
+        const d = await bag.Api.acls();
+        const n = Array.isArray(d) ? d.length : d?.Items?.length ?? 0;
+        return `${n} ACL`;
+      });
+      await R.run("api.schedules", G, async () => {
+        const d = await bag.Api.schedules();
+        const n = Array.isArray(d) ? d.length : d?.Items?.length ?? 0;
+        return `${n} planif.`;
+      });
+      await R.run("api.audit.filter", G, async () => {
+        const d = await bag.Api.audit({ limit: 5, action: "user.create" });
+        const n = Array.isArray(d) ? d.length : d?.Events?.length ?? "?";
+        return `${n} evt`;
+      });
+      await R.run("api.audit.paging", G, async () => {
+        await bag.Api.audit({ limit: 3, offset: 3 });
+        return "OK";
+      });
+      await R.run("api.nodes.join-token.meta", G, async () => {
+        const d = await bag.Api.joinTokenMeta();
+        if (d == null) throw new Error("r\xE9ponse vide");
+        if (d.Active == null && d.active == null) return "aucun token actif (OK)";
+        return "token actif";
+      });
+      await R.run("api.metrics.sample", G, async () => {
+        const ep = endpoints[0];
+        if (!ep) return "SKIP: pas de n\u0153ud";
+        await bag.Api.metricsSample({
+          Scope: `ep:${epIdOf(ep)}`,
+          containers: 0,
+          cpu: 0,
+          mem: 0,
+          disk: 0
+        });
+        return "\xE9chantillon \xE9crit";
+      });
+      R.markSkipIf("api.metrics.sample");
+      await R.run("images.search", G, async () => {
+        const d = await bag.Api.searchImages("alpine");
+        const n = Array.isArray(d) ? d.length : d?.results?.length ?? "?";
+        return `${n} r\xE9sultat(s)`;
+      });
+      await R.run("images.tags", G, async () => {
+        const d = await bag.Api.imageTags("library/alpine");
+        const n = Array.isArray(d) ? d.length : d?.tags?.length ?? "?";
+        return `${n} tag(s)`;
+      });
+      await R.run("http.options.settings", G, async () => {
+        const res = await fetch("/api/settings", { method: "OPTIONS" });
+        if (res.status !== 204 && res.status !== 200) throw new Error(`HTTP ${res.status}`);
+        return `HTTP ${res.status}`;
+      });
+      for (const ep of endpoints) {
+        const id = epIdOf(ep);
+        const label = epNameOf(ep);
+        const g = `Lecture \xB7 ${label}`;
+        await withEndpoint(id, async () => {
+          await R.run(`ep${id}.endpoint.get`, g, async () => {
+            const res = await bag.Api.request(`/api/endpoints/${id}`);
+            return res?.Name || res?.name || `#${id}`;
+          });
+          await R.run(`ep${id}.acls`, g, async () => {
+            const d = await bag.Api.acls(id);
+            const n = Array.isArray(d) ? d.length : d?.Items?.length ?? 0;
+            return `${n}`;
+          });
+          if (!epOnline(ep)) {
+            R.skip(`ep${id}.docker.*`, g, `N\u0153ud hors ligne (Status=${ep.Status ?? "?"}) \u2014 skip lectures Docker`);
+            return;
+          }
+          await R.run(`ep${id}.ping`, g, async () => {
+            await bag.Api.pingNode(id);
+            return "pong";
+          });
+          await R.run(`ep${id}.docker.info`, g, async () => {
+            const info = await bag.Api.docker("/info");
+            return `os=${info?.OperatingSystem || "?"}`;
+          });
+          await R.run(`ep${id}.docker.df`, g, async () => {
+            await bag.Api.docker("/system/df");
+            return "OK";
+          });
+          await R.run(`ep${id}.containers`, g, async () => {
+            const d = await bag.Api.docker("/containers/json?all=true");
+            return `${Array.isArray(d) ? d.length : 0}`;
+          });
+          await R.run(`ep${id}.images.json`, g, async () => {
+            const d = await bag.Api.docker("/images/json");
+            return `${Array.isArray(d) ? d.length : 0}`;
+          });
+          await R.run(`ep${id}.stacks`, g, async () => {
+            const d = await bag.Api.stacks();
+            return `${Array.isArray(d) ? d.length : 0}`;
+          });
+          await R.run(`ep${id}.stacks.updates`, g, async () => {
+            await bag.Api.stackUpdates(false);
+            return "OK";
+          });
+          await R.run(`ep${id}.containers.updates`, g, async () => {
+            await bag.Api.containerUpdates(false);
+            return "OK";
+          });
+          await R.run(`ep${id}.bind-volumes`, g, async () => {
+            const d = await bag.Api.bindVolumes();
+            return `${Array.isArray(d) ? d.length : 0}`;
+          });
+          await R.run(`ep${id}.metrics`, g, async () => {
+            const d = await bag.Api.metricsHistory(`ep:${id}`, { hours: 1, points: 12 });
+            const pts = Array.isArray(d?.points) ? d.points.length : Array.isArray(d?.Points) ? d.Points.length : "?";
+            return `points=${pts}`;
+          });
+          await R.run(`ep${id}.cve.scans`, g, async () => {
+            await bag.Api.imageScans(id);
+            return "OK";
+          });
+          await R.run(`ep${id}.cve.advise`, g, async () => {
+            const d = await bag.Api.adviseImages(id, { Images: ["alpine:latest"] });
+            const item = Array.isArray(d?.Items) ? d.Items[0] : null;
+            const st = item?.Status || d?.Worst || "?";
+            return `status=${st}`;
+          });
+          await R.run(`ep${id}.cve.ensure`, g, async () => {
+            await bag.Api.ensureImageScans(id, { Images: ["alpine:latest"] });
+            return "OK";
+          });
+        });
+      }
+    }
+    async function runUserLifecycle(R) {
+      const G = "Utilisateurs";
       const tag = `wm${Date.now().toString(36)}`;
-      const volName = `apitest_vol_${tag}`;
-      const netName = `apitest_net_${tag}`;
-      const ctrName = `apitest_ctr_${tag}`;
-      const imageRef = "alpine:latest";
+      const username = `wmtest_u_${tag}`;
+      const created = { userId: null, username: null, password: TEST_USER_PASSWORD, tokenId: null };
+      const ok = await R.run("users.create", G, async () => {
+        const res = await bag.Api.createUser(username, TEST_USER_PASSWORD, 2);
+        created.userId = idOf(res);
+        created.username = res?.Username || username;
+        if (!created.userId) throw new Error("Id manquant");
+        return `Id=${created.userId}`;
+      });
+      if (!ok) return created;
+      await R.run("users.get", G, async () => {
+        const u = await bag.Api.request(`/api/users/${created.userId}`);
+        if (idOf(u) !== created.userId && Number(u?.Id) !== Number(created.userId)) {
+        }
+        return u?.Username || u?.username || "OK";
+      });
+      await R.run("users.passwd", G, async () => {
+        const newPw = "WmTestPass2y";
+        await bag.Api.changePassword(created.userId, { Password: newPw, PasswordConfirm: newPw });
+        created.password = newPw;
+        return "reset OK";
+      });
+      await R.run("users.tokens.create", G, async () => {
+        const tok = await bag.Api.createUserToken(created.userId, {
+          description: `wmtest_tok_${tag}`,
+          password: created.password
+        });
+        created.tokenId = tok?.id ?? tok?.Id ?? null;
+        if (!created.tokenId) throw new Error("token id manquant");
+        return `#${created.tokenId}`;
+      });
+      await R.run("users.tokens.list", G, async () => {
+        const list = await bag.Api.listUserTokens(created.userId);
+        const n = Array.isArray(list) ? list.length : 0;
+        if (!n) throw new Error("liste vide");
+        return `${n} cl\xE9(s)`;
+      });
+      await R.run("users.tokens.revoke", G, async () => {
+        await bag.Api.revokeUserToken(created.userId, created.tokenId);
+        created.tokenId = null;
+        return "r\xE9voqu\xE9e";
+      });
+      return created;
+    }
+    async function runTeamsAcls(R, testUser, endpoints) {
+      const G = "\xC9quipes & ACL";
+      if (!testUser?.userId) {
+        R.skip("teams.*", G, "Pas d\u2019utilisateur de test");
+        return { teamId: null, aclId: null };
+      }
+      const tag = `wm${Date.now().toString(36)}`;
+      const created = { teamId: null, aclId: null };
+      await R.run("teams.create", G, async () => {
+        const res = await bag.Api.createTeam({
+          Name: `wmtest_team_${tag}`,
+          Description: "apitest"
+        });
+        created.teamId = idOf(res);
+        if (!created.teamId) throw new Error("Id \xE9quipe manquant");
+        return `#${created.teamId}`;
+      });
+      if (!created.teamId) return created;
+      await R.run("teams.get", G, async () => {
+        const t = await bag.Api.team(created.teamId);
+        return t?.Name || t?.name || "OK";
+      });
+      await R.run("teams.update", G, async () => {
+        await bag.Api.updateTeam(created.teamId, { Description: "apitest-updated" });
+        return "OK";
+      });
+      await R.run("teams.member.add", G, async () => {
+        await bag.Api.addTeamMember(created.teamId, testUser.userId);
+        return `user #${testUser.userId}`;
+      });
+      await R.run("teams.member.remove", G, async () => {
+        await bag.Api.removeTeamMember(created.teamId, testUser.userId);
+        return "OK";
+      });
+      const ep = endpoints[0];
+      if (ep) {
+        await R.run("acls.upsert", G, async () => {
+          const res = await bag.Api.upsertAcl({
+            EndpointId: epIdOf(ep),
+            SubjectType: "user",
+            SubjectId: testUser.userId,
+            Role: "read"
+          });
+          created.aclId = idOf(res);
+          if (!created.aclId) throw new Error("Id ACL manquant");
+          return `#${created.aclId}`;
+        });
+        await R.run("acls.delete", G, async () => {
+          if (!created.aclId) throw new Error("pas d\u2019ACL");
+          await bag.Api.deleteAcl(created.aclId);
+          created.aclId = null;
+          return "OK";
+        });
+      }
+      await R.run("teams.delete", G, async () => {
+        await bag.Api.deleteTeam(created.teamId);
+        created.teamId = null;
+        return "OK";
+      });
+      return created;
+    }
+    async function runRegistryLifecycle(R) {
+      const G = "Registres";
+      const tag = `wm${Date.now().toString(36)}`;
+      const created = { registryId: null };
+      await R.run("registries.list.detail", G, async () => {
+        const list = await bag.Api.registries();
+        const arr = Array.isArray(list) ? list : [];
+        if (arr.length) {
+          const id = idOf(arr[0]);
+          await bag.Api.registry(id);
+          try {
+            await bag.Api.pingRegistry(id);
+          } catch (_) {
+          }
+        }
+        return `${arr.length} registre(s)`;
+      });
+      const ok = await R.run("registries.create", G, async () => {
+        const res = await bag.Api.createRegistry({
+          Name: `wmtest_reg_${tag}`,
+          Type: "hub",
+          URL: "https://registry-1.docker.io"
+        });
+        created.registryId = idOf(res);
+        if (!created.registryId) throw new Error("Id registre manquant");
+        return `#${created.registryId}`;
+      });
+      if (!ok) {
+        R.warn("registries.create", G, "Cr\xE9ation Hub \xE9chou\xE9e (r\xE9seau/ping) \u2014 suite registres skip");
+        return created;
+      }
+      await R.run("registries.ping", G, async () => {
+        await bag.Api.pingRegistry(created.registryId);
+        return "OK";
+      });
+      await R.run("registries.repos", G, async () => {
+        const d = await bag.Api.registryRepos(created.registryId, "library", 5);
+        return Array.isArray(d) ? `${d.length}` : "OK";
+      });
+      await R.run("registries.delete", G, async () => {
+        await bag.Api.deleteRegistry(created.registryId);
+        created.registryId = null;
+        return "OK";
+      });
+      return created;
+    }
+    async function runImageApiLifecycle(R) {
+      const G = "Images API";
+      const tag = `wm${Date.now().toString(36)}`;
+      const dfName = `wmtest_df_${tag}`;
+      const imgTag = `wmtest_img_${tag}:test`;
+      const dockerfile = [
+        "FROM alpine:latest",
+        `LABEL wharfmaster.apitest="${tag}"`,
+        'CMD ["true"]'
+      ].join("\n");
+      const created = { dfName: null, imgTag: null };
+      await R.run("images.dockerfile.save", G, async () => {
+        await bag.Api.saveDockerfile(dfName, dockerfile);
+        created.dfName = dfName;
+        return dfName;
+      });
+      await R.run("images.dockerfile.get", G, async () => {
+        const d = await bag.Api.dockerfile(dfName);
+        const content = d?.Content || d?.content || d;
+        if (!String(content).includes("alpine")) throw new Error("contenu inattendu");
+        return "OK";
+      });
+      await R.run("images.dockerfile.list", G, async () => {
+        const list = await bag.Api.dockerfiles();
+        const found = (Array.isArray(list) ? list : []).some((d) => (d.Name || d.name) === dfName);
+        if (!found) throw new Error("absent");
+        return "pr\xE9sent";
+      });
+      await R.run("images.build.api", G, async () => {
+        const res = await bag.Api.buildImage({ Tag: imgTag, Dockerfile: dockerfile });
+        if (!res?.Success) throw new Error(res?.Error || "\xE9chec");
+        created.imgTag = imgTag;
+        return imgTag;
+      });
+      await R.run("images.build.inspect", G, async () => {
+        const eps = await listEndpoints();
+        const local = eps.find((ep) => String(ep.Kind || "").toLowerCase() === "local") || eps[0];
+        if (!local) throw new Error("pas de n\u0153ud");
+        await withEndpoint(epIdOf(local), async () => {
+          await bag.Api.docker(`/images/${encodeURIComponent(imgTag)}/json`);
+        });
+        return "OK";
+      });
+      await R.run("images.build.delete", G, async () => {
+        const eps = await listEndpoints();
+        const local = eps.find((ep) => String(ep.Kind || "").toLowerCase() === "local") || eps[0];
+        if (local) {
+          await withEndpoint(epIdOf(local), async () => {
+            await bag.Api.docker(`/images/${encodeURIComponent(imgTag)}?force=true`, { method: "DELETE" });
+          });
+        }
+        created.imgTag = null;
+        return "rmi";
+      });
+      await R.run("images.dockerfile.delete", G, async () => {
+        await bag.Api.deleteDockerfile(dfName);
+        created.dfName = null;
+        return "OK";
+      });
+      return created;
+    }
+    async function runDockerLifecycle(R, ep, testUser) {
+      const id = epIdOf(ep);
+      const label = epNameOf(ep);
+      const G = `Docker \xB7 ${label}`;
+      const prefix = `ep${id}`;
+      const tag = `wm${Date.now().toString(36)}${id}`;
+      const volName = `wmtest_vol_${tag}`;
+      const netName = `wmtest_net_${tag}`;
+      const ctrName = `wmtest_ctr_${tag}`;
+      const imgTag = `wmtest_img_${tag}:test`;
+      const bindName = `wmtest_bind_${tag}`;
+      const baseImage = "alpine:latest";
       const created = {
+        endpointId: id,
         volume: null,
         networkId: null,
-        containerId: null
+        containerId: null,
+        imgTag: null,
+        bindId: null,
+        shareIds: []
       };
-      await run("auth.me", async () => {
-        const me = await bag.Api.me();
-        return `user=${me.Username || me.username || "?"} role=${me.Role ?? me.role ?? "?"}`;
-      });
-      await run("endpoints.list", async () => {
-        const eps = await bag.Api.endpoints();
-        const n = Array.isArray(eps) ? eps.length : 0;
-        if (!n) throw new Error("Aucun endpoint");
-        return `${n} endpoint(s)`;
-      });
-      const dockerOk = !bag.Api.isAllEndpoints() && !!bag.Api.getEndpointId();
-      if (!dockerOk) {
-        skip("docker.*", "Choisissez un n\u0153ud pr\xE9cis (pas \xAB tous \xBB) pour les tests Docker");
-      }
-      if (dockerOk) {
-        await run("images.ensure", async () => {
+      await withEndpoint(id, async () => {
+        await R.run(`${prefix}.images.ensure`, G, async () => {
           try {
-            await bag.Api.docker(`/images/${encodeURIComponent(imageRef)}/json`);
-            return `${imageRef} d\xE9j\xE0 pr\xE9sente`;
+            await bag.Api.docker(`/images/${encodeURIComponent(baseImage)}/json`);
+            return "pr\xE9sente";
           } catch (_) {
-            await bag.Api.docker(`/images/create?fromImage=alpine&tag=latest`, {
-              method: "POST",
-              body: ""
-            });
-            await bag.Api.docker(`/images/${encodeURIComponent(imageRef)}/json`);
-            return `${imageRef} tir\xE9e`;
+            await bag.Api.docker("/images/create?fromImage=alpine&tag=latest", { method: "POST", body: "" });
+            await bag.Api.docker(`/images/${encodeURIComponent(baseImage)}/json`);
+            return "tir\xE9e";
           }
         });
-        await run("images.list", async () => {
-          const imgs = await bag.Api.docker("/images/json");
-          return `${Array.isArray(imgs) ? imgs.length : 0} image(s)`;
+        await R.run(`${prefix}.images.build`, G, async () => {
+          const df = [`FROM ${baseImage}`, `LABEL wharfmaster.apitest="${tag}"`, 'CMD ["sleep","90"]'].join("\n");
+          const q = new URLSearchParams({ t: imgTag, dockerfile: "Dockerfile", rm: "true", forcerm: "true" });
+          const body = await bag.Api.docker(`/build?${q.toString()}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-tar" },
+            body: makeDockerfileTar(df),
+            text: true
+          });
+          const err = parseBuildLog(body);
+          if (err) throw new Error(err);
+          await bag.Api.docker(`/images/${encodeURIComponent(imgTag)}/json`);
+          created.imgTag = imgTag;
+          return imgTag;
         });
-        await run("volumes.create", async () => {
+        await R.run(`${prefix}.volumes.create`, G, async () => {
           const res = await bag.Api.docker("/volumes/create", {
             method: "POST",
             body: JSON.stringify({
@@ -10130,18 +10619,51 @@ ${title}`;
           created.volume = res?.Name || volName;
           return created.volume;
         });
-        await run("volumes.inspect", async () => {
+        await R.run(`${prefix}.volumes.inspect`, G, async () => {
           const v = await bag.Api.docker(`/volumes/${encodeURIComponent(created.volume)}`);
-          if (!v?.Name) throw new Error("inspect volume vide");
+          if (!v?.Name) throw new Error("vide");
           return v.Name;
         });
-        await run("volumes.delete", async () => {
-          await bag.Api.docker(`/volumes/${encodeURIComponent(created.volume)}`, { method: "DELETE" });
-          const n = created.volume;
-          created.volume = null;
-          return `supprim\xE9 ${n}`;
+        await R.run(`${prefix}.volumes.list`, G, async () => {
+          const list = await bag.Api.docker("/volumes");
+          const vols = Array.isArray(list?.Volumes) ? list.Volumes : [];
+          if (!vols.some((v) => v.Name === created.volume)) throw new Error("absent");
+          return `${vols.length}`;
         });
-        await run("networks.create", async () => {
+        await R.run(`${prefix}.volumes.browse`, G, async () => {
+          await bag.Api.volumeBrowse(created.volume, "/");
+          return "OK";
+        });
+        await R.run(`${prefix}.volumes.write`, G, async () => {
+          await bag.Api.volumeWriteFile(created.volume, "/wmtest_smoke.txt", {
+            Content: "ok",
+            CreateOnly: true
+          });
+          return "\xE9crit";
+        });
+        await R.run(`${prefix}.volumes.read`, G, async () => {
+          const f = await bag.Api.volumeFile(created.volume, "/wmtest_smoke.txt");
+          const content = f?.Content ?? f?.content ?? f;
+          if (!String(content).includes("ok")) throw new Error("contenu KO");
+          return "lu";
+        });
+        await R.run(`${prefix}.volumes.mkdir`, G, async () => {
+          await bag.Api.volumeMkdir(created.volume, "/wmtest_dir");
+          return "OK";
+        });
+        await R.run(`${prefix}.volumes.rename`, G, async () => {
+          await bag.Api.volumeRename(created.volume, "/wmtest_smoke.txt", "/wmtest_renamed.txt");
+          return "OK";
+        });
+        await R.run(`${prefix}.volumes.deleteEntry`, G, async () => {
+          await bag.Api.volumeDeleteEntry(created.volume, "/wmtest_renamed.txt");
+          try {
+            await bag.Api.volumeDeleteEntry(created.volume, "/wmtest_dir");
+          } catch (_) {
+          }
+          return "OK";
+        });
+        await R.run(`${prefix}.networks.create`, G, async () => {
           const res = await bag.Api.docker("/networks/create", {
             method: "POST",
             body: JSON.stringify({
@@ -10152,139 +10674,719 @@ ${title}`;
             })
           });
           created.networkId = res?.Id || netName;
-          return `Id=${bag.shortId?.(created.networkId) || String(created.networkId).slice(0, 12)}`;
+          return String(created.networkId).slice(0, 12);
         });
-        await run("networks.inspect", async () => {
+        await R.run(`${prefix}.networks.inspect`, G, async () => {
           const n = await bag.Api.docker(`/networks/${encodeURIComponent(created.networkId)}`);
-          if (!n?.Name && !n?.Id) throw new Error("inspect r\xE9seau vide");
+          if (!n?.Id && !n?.Name) throw new Error("vide");
           return n.Name || n.Id;
         });
-        await run("networks.delete", async () => {
-          await bag.Api.docker(`/networks/${encodeURIComponent(created.networkId)}`, { method: "DELETE" });
-          created.networkId = null;
-          return "supprim\xE9";
+        await R.run(`${prefix}.networks.list`, G, async () => {
+          const list = await bag.Api.docker("/networks");
+          const nets = Array.isArray(list) ? list : [];
+          if (!nets.some((n) => n.Id === created.networkId || n.Name === netName)) throw new Error("absent");
+          return `${nets.length}`;
         });
-        await run("containers.create", async () => {
+        await R.run(`${prefix}.bind-volumes.create`, G, async () => {
+          const res = await bag.Api.createBindVolume(bindName, `/tmp/${bindName}`);
+          created.bindId = idOf(res);
+          if (!created.bindId) {
+            const list = await bag.Api.bindVolumes();
+            const row = (Array.isArray(list) ? list : []).find((b) => b.Name === bindName);
+            created.bindId = idOf(row);
+          }
+          if (!created.bindId) throw new Error("Id bind manquant");
+          return `#${created.bindId}`;
+        });
+        await R.run(`${prefix}.bind-volumes.list`, G, async () => {
+          const list = await bag.Api.bindVolumes();
+          const found = (Array.isArray(list) ? list : []).some(
+            (b) => Number(idOf(b)) === Number(created.bindId) || b.Name === bindName
+          );
+          if (!found) throw new Error("absent");
+          return "pr\xE9sent";
+        });
+        await R.run(`${prefix}.containers.create`, G, async () => {
           const res = await bag.Api.docker(`/containers/create?name=${encodeURIComponent(ctrName)}`, {
             method: "POST",
             body: JSON.stringify({
-              Image: imageRef,
-              Cmd: ["sleep", "120"],
+              Image: created.imgTag || baseImage,
+              Cmd: ["sleep", "180"],
               Labels: { "wharfmaster.apitest": tag },
-              HostConfig: { AutoRemove: false }
+              HostConfig: { AutoRemove: false, Binds: [`${created.volume}:/wmtest:rw`] },
+              NetworkingConfig: {
+                EndpointsConfig: {
+                  [netName]: { Aliases: ["wmtest"] }
+                }
+              }
             })
           });
           created.containerId = res?.Id;
-          if (!created.containerId) throw new Error("Id conteneur manquant");
+          if (!created.containerId) throw new Error("Id manquant");
           return bag.shortId(created.containerId);
         });
-        await run("containers.start", async () => {
-          await bag.Api.docker(`/containers/${encodeURIComponent(created.containerId)}/start`, {
-            method: "POST",
-            body: ""
+        if (!created.containerId) {
+          R.skip(`${prefix}.containers.*`, G, "Cr\xE9ation conteneur \xE9chou\xE9e \u2014 skip start/logs/exec");
+        } else {
+          await R.run(`${prefix}.containers.start`, G, async () => {
+            await bag.Api.docker(`/containers/${encodeURIComponent(created.containerId)}/start`, {
+              method: "POST",
+              body: ""
+            });
+            return "d\xE9marr\xE9";
           });
-          return "d\xE9marr\xE9";
-        });
-        await run("containers.inspect", async () => {
-          const info = await bag.Api.docker(`/containers/${encodeURIComponent(created.containerId)}/json`);
-          const state2 = info?.State?.Status || "?";
-          return `state=${state2}`;
-        });
-        await run("containers.delete", async () => {
-          await bag.Api.docker(
-            `/containers/${encodeURIComponent(created.containerId)}?force=true`,
-            { method: "DELETE" }
-          );
-          created.containerId = null;
-          return "supprim\xE9 (force)";
-        });
-      }
-      if (created.containerId && dockerOk) {
-        await run("cleanup.container", async () => {
-          await bag.Api.docker(
-            `/containers/${encodeURIComponent(created.containerId)}?force=true`,
-            { method: "DELETE" }
-          );
-          created.containerId = null;
-          return "OK";
-        });
-      }
-      if (created.volume && dockerOk) {
-        await run("cleanup.volume", async () => {
+          await R.run(`${prefix}.containers.inspect`, G, async () => {
+            const info = await bag.Api.docker(`/containers/${encodeURIComponent(created.containerId)}/json`);
+            const mounts = Array.isArray(info?.Mounts) ? info.Mounts : [];
+            if (!mounts.some((m) => m.Name === created.volume || m.Destination === "/wmtest")) {
+              throw new Error("volume non mont\xE9");
+            }
+            const nets = info?.NetworkSettings?.Networks || {};
+            if (!nets[netName]) throw new Error("r\xE9seau non attach\xE9");
+            return `state=${info?.State?.Status || "?"}`;
+          });
+          await R.run(`${prefix}.containers.logs`, G, async () => {
+            const logs = await bag.Api.containerLogs(created.containerId, { tail: 20 });
+            return `${String(logs || "").length} o`;
+          });
+          await R.run(`${prefix}.containers.exec`, G, async () => {
+            const res = await bag.Api.containerExec(
+              created.containerId,
+              "echo wmtest-ok",
+              "/bin/sh",
+              "",
+              { tty: false, timeout: 15 }
+            );
+            const out = String(res?.Stdout || res?.Output || res?.output || "");
+            if (res?.ExitCode != null && Number(res.ExitCode) !== 0) {
+              throw new Error((res?.Stderr || out || "exit " + res.ExitCode).slice(0, 160));
+            }
+            return out.includes("wmtest-ok") ? "echo OK" : `exit=${res?.ExitCode ?? 0}`;
+          });
+          await R.run(`${prefix}.containers.stop`, G, async () => {
+            await bag.Api.docker(`/containers/${encodeURIComponent(created.containerId)}/stop`, {
+              method: "POST",
+              body: ""
+            });
+            return "arr\xEAt\xE9";
+          });
+          await R.run(`${prefix}.containers.start2`, G, async () => {
+            await bag.Api.docker(`/containers/${encodeURIComponent(created.containerId)}/start`, {
+              method: "POST",
+              body: ""
+            });
+            return "red\xE9marr\xE9";
+          });
+          await R.run(`${prefix}.containers.restart`, G, async () => {
+            await bag.Api.docker(`/containers/${encodeURIComponent(created.containerId)}/restart`, {
+              method: "POST",
+              body: ""
+            });
+            return "OK";
+          });
+          if (testUser?.userId) {
+            for (const [kind, key] of [
+              ["container", created.containerId],
+              ["volume", created.volume],
+              ["network", created.networkId]
+            ]) {
+              await R.run(`${prefix}.shares.${kind}`, `Shares \xB7 ${label}`, async () => {
+                const share = await bag.Api.createShare({
+                  Type: kind,
+                  EndpointId: id,
+                  Key: String(key),
+                  GranteeUserId: testUser.userId
+                });
+                const sid = idOf(share);
+                if (!sid) throw new Error("Id partage manquant");
+                created.shareIds.push(sid);
+                await bag.Api.deleteShare(sid);
+                created.shareIds = created.shareIds.filter((x) => x !== sid);
+                return `#${sid}`;
+              });
+            }
+          }
+          await R.run(`${prefix}.containers.delete`, G, async () => {
+            await bag.Api.docker(
+              `/containers/${encodeURIComponent(created.containerId)}?force=true`,
+              { method: "DELETE" }
+            );
+            created.containerId = null;
+            return "OK";
+          });
+        }
+        await R.run(`${prefix}.volumes.delete`, G, async () => {
           await bag.Api.docker(`/volumes/${encodeURIComponent(created.volume)}`, { method: "DELETE" });
           created.volume = null;
           return "OK";
         });
-      }
-      if (created.networkId && dockerOk) {
-        await run("cleanup.network", async () => {
+        await R.run(`${prefix}.networks.delete`, G, async () => {
           await bag.Api.docker(`/networks/${encodeURIComponent(created.networkId)}`, { method: "DELETE" });
           created.networkId = null;
           return "OK";
         });
-      }
-      return steps;
+        await R.run(`${prefix}.bind-volumes.delete`, G, async () => {
+          await bag.Api.deleteBindVolume(created.bindId);
+          created.bindId = null;
+          return "OK";
+        });
+        if (created.imgTag) {
+          await R.run(`${prefix}.images.delete`, G, async () => {
+            await bag.Api.docker(`/images/${encodeURIComponent(created.imgTag)}?force=true`, { method: "DELETE" });
+            created.imgTag = null;
+            return "rmi";
+          });
+        }
+      });
+      return created;
     }
-    bag.viewDiagnosticsApi = async function viewDiagnosticsApi() {
+    async function runStackLifecycle(R, ep, testUser) {
+      const id = epIdOf(ep);
+      const label = epNameOf(ep);
+      const G = `Stack \xB7 ${label}`;
+      const prefix = `ep${id}`;
+      const tag = `wm${Date.now().toString(36)}${id}`;
+      const stackName = `wmtest_stk_${tag}`;
+      const compose = [
+        "services:",
+        "  wmtest:",
+        "    image: alpine:latest",
+        '    command: ["sleep", "180"]',
+        "    labels:",
+        `      wharfmaster.apitest: "${tag}"`
+      ].join("\n");
+      const created = {
+        endpointId: id,
+        stackId: null,
+        stackName: null,
+        shareId: null,
+        scheduleId: null
+      };
+      await withEndpoint(id, async () => {
+        const ok = await R.run(`${prefix}.stacks.create`, G, async () => {
+          const res = await bag.Api.createStack(stackName, compose, [], true);
+          created.stackId = idOf(res);
+          created.stackName = res?.Name || stackName;
+          if (!created.stackId) throw new Error("Id manquant");
+          return `#${created.stackId}`;
+        });
+        if (!ok) return;
+        await R.run(`${prefix}.stacks.get`, G, async () => {
+          const s = await bag.Api.stack(created.stackId);
+          return s?.Name || "OK";
+        });
+        await R.run(`${prefix}.stacks.file`, G, async () => {
+          const f = await bag.Api.stackFile(created.stackId);
+          if (!String(f?.StackFileContent || "").includes("alpine")) throw new Error("compose KO");
+          return "OK";
+        });
+        await R.run(`${prefix}.stacks.update`, G, async () => {
+          await bag.Api.updateStack(created.stackId, compose, [], false);
+          return "noop OK";
+        });
+        await R.run(`${prefix}.stacks.stop`, G, async () => {
+          await bag.Api.stopStack(created.stackId);
+          return "OK";
+        });
+        await R.run(`${prefix}.stacks.start`, G, async () => {
+          await bag.Api.startStack(created.stackId);
+          return "OK";
+        });
+        await R.run(`${prefix}.stacks.restart`, G, async () => {
+          await bag.Api.restartStack(created.stackId);
+          return "OK";
+        });
+        await R.run(`${prefix}.stacks.updates`, G, async () => {
+          await bag.Api.stackUpdate(created.stackId, false);
+          return "OK";
+        });
+        await R.run(`${prefix}.stacks.export`, G, async () => {
+          const token = bag.Api.getToken?.();
+          const q = new URLSearchParams({ access_token: token });
+          return softProbeDownload(
+            `/api/stacks/${encodeURIComponent(created.stackId)}/export?${q}`,
+            "application/zip"
+          );
+        });
+        await R.run(`${prefix}.schedules.create`, `Schedules \xB7 ${label}`, async () => {
+          const res = await bag.Api.createSchedule({
+            StackId: created.stackId,
+            Name: `wmtest_sched_${tag}`,
+            Action: "restart",
+            Cron: "0 3 1 1 *",
+            Timezone: "UTC"
+          });
+          created.scheduleId = idOf(res);
+          if (!created.scheduleId) throw new Error("Id schedule manquant");
+          return `#${created.scheduleId}`;
+        });
+        if (created.scheduleId) {
+          await R.run(`${prefix}.schedules.update`, `Schedules \xB7 ${label}`, async () => {
+            await bag.Api.updateSchedule(created.scheduleId, { Enabled: false });
+            return "disabled";
+          });
+          await R.run(`${prefix}.schedules.list`, `Schedules \xB7 ${label}`, async () => {
+            const d = await bag.Api.schedules({ stackId: created.stackId });
+            const items = Array.isArray(d) ? d : d?.Items || [];
+            if (!items.some((s) => idOf(s) === created.scheduleId)) throw new Error("absent");
+            return `${items.length}`;
+          });
+          await R.run(`${prefix}.schedules.run`, `Schedules \xB7 ${label}`, async () => {
+            await bag.Api.runSchedule(created.scheduleId);
+            return "run OK";
+          });
+          await R.run(`${prefix}.schedules.delete`, `Schedules \xB7 ${label}`, async () => {
+            await bag.Api.deleteSchedule(created.scheduleId);
+            created.scheduleId = null;
+            return "OK";
+          });
+        }
+        if (testUser?.userId) {
+          await R.run(`${prefix}.shares.stack`, `Shares \xB7 ${label}`, async () => {
+            const share = await bag.Api.createShare({
+              Type: "stack",
+              EndpointId: id,
+              Key: String(created.stackId),
+              GranteeUserId: testUser.userId
+            });
+            created.shareId = idOf(share);
+            if (!created.shareId) throw new Error("Id manquant");
+            const listed = await bag.Api.listShares("stack", id, String(created.stackId));
+            const n = Array.isArray(listed) ? listed.length : listed?.Items?.length ?? 0;
+            await bag.Api.deleteShare(created.shareId);
+            created.shareId = null;
+            return `cr\xE9\xE9+list\xE9(${n})+supprim\xE9`;
+          });
+        }
+        await R.run(`${prefix}.stacks.delete`, G, async () => {
+          await bag.Api.deleteStack(created.stackId);
+          created.stackId = null;
+          return "OK";
+        });
+      });
+      return created;
+    }
+    async function runBackupSoft(R) {
+      await R.run("backup.zip", "Backup", async () => softProbeDownload("/api/backup", "application/zip"));
+      await R.run("backup.sqlite", "Backup", async () => softProbeDownload("/api/backup?format=sqlite", "application/x-sqlite3"));
+    }
+    async function cleanupLeftovers(R, leftovers) {
+      const G = "Cleanup";
+      for (const st of leftovers.stacks || []) {
+        await withEndpoint(st.endpointId, async () => {
+          if (st.scheduleId) {
+            await R.run(`cleanup.ep${st.endpointId}.schedule`, G, async () => {
+              await bag.Api.deleteSchedule(st.scheduleId);
+              st.scheduleId = null;
+              return "OK";
+            });
+          }
+          if (st.shareId) {
+            await R.run(`cleanup.ep${st.endpointId}.share`, G, async () => {
+              await bag.Api.deleteShare(st.shareId);
+              st.shareId = null;
+              return "OK";
+            });
+          }
+          if (st.stackId) {
+            await R.run(`cleanup.ep${st.endpointId}.stack`, G, async () => {
+              await bag.Api.deleteStack(st.stackId);
+              st.stackId = null;
+              return "OK";
+            });
+          }
+        });
+      }
+      for (const d of leftovers.docker || []) {
+        const eid = d.endpointId;
+        await withEndpoint(eid, async () => {
+          for (const sid of d.shareIds || []) {
+            await R.run(`cleanup.ep${eid}.share${sid}`, G, async () => {
+              await bag.Api.deleteShare(sid);
+              return "OK";
+            });
+          }
+          d.shareIds = [];
+          if (d.containerId) {
+            await R.run(`cleanup.ep${eid}.container`, G, async () => {
+              await bag.Api.docker(`/containers/${encodeURIComponent(d.containerId)}?force=true`, { method: "DELETE" });
+              d.containerId = null;
+              return "OK";
+            });
+          }
+          if (d.volume) {
+            await R.run(`cleanup.ep${eid}.volume`, G, async () => {
+              await bag.Api.docker(`/volumes/${encodeURIComponent(d.volume)}`, { method: "DELETE" });
+              d.volume = null;
+              return "OK";
+            });
+          }
+          if (d.networkId) {
+            await R.run(`cleanup.ep${eid}.network`, G, async () => {
+              await bag.Api.docker(`/networks/${encodeURIComponent(d.networkId)}`, { method: "DELETE" });
+              d.networkId = null;
+              return "OK";
+            });
+          }
+          if (d.bindId) {
+            await R.run(`cleanup.ep${eid}.bind`, G, async () => {
+              await bag.Api.deleteBindVolume(d.bindId);
+              d.bindId = null;
+              return "OK";
+            });
+          }
+          if (d.imgTag) {
+            await R.run(`cleanup.ep${eid}.image`, G, async () => {
+              await bag.Api.docker(`/images/${encodeURIComponent(d.imgTag)}?force=true`, { method: "DELETE" });
+              d.imgTag = null;
+              return "OK";
+            });
+          }
+        });
+      }
+      if (leftovers.registryId) {
+        await R.run("cleanup.registry", G, async () => {
+          await bag.Api.deleteRegistry(leftovers.registryId);
+          leftovers.registryId = null;
+          return "OK";
+        });
+      }
+      if (leftovers.teamId) {
+        await R.run("cleanup.team", G, async () => {
+          await bag.Api.deleteTeam(leftovers.teamId);
+          leftovers.teamId = null;
+          return "OK";
+        });
+      }
+      if (leftovers.aclId) {
+        await R.run("cleanup.acl", G, async () => {
+          await bag.Api.deleteAcl(leftovers.aclId);
+          leftovers.aclId = null;
+          return "OK";
+        });
+      }
+      if (leftovers.imageApi?.imgTag) {
+        const eps = await listEndpoints();
+        const local = eps.find((ep) => String(ep.Kind || "").toLowerCase() === "local") || eps[0];
+        if (local) {
+          await withEndpoint(epIdOf(local), async () => {
+            await R.run("cleanup.images.api", G, async () => {
+              await bag.Api.docker(`/images/${encodeURIComponent(leftovers.imageApi.imgTag)}?force=true`, { method: "DELETE" });
+              leftovers.imageApi.imgTag = null;
+              return "OK";
+            });
+          });
+        }
+      }
+      if (leftovers.imageApi?.dfName) {
+        await R.run("cleanup.dockerfile", G, async () => {
+          await bag.Api.deleteDockerfile(leftovers.imageApi.dfName);
+          leftovers.imageApi.dfName = null;
+          return "OK";
+        });
+      }
+    }
+    async function runFullSuite(onStep) {
+      const R = makeRunner(onStep);
+      const prevEp = bag.Api.getEndpointId();
+      const prevState = bag.state?.endpointId;
+      const leftovers = {
+        docker: [],
+        stacks: [],
+        imageApi: null,
+        registryId: null,
+        teamId: null,
+        aclId: null
+      };
+      let testUser = { userId: null };
+      try {
+        await runSpaChecks(R);
+        await runServerDiagnostics(R);
+        let endpoints = [];
+        await R.run("suite.endpoints", "N\u0153uds", async () => {
+          endpoints = await listEndpoints();
+          if (!endpoints.length) throw new Error("Aucun n\u0153ud");
+          const online = endpoints.filter(epOnline);
+          const offline = endpoints.filter((ep) => !epOnline(ep));
+          return `${online.length} online / ${endpoints.length}` + (offline.length ? ` (skip: ${offline.map((ep) => epNameOf(ep)).join(", ")})` : "");
+        });
+        await runPublicAndReadApis(R, endpoints);
+        testUser = await runUserLifecycle(R);
+        const teams = await runTeamsAcls(R, testUser, endpoints.filter(epOnline));
+        leftovers.teamId = teams.teamId;
+        leftovers.aclId = teams.aclId;
+        const reg = await runRegistryLifecycle(R);
+        leftovers.registryId = reg.registryId;
+        leftovers.imageApi = await runImageApiLifecycle(R);
+        for (const ep of endpoints) {
+          if (!epOnline(ep)) {
+            R.skip(`ep${epIdOf(ep)}.mutatif`, `Docker \xB7 ${epNameOf(ep)}`, "N\u0153ud hors ligne \u2014 skip");
+            R.skip(`ep${epIdOf(ep)}.stack`, `Stack \xB7 ${epNameOf(ep)}`, "N\u0153ud hors ligne \u2014 skip");
+            continue;
+          }
+          leftovers.docker.push(await runDockerLifecycle(R, ep, testUser));
+          leftovers.stacks.push(await runStackLifecycle(R, ep, testUser));
+        }
+        await runBackupSoft(R);
+        await cleanupLeftovers(R, leftovers);
+        if (testUser?.tokenId) {
+          await R.run("cleanup.token", "Cleanup", async () => {
+            await bag.Api.revokeUserToken(testUser.userId, testUser.tokenId);
+            testUser.tokenId = null;
+            return "OK";
+          });
+        }
+        if (testUser?.userId) {
+          await R.run("users.delete", "Utilisateurs", async () => {
+            await bag.Api.deleteUser(testUser.userId);
+            const u = testUser.username;
+            testUser.userId = null;
+            return `supprim\xE9 ${u}`;
+          });
+        }
+      } finally {
+        bag.Api.setEndpointId(prevEp);
+        if (bag.state) bag.state.endpointId = prevState;
+      }
+      return R.steps;
+    }
+    function buildExportPayload(steps, endpointsList = null) {
+      const failed = steps.filter((s) => s.level === "fail");
+      const ok = steps.filter((s) => s.level === "ok");
+      const skip = steps.filter((s) => s.level === "skip" || s.level === "warn");
+      const src = Array.isArray(endpointsList) && endpointsList.length ? endpointsList : bag.state?.endpoints || [];
+      const endpoints = src.map((ep) => ({
+        Id: epIdOf(ep),
+        Name: epNameOf(ep),
+        Kind: ep.Kind || ep.kind || "",
+        Status: ep.Status ?? ep.status ?? null
+      }));
+      return {
+        kind: "wharfmaster-tests-report",
+        version: 1,
+        exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        appVersion: bag.state?.appVersion || null,
+        user: bag.state?.user?.Username || bag.state?.user?.username || null,
+        endpointSelected: bag.Api.getEndpointId?.() ?? null,
+        endpoints,
+        summary: {
+          total: steps.length,
+          ok: ok.length,
+          fail: failed.length,
+          skipWarn: skip.length
+        },
+        failures: failed.map((s) => ({
+          id: s.id,
+          group: s.group || "",
+          detail: s.detail || "",
+          ms: s.ms ?? null
+        })),
+        steps: steps.map((s) => ({
+          id: s.id,
+          group: s.group || "",
+          level: s.level || (s.ok ? "ok" : "fail"),
+          detail: s.html ? "[html]" : s.detail || "",
+          ms: s.ms ?? null
+        }))
+      };
+    }
+    function failuresMarkdown(payload) {
+      const lines = [
+        `# WharfMaster tests \u2014 ${payload.summary.fail} KO / ${payload.summary.total}`,
+        `Export: ${payload.exportedAt}`,
+        `App: ${payload.appVersion || "?"} \u2014 user: ${payload.user || "?"}`,
+        "",
+        "## \xC9checs"
+      ];
+      if (!payload.failures.length) {
+        lines.push("_Aucun \xE9chec._");
+      } else {
+        for (const f of payload.failures) {
+          lines.push(`- \`${f.id}\` (${f.group || "?"}) \u2014 ${f.detail}`);
+        }
+      }
+      lines.push("", "## N\u0153uds");
+      for (const ep of payload.endpoints || []) {
+        lines.push(`- #${ep.Id} ${ep.Name} (${ep.Kind}) status=${ep.Status}`);
+      }
+      lines.push("", "_Joindre aussi le JSON complet si possible._");
+      return lines.join("\n");
+    }
+    function downloadText(filename, text, mime) {
+      const blob = new Blob([text], { type: mime || "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noopener";
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(url);
+      }, 1500);
+    }
+    bag.viewTests = async function viewTests() {
       if (Number(bag.state.user?.Role) !== 1) {
         location.hash = "#settings";
         return;
       }
-      const epLabel = bag.Api.isAllEndpoints() ? "tous les n\u0153uds (Docker skip)" : bag.endpointLabel?.(bag.Api.getEndpointId()) || `endpoint #${bag.Api.getEndpointId()}`;
-      bag.root.innerHTML = bag.shell("Tests API", `
-      ${bag.pageHeader("Tests API Docker", false)}
-      ${bag.settingsSubnav("settings/diagnostics/api")}
-      <div class="panel" style="max-width:860px;margin-bottom:16px">
-        <div class="section-title" style="margin-top:0">Cycle cr\xE9ation \u2192 suppression</div>
+      let epCountLabel = "\u2026";
+      try {
+        const eps = await listEndpoints();
+        epCountLabel = eps.length ? eps.map((ep) => epNameOf(ep)).join(", ") : "aucun n\u0153ud";
+      } catch (_) {
+        epCountLabel = "indisponible";
+      }
+      let lastPayload = null;
+      bag.root.innerHTML = bag.shell("Tests", `
+      ${bag.pageHeader("Tests", false)}
+      ${bag.settingsSubnav("settings/tests")}
+      <div class="panel" style="max-width:900px;margin-bottom:16px">
+        <div class="section-title" style="margin-top:0">Suite compl\xE8te</div>
         <p class="muted" style="margin:0 0 10px">
-          V\xE9rifie le proxy Docker Engine (via endpoints Portainer) : image, volume, r\xE9seau, conteneur.
-          Pas de stacks Compose ni d\u2019utilisateurs (hors API Docker).
-          Chaque ressource cr\xE9\xE9e est <strong>supprim\xE9e</strong> ensuite (pr\xE9fixe <code>apitest_*</code>).
+          Couvre les options s\xFBres : liens, APIs publiques/lecture, users+tokens+passwd,
+          \xE9quipes+ACL, registres, Dockerfile/build, et sur <strong>chaque n\u0153ud</strong>
+          image build, volume (browse/write), r\xE9seau, bind-volume, conteneur (logs/exec/stop/restart),
+          partages, stack (update/restart/export/schedule), CVE soft, backup.
+          Pr\xE9fixe <code>wmtest_*</code> \u2014 nettoyage en fin de suite.
         </p>
         <p class="muted" style="margin:0 0 14px">
-          N\u0153ud courant : <strong>${bag.esc(epLabel)}</strong>
+          N\u0153uds : <strong>${bag.esc(epCountLabel)}</strong>
         </p>
-        <div class="toolbar" style="margin:0">
-          <button type="button" class="btn btn-primary" id="api-smoke-run">Lancer la suite API</button>
-          <span class="muted" id="api-smoke-status" style="margin-left:12px"></span>
+        <div class="toolbar" style="margin:0;flex-wrap:wrap;gap:8px">
+          <button type="button" class="btn btn-primary" id="tests-run">Lancer la suite</button>
+          <button type="button" class="btn" id="tests-export-json" disabled title="Apr\xE8s une ex\xE9cution">Exporter JSON</button>
+          <button type="button" class="btn" id="tests-export-md" disabled title="Apr\xE8s une ex\xE9cution">Exporter KO (.md)</button>
+          <button type="button" class="btn" id="tests-copy-ko" disabled title="Copier les \xE9checs pour correction">Copier les KO</button>
+          <span class="muted" id="tests-status" style="margin-left:4px"></span>
         </div>
+        <p class="muted" style="margin:10px 0 0;font-size:0.92em">
+          En cas d\u2019\xE9checs : <strong>Exporter JSON</strong> ou <strong>Copier les KO</strong> pour les coller dans le chat et demander une correction.
+        </p>
       </div>
-      <div id="api-smoke-report">${renderSteps([])}</div>
-    `, { subtitle: "Smoke test destructif contr\xF4l\xE9" });
-      const btn = document.getElementById("api-smoke-run");
-      const status = document.getElementById("api-smoke-status");
-      const report = document.getElementById("api-smoke-report");
+      <div id="tests-report">${renderSteps([])}</div>
+    `, { subtitle: "Smoke exhaustif admin" });
+      const btn = document.getElementById("tests-run");
+      const btnJson = document.getElementById("tests-export-json");
+      const btnMd = document.getElementById("tests-export-md");
+      const btnCopy = document.getElementById("tests-copy-ko");
+      const status = document.getElementById("tests-status");
+      const report = document.getElementById("tests-report");
+      const enableExport = (payload) => {
+        lastPayload = payload;
+        btnJson.disabled = false;
+        btnMd.disabled = false;
+        btnCopy.disabled = false;
+      };
+      const stamp = () => {
+        const d = /* @__PURE__ */ new Date();
+        const p = (n) => String(n).padStart(2, "0");
+        return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+      };
+      btnJson.onclick = () => {
+        if (!lastPayload) return;
+        downloadText(
+          `wharfmaster-tests-${stamp()}.json`,
+          JSON.stringify(lastPayload, null, 2),
+          "application/json;charset=utf-8"
+        );
+        status.textContent = "JSON t\xE9l\xE9charg\xE9";
+      };
+      btnMd.onclick = () => {
+        if (!lastPayload) return;
+        downloadText(
+          `wharfmaster-tests-ko-${stamp()}.md`,
+          failuresMarkdown(lastPayload),
+          "text/markdown;charset=utf-8"
+        );
+        status.textContent = "Rapport KO (.md) t\xE9l\xE9charg\xE9";
+      };
+      btnCopy.onclick = async () => {
+        if (!lastPayload) return;
+        const text = failuresMarkdown(lastPayload);
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            ta.remove();
+          }
+          status.textContent = lastPayload.summary.fail ? `${lastPayload.summary.fail} KO copi\xE9s \u2014 collez-les dans le chat` : "Rapport copi\xE9 (0 KO)";
+        } catch (err) {
+          status.textContent = "Copie impossible \u2014 utilisez Exporter";
+        }
+      };
       btn.onclick = async () => {
         if (btn.dataset.busy === "1") return;
-        const ok = window.confirm(
-          "Lancer les tests API ?\nDes ressources temporaires seront cr\xE9\xE9es puis supprim\xE9es sur le n\u0153ud s\xE9lectionn\xE9."
-        );
-        if (!ok) return;
+        if (!window.confirm(
+          "Lancer la suite compl\xE8te ?\nRessources wmtest_* cr\xE9\xE9es/supprim\xE9es sur TOUS les n\u0153uds (peut prendre plusieurs minutes)."
+        )) return;
         btn.dataset.busy = "1";
         btn.disabled = true;
+        btnJson.disabled = true;
+        btnMd.disabled = true;
+        btnCopy.disabled = true;
+        lastPayload = null;
         status.textContent = "Ex\xE9cution\u2026";
         report.innerHTML = renderSteps([]);
         try {
-          const steps = await runApiLifecycleSmoke((live) => {
+          const steps = await runFullSuite((live) => {
             report.innerHTML = renderSteps(live);
             status.textContent = `\xC9tape ${live.length}\u2026`;
           });
-          const failed = steps.filter((s) => s.level === "fail").length;
-          status.textContent = failed === 0 ? `Termin\xE9 \u2014 ${steps.length} \xE9tapes OK` : `Termin\xE9 \u2014 ${failed} \xE9chec(s) / ${steps.length}`;
+          let epsSnap = [];
+          try {
+            epsSnap = await listEndpoints();
+          } catch (_) {
+          }
+          const payload = buildExportPayload(steps, epsSnap);
+          enableExport(payload);
+          const failed = payload.summary.fail;
+          status.textContent = failed === 0 ? `Termin\xE9 \u2014 ${payload.summary.total} \xE9tapes OK` : `Termin\xE9 \u2014 ${failed} \xE9chec(s) / ${payload.summary.total} \u2014 exportez ou copiez les KO`;
           report.innerHTML = renderSteps(steps);
         } catch (err) {
           status.textContent = "Erreur";
           report.innerHTML = `<div class="error-box">${bag.esc(err.message || String(err))}</div>`;
+          enableExport(buildExportPayload([{
+            id: "suite.crash",
+            group: "Suite",
+            ok: false,
+            level: "fail",
+            detail: err.message || String(err),
+            ms: null
+          }]));
         } finally {
           btn.disabled = false;
           delete btn.dataset.busy;
         }
       };
     };
+    bag.viewDiagnostics = bag.viewTests;
+    bag.viewDiagnosticsApi = bag.viewTests;
+  }
+
+  // public/assets/js/src/views/diagnostics.js
+  function install15() {
+    if (typeof bag.viewTests === "function") {
+      bag.viewDiagnostics = bag.viewTests;
+    }
+  }
+
+  // public/assets/js/src/views/diagnostics-api.js
+  function install16() {
+    if (typeof bag.viewTests === "function") {
+      bag.viewDiagnosticsApi = bag.viewTests;
+    }
   }
 
   // public/assets/js/src/views/docs.js
-  function install16() {
+  function install17() {
     bag.renderMarkdown = function renderMarkdown(src) {
       const lines = String(src || "").replace(/\r\n/g, "\n").split("\n");
       const html = [];
@@ -10435,7 +11537,7 @@ ${title}`;
       </div>
     `, { subtitle: "Guide produit & API" });
       try {
-        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.7", { headers: { Accept: "text/plain" } });
+        const res = await fetch("/docs/DOCUMENTATION.md?v=2.3.8", { headers: { Accept: "text/plain" } });
         if (!res.ok) throw new Error("Impossible de charger la documentation (" + res.status + ")");
         const md = await res.text();
         const el = document.getElementById("docs-body");
@@ -10453,7 +11555,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/activity.js
-  function install17() {
+  function install18() {
     bag.viewActivity = async function viewActivity() {
       const actionFilter = bag.state.filters.activityAction || "";
       let data;
@@ -10531,7 +11633,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/users.js
-  function install18() {
+  function install19() {
     bag.viewUsers = async function viewUsers() {
       const users = await bag.Api.users();
       const list = users || [];
@@ -10698,7 +11800,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/profile.js
-  function install19() {
+  function install20() {
     bag.viewProfile = async function viewProfile() {
       const me = bag.state.user || {};
       const userId = Number(me.Id);
@@ -10916,7 +12018,7 @@ ${title}`;
   }
 
   // public/assets/js/src/views/teams.js
-  function install20() {
+  function install21() {
     bag.viewTeams = async function viewTeams() {
       const [teamsRes, users] = await Promise.all([
         bag.Api.teams(true),
@@ -11173,6 +12275,7 @@ ${title}`;
   install18();
   install19();
   install20();
+  install21();
   window.addEventListener("hashchange", () => bag.route());
   bag.boot();
 })();

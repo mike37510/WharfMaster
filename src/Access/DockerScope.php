@@ -267,6 +267,41 @@ final class DockerScope
             unset($hc);
         }
 
+        // NetworkingConfig.EndpointsConfig: each value must be an object, never [].
+        if (isset($body['NetworkingConfig']) && is_array($body['NetworkingConfig'])) {
+            $nc = &$body['NetworkingConfig'];
+            if (isset($nc['EndpointsConfig'])) {
+                if (!is_array($nc['EndpointsConfig']) || $nc['EndpointsConfig'] === [] || array_is_list($nc['EndpointsConfig'])) {
+                    unset($nc['EndpointsConfig']);
+                } else {
+                    foreach ($nc['EndpointsConfig'] as $netName => $cfg) {
+                        if ($cfg === null || $cfg === [] || !is_array($cfg)) {
+                            $nc['EndpointsConfig'][$netName] = new \stdClass();
+                            continue;
+                        }
+                        if (array_is_list($cfg)) {
+                            $nc['EndpointsConfig'][$netName] = new \stdClass();
+                            continue;
+                        }
+                        // Empty nested maps (IPAMConfig, etc.) → objects
+                        foreach ($cfg as $k => $v) {
+                            if ($v === []) {
+                                $cfg[$k] = new \stdClass();
+                            }
+                        }
+                        $nc['EndpointsConfig'][$netName] = $cfg === [] ? new \stdClass() : $cfg;
+                    }
+                }
+            }
+            if (($nc['EndpointsConfig'] ?? null) === [] || ($nc['EndpointsConfig'] ?? null) === null) {
+                unset($nc['EndpointsConfig']);
+            }
+            if ($nc === []) {
+                unset($body['NetworkingConfig']);
+            }
+            unset($nc);
+        }
+
         return $body;
     }
 

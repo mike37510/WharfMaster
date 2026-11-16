@@ -867,38 +867,59 @@ export function install() {
     bag.restoreListFocus();
   }
 
+  bag.paintContainerUpdateSlot = function paintContainerUpdateSlot(id, u, meta = {}) {
+    const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
+    if (!slot) return;
+    const row = u || {};
+    const ver = bag.formatImageUpdateVersions(row);
+    let title = ver || row.Detail || row.Error || 'Aucun contrôle';
+    if (row.Image) title = `${row.Image}\n${title}`;
+    if (meta.fromCache && meta.checkedAt) {
+      title += `\n(cache · vérifié ${new Date(meta.checkedAt * 1000).toLocaleString()})`;
+    }
+    slot.innerHTML = bag.stackUpdatePill(row.Status, row.UpdateCount || 0, title, {
+      action: 'container',
+      id,
+      dotOnly: true,
+    });
+    bag.bindImageUpdateActions(slot);
+  }
+
   bag.loadContainerUpdateIndicators = async function loadContainerUpdateIndicators(refresh = false) {
+    const pass = bag.beginUpdateIndicatorsPass();
     if (!refresh) bag.paintCachedUpdateIndicators('containers', 'data-cupd');
+    const ids = bag.collectUpdateSlotIds('data-cupd');
+    if (!ids.length) return;
+    const map = { ...(bag.readImageUpdateCache('containers') || {}) };
     try {
-      const data = await bag.Api.containerUpdates(!!refresh);
-      const map = data?.Updates || {};
-      bag.writeImageUpdateCache('containers', map);
-      const fromCache = !!data?.FromCache;
-      const checkedAt = Number(data?.CheckedAt || 0);
-      Object.keys(map).forEach((id) => {
-        const slot = bag.root.querySelector(`[data-cupd="${CSS.escape(String(id))}"]`);
-        if (!slot) return;
-        const u = map[id] || {};
-        const ver = bag.formatImageUpdateVersions(u);
-        let title = ver || u.Detail || u.Error || 'Aucun contrôle';
-        if (u.Image) title = `${u.Image}\n${title}`;
-        if (fromCache && checkedAt) {
-          title += `\n(cache · vérifié ${new Date(checkedAt * 1000).toLocaleString()})`;
+      // Per-container checks so each pastille paints as soon as its image is verified
+      // (visible page first). Concurrency keeps registry/Docker load reasonable.
+      await bag.runPool(ids, 5, async (id) => {
+        if (!bag.isUpdateIndicatorsPass(pass)) return;
+        try {
+          const u = await bag.Api.containerUpdateStatus(id, !!refresh);
+          if (!bag.isUpdateIndicatorsPass(pass)) return;
+          map[id] = u || {};
+          bag.writeImageUpdateCache('containers', map);
+          bag.paintContainerUpdateSlot(id, map[id]);
+        } catch (err) {
+          if (!bag.isUpdateIndicatorsPass(pass)) return;
+          map[id] = {
+            Status: 'unknown',
+            UpdateCount: 0,
+            Checked: 0,
+            Detail: err?.message || 'Contrôle indisponible',
+            Error: err?.message || 'Contrôle indisponible',
+          };
+          bag.paintContainerUpdateSlot(id, map[id]);
         }
-        slot.innerHTML = bag.stackUpdatePill(u.Status, u.UpdateCount || 0, title, {
-          action: 'container',
-          id,
-          dotOnly: true,
-        });
       });
+    } finally {
+      if (!bag.isUpdateIndicatorsPass(pass)) return;
+      bag.writeImageUpdateCache('containers', map);
       bag.root.querySelectorAll('[data-cupd] .img-upd.is-loading').forEach((el) => {
         el.className = 'img-upd is-unknown img-upd-dot-only';
         el.title = 'Contrôle indisponible';
-      });
-      bag.bindImageUpdateActions(bag.root);
-    } catch {
-      bag.root.querySelectorAll('[data-cupd]').forEach((slot) => {
-        slot.innerHTML = bag.stackUpdatePill('unknown', 0, 'Contrôle indisponible', { dotOnly: true });
       });
     }
   }

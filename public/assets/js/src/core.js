@@ -7,8 +7,24 @@ export function installCore() {
   bag.root = document.getElementById('app');
   bag.THEME_KEY = 'dm_theme';
   bag.SIDEBAR_KEY = 'wm_sidebar_collapsed';
+  bag.PAGE_SIZE_KEY = 'dm_page_size';
+  bag.PAGE_SIZES = [10, 20, 50, 100, 200];
 
   bag.THEMES = ['dark', 'aurora', 'beacon', 'light'];
+
+  bag.readPageSize = function readPageSize() {
+    const n = parseInt(localStorage.getItem(bag.PAGE_SIZE_KEY) || '', 10);
+    if (bag.PAGE_SIZES.includes(n)) return n;
+    return 20;
+  }
+
+  bag.setPageSize = function setPageSize(size) {
+    const n = parseInt(size, 10);
+    const v = bag.PAGE_SIZES.includes(n) ? n : 20;
+    bag.state.pageSize = v;
+    localStorage.setItem(bag.PAGE_SIZE_KEY, String(v));
+    return v;
+  }
 
   bag.readTheme = function readTheme() {
     const saved = localStorage.getItem(bag.THEME_KEY);
@@ -80,7 +96,7 @@ export function installCore() {
       networks: { key: 'name', dir: 'asc' },
       stacks: { key: 'name', dir: 'asc' },
     },
-    pageSize: 20,
+    pageSize: bag.readPageSize(),
     theme: bag.readTheme(),
     sidebarCollapsed: bag.readSidebarCollapsed(),
     containerTab: 'overview',
@@ -661,9 +677,12 @@ export function installCore() {
       else if (bag.state.route === 'profile') await bag.viewProfile();
       else if (bag.state.route === 'settings' || bag.state.route === 'settings/') await bag.viewSettings();
       else if (bag.state.route === 'settings/auth') await bag.viewSettingsAuth();
-      else if (bag.state.route === 'settings/diagnostics/api' || bag.state.route === 'settings/diagnostics') {
-        location.hash = '#settings';
-        return;
+      else if (
+        bag.state.route === 'settings/tests'
+        || bag.state.route === 'settings/diagnostics'
+        || bag.state.route === 'settings/diagnostics/api'
+      ) {
+        await bag.viewTests();
       }
       else if (bag.state.route === 'users') {
         if (Number(bag.state.user?.Role) !== 1) {
